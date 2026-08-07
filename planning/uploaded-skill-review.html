@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pdf-bilingual-annotator 上传 skill 审计</title>
+  <style>
+    :root{--bg:#0d1117;--panel:#151b23;--panel2:#1b2430;--ink:#edf2f7;--muted:#9aa8b9;--line:#2c3847;--lime:#b5e853;--red:#ff6b6b;--amber:#ffc857;--blue:#72b7ff}
+    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--ink);font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;line-height:1.65}a{color:var(--blue);text-underline-offset:3px}
+    .wrap{width:min(1160px,calc(100% - 36px));margin:auto}header{padding:68px 0 42px;border-bottom:1px solid var(--line);background:radial-gradient(circle at 82% 10%,rgba(181,232,83,.12),transparent 28%),linear-gradient(160deg,#0d1117,#121a24)}
+    .eyebrow{font:700 12px/1.2 ui-monospace,Consolas,monospace;letter-spacing:.16em;color:var(--lime);text-transform:uppercase}.hero{display:grid;grid-template-columns:1fr 330px;gap:36px;align-items:end}h1{font-size:clamp(34px,5vw,58px);line-height:1.08;margin:12px 0 18px}header p{font-size:17px;color:#bdc8d5;max-width:780px}
+    .scorebox{border:1px solid var(--line);border-radius:16px;background:rgba(21,27,35,.88);padding:22px}.score{font-size:54px;line-height:1;color:var(--amber);font-weight:800}.scorebox span{color:var(--muted);font-size:13px}.bar{height:8px;background:#27313c;border-radius:99px;overflow:hidden;margin-top:16px}.bar i{display:block;width:56%;height:100%;background:linear-gradient(90deg,var(--red),var(--amber),var(--lime))}
+    nav{position:sticky;top:0;z-index:3;background:rgba(13,17,23,.94);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}nav .wrap{display:flex;gap:22px;overflow:auto;padding:12px 0;white-space:nowrap}nav a{text-decoration:none;color:#cad4df;font-size:14px}
+    main{padding:42px 0 70px}section{margin-bottom:50px}h2{font-size:27px;margin:0 0 18px}h3{font-size:18px;margin:0 0 8px}.lead{color:#b0bdca;max-width:900px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.card{border:1px solid var(--line);border-radius:16px;background:var(--panel);padding:22px}.card p{color:#b7c2cf;margin:8px 0}.card code{color:var(--lime)}
+    .tag{display:inline-flex;border:1px solid var(--line);border-radius:999px;padding:3px 9px;font-size:12px;font-weight:700;margin:0 5px 5px 0}.ok{color:var(--lime);border-color:#47642e}.risk{color:var(--red);border-color:#71383d}.warn{color:var(--amber);border-color:#6d5931}.info{color:var(--blue);border-color:#315273}
+    .flow{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}.step{position:relative;border:1px solid var(--line);background:var(--panel);border-radius:14px;padding:17px}.step b{display:block;color:var(--lime);margin-bottom:5px}.step:not(:last-child):after{content:"→";position:absolute;right:-10px;top:35%;z-index:2;color:var(--amber)}
+    .tablebox{overflow:auto;border:1px solid var(--line);border-radius:16px}table{border-collapse:collapse;width:100%;min-width:930px;background:var(--panel)}th,td{padding:14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;font-size:14px}th{background:var(--panel2);color:#cbd5df;font-size:12px;letter-spacing:.05em}tr:last-child td{border-bottom:0}.sev{font-family:ui-monospace,Consolas,monospace;font-weight:800}.p0{color:var(--red)}.p1{color:var(--amber)}.p2{color:var(--blue)}
+    .finding{display:grid;grid-template-columns:72px 1fr;gap:16px;border-top:1px solid var(--line);padding:20px 0}.finding:first-child{border-top:0}.finding .num{font:800 28px/1 ui-monospace,Consolas,monospace;color:#445366}.finding ul{margin:8px 0;padding-left:19px;color:#b7c2cf}.finding li{margin:5px 0}
+    .callout{border-left:4px solid var(--amber);padding:15px 18px;background:#211e17;border-radius:0 12px 12px 0;color:#d9d1bf}.callout.red{border-color:var(--red);background:#25191c}.callout.green{border-color:var(--lime);background:#182016}.mono{font-family:ui-monospace,Consolas,monospace;font-size:13px;color:#cbd4df;background:#0a0e13;border:1px solid var(--line);padding:16px;border-radius:12px;overflow:auto;white-space:pre-wrap}
+    .priority{display:grid;grid-template-columns:repeat(3,1fr);gap:15px}.priority article{border-top:4px solid var(--red)}.priority article:nth-child(2){border-color:var(--amber)}.priority article:nth-child(3){border-color:var(--blue)}.priority ol{padding-left:20px;color:#bec8d3}.priority li{margin:8px 0}
+    footer{border-top:1px solid var(--line);padding:28px 0 48px;color:var(--muted)}
+    @media(max-width:850px){.hero,.grid{grid-template-columns:1fr}.scorebox{max-width:360px}.flow{grid-template-columns:1fr 1fr}.step:not(:last-child):after{display:none}.priority{grid-template-columns:1fr}}
+    @media(max-width:520px){.wrap{width:min(100% - 24px,1160px)}.flow{grid-template-columns:1fr}.finding{grid-template-columns:46px 1fr}.card{padding:18px}}
+    @media print{nav{display:none}body{background:#fff;color:#111}.card,.step,table{background:#fff;color:#111}.lead,.card p,.finding ul,.priority ol{color:#333}.scorebox{background:#fff}.card,.step,.tablebox{break-inside:avoid}}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap hero">
+      <div><div class="eyebrow">Code & workflow audit</div><h1>方向正确，<br>离可靠交付还有一整层系统设计</h1><p>审计对象：上传的 <b>pdf-bilingual-annotator.zip</b>。结论基于 SKILL.md、约 1,099 行 Python 主脚本及压缩包结构的静态检查；未修改原压缩包，未调用翻译 API，也未生成批注 PDF。</p></div>
+      <div class="scorebox"><div class="score">56</div><span>/ 100 · 原型可取，暂不宜直接用于生产</span><div class="bar"><i></i></div></div>
+    </div>
+  </header>
+  <nav><div class="wrap"><a href="#summary">结论</a><a href="#good">可取之处</a><a href="#flow">现有流程</a><a href="#findings">问题清单</a><a href="#priority">改进优先级</a><a href="#reuse">复用边界</a></div></nav>
+  <main class="wrap">
+    <section id="summary">
+      <h2>审计结论</h2>
+      <div class="grid">
+        <div class="card"><span class="tag ok">值得保留</span><h3>它已经验证了“原页旁注”这条路线</h3><p>目标格式采用红色 FreeText，并实现页面分类、文字提取、OCR、批量翻译和空间搜索。作为概念验证，它比“全文替换式 PDF 翻译器”更贴近本项目。</p></div>
+        <div class="card"><span class="tag risk">不能直接上线</span><h3>缺少业务闭环和失败边界</h3><p>没有术语表、服装选择规则、逐项审核、结构化响应、可靠重试、审计记录和最终重叠校验。API 或排版失败时可能静默产出不完整文件。</p></div>
+      </div>
+      <p class="callout red"><b>最关键判断：</b>不要在这一个脚本上继续堆判断。保留有价值的算法思路，但将未来实现拆为解析、规则、翻译、审核、坐标写入和质量门禁六个明确模块。</p>
+    </section>
+
+    <section id="good">
+      <h2>可取之处</h2>
+      <div class="grid">
+        <article class="card"><span class="tag ok">目标格式</span><h3>FreeText 方向与新需求一致</h3><p>脚本使用 PyMuPDF 创建红色 FreeText，而不是直接替换英文内容。这为“保留原文、允许业务员后改”提供了正确基础。</p></article>
+        <article class="card"><span class="tag ok">多模态</span><h3>按页面类型采用不同策略</h3><p>存在 <code>table_spec</code>、<code>table</code>、<code>drawing</code>、<code>text</code> 等类型，并尝试用视觉模型辅助分类，比所有页面走同一套规则更合理。</p></article>
+        <article class="card"><span class="tag ok">效率</span><h3>批量翻译和完全相同文本去重</h3><p>先收集候选文本，再批量请求翻译并复用完全相同的结果，能减少重复调用和成本，适合保留为更严格缓存系统的起点。</p></article>
+        <article class="card"><span class="tag ok">扫描页</span><h3>OCR 结果带坐标</h3><p>技术图场景会对较大的图片区域使用 OCR，并尝试把坐标映射回页面，为处理嵌入图片中的英文提供了可验证思路。</p></article>
+        <article class="card"><span class="tag ok">排版意识</span><h3>存在空间检测与候选位置搜索</h3><p><code>SpaceDetector</code> 会考虑页面内容区域和可用空间，并针对不同页面类型设置放置方式，说明作者意识到了“翻译正确但遮挡原文”仍然不可用。</p></article>
+        <article class="card"><span class="tag info">工程基础</span><h3>模式与参数已有雏形</h3><p>SKILL.md 定义 translate/preview 模式，脚本暴露输入输出、模型和字体等参数，API key 缺失时也有显式提示；Python 源码通过语法解析。</p></article>
+      </div>
+    </section>
+
+    <section id="flow">
+      <h2>现有脚本流程</h2>
+      <div class="flow">
+        <div class="step"><b>1. 初始化</b>检查依赖、API key、模型与字体</div>
+        <div class="step"><b>2. 页面分类</b>文本特征 + 页面图片交给模型判断类型</div>
+        <div class="step"><b>3. 提取候选</b>合并文字块；drawing 页补充图片 OCR</div>
+        <div class="step"><b>4. 批量翻译</b>去重、分批请求 DashScope 兼容接口</div>
+        <div class="step"><b>5. 写入 PDF</b>搜索空白区域并添加红色 FreeText</div>
+      </div>
+      <p class="callout">流程在“写入 PDF”后直接结束，缺少审核、写入后渲染、文字重叠检测、自动重排和无法解决时的交付阻断。</p>
+    </section>
+
+    <section id="findings">
+      <h2>问题与风险</h2>
+      <div class="card">
+        <div class="finding"><div class="num">01</div><div><span class="tag risk">P0</span><h3>没有术语表输入</h3><ul><li>核心行业术语依赖硬编码提示和少量示例，不能读取业务员的 XLSX/CSV。</li><li>没有最长匹配、别名、禁译项、优先级、上下文或冲突处理。</li><li>同一术语跨页面的一致性没有可审计保证。</li></ul></div></div>
+        <div class="finding"><div class="num">02</div><div><span class="tag risk">P0</span><h3>翻译范围会明显过宽</h3><ul><li>提示词倾向翻译表头、产品描述和工艺文字，但样本显示 General Information、How To Measure、Category Fields 和大量行政字段应跳过。</li><li>规则不是基于 TechPack 页面类型、字段角色与服装术语的确定性组合。</li><li>Sample Review 没有“忠实提炼可执行结论”的专用策略。</li></ul></div></div>
+        <div class="finding"><div class="num">03</div><div><span class="tag risk">P0</span><h3>preview 不是无成本、无副作用的真正预览</h3><ul><li>预览流程仍会初始化 API key，并可能调用页面分类或 OCR 模型。</li><li>输出主要是前若干条文字，不是带页码、bbox、决策原因和风险的完整审核清单。</li><li>用户无法逐项批准、修改、跳过或导出可重放的审核结果。</li></ul></div></div>
+        <div class="finding"><div class="num">04</div><div><span class="tag risk">P0</span><h3>模型响应缺少稳定的项目 ID</h3><ul><li>批量翻译依赖行顺序对齐；模型合并、拆分或漏行时，译文可能对应错误原文。</li><li>没有 JSON Schema、响应验证和数量/ID 完整性检查。</li><li>异常路径可能返回空译文并继续生成“看似成功”的部分结果。</li></ul></div></div>
+        <div class="finding"><div class="num">05</div><div><span class="tag risk">P0</span><h3>没有最终重叠检测闭环</h3><ul><li>写入前的启发式空白搜索不能证明实际 FreeText 字形不压到原文、表格线、图片或其他批注。</li><li>紧凑兜底位置本身允许重叠风险，且写入后未重新渲染检查。</li><li>没有最多 10 轮重排、页边引线兜底或 <code>unresolved_overlap</code> 交付阻断。</li></ul></div></div>
+        <div class="finding"><div class="num">06</div><div><span class="tag risk">P0</span><h3>缺少失败治理和审计</h3><ul><li>没有指数退避、限流、断点续跑、持久缓存或明确的失败阈值。</li><li>没有输入哈希、术语表哈希、模型版本、提示词版本和逐项决策记录。</li><li>无法证明最终 PDF 只包含已经审核的译文。</li></ul></div></div>
+        <div class="finding"><div class="num">07</div><div><span class="tag warn">P1</span><h3>表格文本合并参数存在不一致</h3><ul><li>函数说明指出 table 场景应使用更小的 <code>merge_gap_factor</code>，主流程对 table 调用时却沿用默认值。</li><li>这会提高跨单元格、跨列或跨行合并的风险，导致原文和坐标失真。</li><li>版面检测没有把矢量表格线作为一等约束。</li></ul></div></div>
+        <div class="finding"><div class="num">08</div><div><span class="tag warn">P1</span><h3>页面分类及 OCR 覆盖不完整</h3><ul><li>分类 fallback 无法产生全部主流程支持的页面类型，例如 <code>table_spec</code>。</li><li>drawing 页只对较大图片块 OCR，可能漏掉小标签图、局部截图或被拆分的技术标注。</li><li>MinerU 等结构输出与 PyMuPDF 原始坐标没有双向校验。</li></ul></div></div>
+        <div class="finding"><div class="num">09</div><div><span class="tag warn">P1</span><h3>版面算法仍可能遮挡或裁字</h3><ul><li>主要根据字符数估计所需尺寸，而不是用真实字体度量和最终 appearance stream。</li><li>table 模式的背景处理变量与实际写入行为不一致，白底可能遮住原内容。</li><li>默认字号和目标框没有经过渲染验收，页面边界、旋转页和 CropBox 情况缺少覆盖。</li></ul></div></div>
+        <div class="finding"><div class="num">10</div><div><span class="tag warn">P1</span><h3>平台、依赖和输出约定不一致</h3><ul><li>文档示例使用 <code>python3</code>、<code>2&gt;/dev/null</code> 和 Unix 环境变量写法，却宣称跨平台；Windows 业务环境会踩坑。</li><li>预检查涉及 <code>dashscope</code>，依赖章节却没有完整列出。</li><li>默认输出在当前工作目录，而不是输入文件旁或明确任务目录。</li></ul></div></div>
+        <div class="finding"><div class="num">11</div><div><span class="tag risk">P0</span><h3>商业资料隐私未被说明</h3><ul><li>页面图片、OCR 文本或整段内容可能发送到 DashScope。</li><li>没有最小区域上传、数据分类、日志脱敏、留存策略和用户提示。</li><li>模型与供应商硬编码，无法通过适配器执行企业级配置。</li></ul></div></div>
+        <div class="finding"><div class="num">12</div><div><span class="tag info">P2</span><h3>缺少测试与干净的 skill 包结构</h3><ul><li>没有单元测试、金样 PDF、不同阅读器兼容测试或真实 TechPack 回归集。</li><li>压缩包包含 <code>__MACOSX</code>、<code>__pycache__</code> 和 <code>.pyc</code> 等不应发布的文件。</li><li>没有面向 Codex UI 的 agents 元数据、版本和明确兼容性说明。</li></ul></div></div>
+      </div>
+    </section>
+
+    <section id="priority">
+      <h2>改进优先级</h2>
+      <div class="priority">
+        <article class="card"><span class="sev p0">P0 · 试点前必须完成</span><ol><li>术语表与代码数字保护</li><li>TechPack 页面/字段选择规则</li><li>离线 review.html + review.json 审核门</li><li>结构化翻译响应与失败阻断</li><li>写入后的重叠检测和自动重排</li><li>数据最小化与审计清单</li></ol></article>
+        <article class="card"><span class="sev p1">P1 · 提升可靠性</span><ol><li>MinerU + PyMuPDF 坐标融合</li><li>表格线和真实字体度量</li><li>局部 OCR 与低可信标记</li><li>缓存、重试、限流、断点续跑</li><li>Windows 命令和固定输出目录</li><li>多阅读器 appearance 验证</li></ol></article>
+        <article class="card"><span class="sev p2">P2 · 产品化</span><ol><li>清理发布包与补充元数据</li><li>模型/供应商适配器</li><li>运行统计和质量指标</li><li>回归样本扩充到更多客户</li><li>取得 PO 对照后新增 PO 流程</li><li>性能与批量任务优化</li></ol></article>
+      </div>
+    </section>
+
+    <section id="reuse">
+      <h2>建议复用边界</h2>
+      <div class="grid">
+        <div class="card"><span class="tag ok">保留设计思想</span><div class="mono">- PyMuPDF FreeText 写入方向
+- 页面类型分流
+- OCR 坐标回映
+- 完全相同文本去重
+- 候选空白区域搜索
+- preview / translate 两阶段概念</div></div>
+        <div class="card"><span class="tag risk">重新设计实现</span><div class="mono">- 术语与行业规则引擎
+- 结构化翻译任务协议
+- review.html / review.json 审核闭环
+- MinerU 与原 PDF 坐标匹配
+- 渲染级碰撞检测与自动重排
+- 错误、缓存、审计、隐私和测试体系</div></div>
+      </div>
+      <p class="callout green"><b>最终建议：</b>把上传 skill 视为“可运行的概念原型”和算法参考，而不是未来 skill 的代码底座。这样既能保留其正确方向，也不会让核心业务规则继续被埋在单文件启发式逻辑中。</p>
+    </section>
+  </main>
+  <footer><div class="wrap">审计范围仅限上传压缩包的静态内容 · 不修改原文件 · 不创建新 skill</div></footer>
+</body>
+</html>

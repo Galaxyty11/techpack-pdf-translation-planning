@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TechPack PDF 翻译批注方案比较</title>
+  <style>
+    :root{--ink:#15233b;--muted:#667085;--paper:#f4f1ea;--card:#fffdfa;--line:#d9d5cc;--red:#d43b3b;--green:#19775a;--amber:#a56016;--blue:#315b8a;--shadow:0 18px 55px rgba(21,35,59,.09)}
+    *{box-sizing:border-box} html{scroll-behavior:smooth} body{margin:0;background:var(--paper);color:var(--ink);font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;line-height:1.65}
+    a{color:var(--blue);text-underline-offset:3px} .wrap{width:min(1180px,calc(100% - 36px));margin:auto}
+    header{padding:72px 0 46px;background:linear-gradient(135deg,#15233b 0%,#263c5e 72%,#315b8a 100%);color:#fff}
+    .eyebrow{font-size:13px;letter-spacing:.16em;text-transform:uppercase;color:#f4b9b9}.hero{display:grid;grid-template-columns:1.4fr .6fr;gap:34px;align-items:end}
+    h1{font-size:clamp(34px,5vw,62px);line-height:1.08;margin:10px 0 20px;max-width:850px} header p{color:#dce5f2;max-width:760px;font-size:18px;margin:0}
+    .stamp{border:1px solid rgba(255,255,255,.25);border-radius:18px;padding:20px;background:rgba(255,255,255,.07)} .stamp b{display:block;font-size:28px;color:#fff}.stamp span{color:#dce5f2;font-size:14px}
+    nav{position:sticky;top:0;z-index:3;background:rgba(244,241,234,.94);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)} nav .wrap{display:flex;gap:22px;overflow:auto;padding:13px 0;white-space:nowrap} nav a{text-decoration:none;color:var(--ink);font-size:14px}
+    main{padding:42px 0 72px} section{margin:0 0 48px} h2{font-size:28px;line-height:1.25;margin:0 0 18px} h3{font-size:20px;margin:0 0 9px} .lead{font-size:17px;color:#445066;max-width:890px}
+    .verdict{display:grid;grid-template-columns:1.1fr .9fr;gap:20px}.panel,.card{background:var(--card);border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow)} .panel{padding:28px}
+    .decision{border-top:5px solid var(--green)} .decision strong{font-size:26px;display:block;margin-bottom:10px}.badges{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0}.badge{border-radius:999px;padding:5px 10px;font-size:12px;font-weight:700;background:#e9edf3}.good{background:#dff2e9;color:#146044}.warn{background:#f8ead8;color:#84500f}.no{background:#fae3e3;color:#9c2929}
+    .flow{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:12px;align-items:center;margin-top:14px}.node{padding:16px;border:1px solid var(--line);border-radius:14px;background:#fff}.arrow{font-size:23px;color:var(--red)}
+    .tablebox{overflow:auto;border:1px solid var(--line);border-radius:18px;background:var(--card);box-shadow:var(--shadow)} table{border-collapse:collapse;width:100%;min-width:1050px;font-size:14px} th,td{padding:14px 13px;border-bottom:1px solid #e8e4dc;text-align:left;vertical-align:top} th{position:sticky;top:0;background:#eef1f5;color:#324059;font-size:12px;letter-spacing:.04em} tr:last-child td{border-bottom:0}.score{font-weight:800}.s5{color:var(--green)}.s3{color:var(--amber)}.s1{color:var(--red)}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.card{padding:24px;position:relative;overflow:hidden}.card:before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--blue)}.card.component:before{background:var(--green)}.card.reference:before{background:var(--amber)}.card.unfit:before{background:var(--red)}
+    .meta{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 14px}.card ul{padding-left:19px;margin:10px 0}.card li{margin:5px 0}.why{padding:12px 14px;border-radius:12px;background:#f2f4f7;font-size:14px}
+    .criteria{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.criterion{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px}.criterion b{display:block;color:var(--red);font-size:18px}
+    .note{border-left:4px solid var(--amber);background:#fff7e8;padding:16px 18px;border-radius:0 12px 12px 0}.sources{columns:2;column-gap:36px}.sources li{break-inside:avoid;margin-bottom:9px}
+    footer{padding:30px 0 50px;color:var(--muted);border-top:1px solid var(--line)}
+    @media(max-width:820px){.hero,.verdict,.grid{grid-template-columns:1fr}.stamp{max-width:340px}.flow{grid-template-columns:1fr}.arrow{transform:rotate(90deg);text-align:center}.criteria{grid-template-columns:1fr 1fr}.sources{columns:1}header{padding-top:50px}}
+    @media(max-width:520px){.wrap{width:min(100% - 24px,1180px)}.criteria{grid-template-columns:1fr}.panel,.card{padding:20px}h2{font-size:24px}}
+    @media print{nav{display:none}body{background:#fff}.panel,.card,.tablebox{box-shadow:none;break-inside:avoid}a{color:inherit}}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap hero">
+      <div>
+        <div class="eyebrow">Market scan · TechPack workflow</div>
+        <h1>PDF 翻译工具很多，<br>但没有一个能直接替代业务员</h1>
+        <p>本页比较 GitHub 项目与 SkillsHub 技能，重点不是“谁能全文翻译”，而是谁能支持服装规则、术语强约束、保留英文、红色 FreeText、人工审核和无重叠交付。</p>
+      </div>
+      <div class="stamp"><b>0 个</b><span>发现的完全即用方案</span><b>2 层</b><span>推荐底座：MinerU + PyMuPDF</span></div>
+    </div>
+  </header>
+  <nav><div class="wrap"><a href="#verdict">结论</a><a href="#criteria">判定标准</a><a href="#matrix">比较矩阵</a><a href="#details">逐项评估</a><a href="#architecture">推荐组合</a><a href="#sources">来源</a></div></nav>
+  <main class="wrap">
+    <section id="verdict" class="verdict">
+      <div class="panel decision">
+        <span class="badge good">推荐</span>
+        <strong>组合底座，而不是采用全文翻译产品</strong>
+        <p>用 <b>MinerU</b> 理解阅读顺序、表格与 OCR 结构；用 <b>PyMuPDF</b> 复核原始坐标、渲染页面并写入红色 FreeText。服装翻译规则、术语约束、审核页和重叠闭环需要自行设计。</p>
+        <div class="badges"><span class="badge good">结构识别</span><span class="badge good">原坐标写入</span><span class="badge warn">需商业许可复核</span><span class="badge no">无现成业务规则</span></div>
+      </div>
+      <div class="panel">
+        <h3>分类结论</h3>
+        <p><b>可直接使用：</b>无。现成产品不同时满足六项核心条件。</p>
+        <p><b>可作为底层组件：</b>MinerU、PyMuPDF；BabelDOC 可参考其术语和段落翻译机制。</p>
+        <p><b>不作为 v1 主链：</b>PDFMathTranslate、Docling、Marker、PyMuPDF4LLM 和通用 SkillsHub 技能。</p>
+      </div>
+    </section>
+
+    <section id="criteria">
+      <h2>不是“能翻译 PDF”就算适配</h2>
+      <p class="lead">评价分数为本项目内部适配判断，不代表通用产品排名。5 分表示接近当前需求，1 分表示需要大量重构。</p>
+      <div class="criteria">
+        <div class="criterion"><b>01 行业选择</b>能否只翻译工厂真正需要的内容</div>
+        <div class="criterion"><b>02 术语强约束</b>能否锁定术语、代码、数字和单位</div>
+        <div class="criterion"><b>03 原文保留</b>不覆盖、不替换原英文内容</div>
+        <div class="criterion"><b>04 批注对象</b>能否生成红色、可编辑 FreeText</div>
+        <div class="criterion"><b>05 审核闭环</b>逐项确认后才能写入 PDF</div>
+        <div class="criterion"><b>06 安全排版</b>检测文字重叠并自动重排</div>
+      </div>
+    </section>
+
+    <section id="matrix">
+      <h2>方案比较矩阵</h2>
+      <div class="tablebox">
+        <table>
+          <thead><tr><th>方案</th><th>主要定位</th><th>版面 / OCR / 表格</th><th>术语</th><th>选择性翻译</th><th>FreeText</th><th>隐私与部署</th><th>许可证提示</th><th>适配度</th><th>结论</th></tr></thead>
+          <tbody>
+            <tr><td><a href="https://github.com/PDFMathTranslate/PDFMathTranslate">PDFMathTranslate</a></td><td>保持科学文档版式的全文翻译</td><td>强；支持布局、图表、公式与多种入口</td><td>可用自定义提示和例外规则，非本项目术语模型</td><td>支持页范围，但不是字段级行业筛选</td><td>否，主要输出单语/双语 PDF</td><td>可本地部署；翻译服务依配置</td><td>AGPL-3.0</td><td class="score s3">3/5</td><td>参考，不直接采用</td></tr>
+            <tr><td><a href="https://github.com/funstory-ai/BabelDOC">BabelDOC</a></td><td>文档翻译库 / PDFMathTranslate 2.0 底层</td><td>强；有扫描页 workaround，表格翻译仍标实验性</td><td>支持 CSV glossary 和命中词注入</td><td>以全文/段落翻译为主</td><td>否</td><td>可自部署，也可调用多种翻译端</td><td>AGPL-3.0</td><td class="score s3">3.5/5</td><td>借鉴翻译层</td></tr>
+            <tr><td><a href="https://github.com/opendatalab/MinerU">MinerU</a></td><td>复杂文档结构化解析</td><td>强；阅读顺序、表格、OCR、图片/图表结构</td><td>无翻译术语层</td><td>不负责翻译</td><td>否</td><td>可本地推理或使用生态 API</td><td>MinerU Open Source License，基于 Apache 2.0 并附加条件</td><td class="score s5">4.5/5</td><td>推荐结构层</td></tr>
+            <tr><td><a href="https://github.com/pymupdf/PyMuPDF">PyMuPDF</a></td><td>PDF 提取、渲染、编辑与批注</td><td>原生坐标和渲染强；支持表格检测与 OCR 接口</td><td>无</td><td>不负责翻译</td><td><b>是</b></td><td>本地库，不必上传文档</td><td>AGPL / 商业双许可，商用需评估</td><td class="score s5">5/5</td><td>推荐坐标与写入层</td></tr>
+            <tr><td><a href="https://github.com/docling-project/docling">Docling</a></td><td>通用文档理解与统一结构模型</td><td>强；多格式、OCR、表格和阅读顺序</td><td>无翻译术语层</td><td>不负责翻译</td><td>否</td><td>可本地运行</td><td>MIT</td><td class="score s3">3.5/5</td><td>MinerU 的可替代解析器</td></tr>
+            <tr><td><a href="https://github.com/datalab-to/marker">Marker</a></td><td>PDF 转 Markdown / JSON / HTML</td><td>强；OCR、布局、表格，可选 LLM</td><td>可自定义，但不是内建业务术语闭环</td><td>不负责行业翻译</td><td>否</td><td>本地运行通常较重，GPU 效果更好</td><td>代码 GPL；模型权重另有商业条件</td><td class="score s3">3/5</td><td>不进入 v1 主链</td></tr>
+            <tr><td><a href="https://github.com/pymupdf/pymupdf4llm">PyMuPDF4LLM</a></td><td>面向 LLM/RAG 的 Markdown、JSON 提取</td><td>阅读顺序、表格与按需 OCR 较强</td><td>无</td><td>不负责翻译</td><td>否</td><td>本地、无 GPU 也可运行</td><td>沿用 PyMuPDF 授权体系，需核实商用条款</td><td class="score s3">3/5</td><td>轻量备选提取层</td></tr>
+            <tr><td><a href="https://skillshub.wtf/openai/skills/pdf">OpenAI PDF skill</a></td><td>PDF 读取、生成、渲染和视觉检查流程</td><td>强调 Poppler 渲染及布局验证</td><td>无</td><td>无</td><td>未定义</td><td>取决于代理运行环境</td><td>随仓库许可</td><td class="score s1">2/5</td><td>适合作 QA 规范参考</td></tr>
+            <tr><td><a href="https://skillshub.wtf/microsoft/skills/azure-ai-translation-document-py">Azure Document Translation skill</a></td><td>基于 Azure 的批量文档翻译</td><td>格式保持由云服务负责</td><td>支持 glossary</td><td>以文档级翻译为主</td><td>否</td><td>需 Azure 与 Blob Storage，数据离境/合规不符合默认方向</td><td>服务与 SDK 条款</td><td class="score s1">1.5/5</td><td>不适配默认部署</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="details">
+      <h2>逐项评估</h2>
+      <div class="grid">
+        <article class="card reference"><h3>PDFMathTranslate</h3><div class="meta"><span class="badge warn">参考架构</span><span class="badge">全文翻译</span></div><ul><li>优点：项目成熟度高，入口完整，强调保持公式、图表和布局；支持页范围、例外规则、自定义提示和多翻译服务。</li><li>不足：目标是科学文档全文翻译，产物不是原文旁的可编辑 FreeText；没有服装页面/字段规则和审核闭环。</li></ul><div class="why">适合学习布局保持、缓存和服务适配，不适合直接改成 TechPack 批注器。</div></article>
+        <article class="card reference"><h3>BabelDOC</h3><div class="meta"><span class="badge warn">可借鉴</span><span class="badge good">CSV 术语表</span></div><ul><li>优点：文档翻译内核，支持 glossary 命中后注入提示，并提供扫描页与兼容性选项。</li><li>不足：CLI 官方定位偏调试，主要仍是段落/全文翻译；实验性表格翻译和覆盖原文的 OCR workaround 不符合本项目原文保护要求。</li></ul><div class="why">可参考术语选择和翻译任务编排，但不能直接承担坐标批注层。</div></article>
+        <article class="card component"><h3>MinerU</h3><div class="meta"><span class="badge good">推荐组件</span><span class="badge">结构层</span></div><ul><li>优点：针对复杂文档输出 Markdown/JSON，支持多语言 OCR、表格、图片及跨页结构，适合识别 TechPack 的语义区域。</li><li>不足：结构化输出不等于原 PDF 的最终批注坐标；它也不做翻译和 FreeText 写入。</li></ul><div class="why">只承担“读懂页面”，所有写入坐标仍由 PyMuPDF 复核。</div></article>
+        <article class="card component"><h3>PyMuPDF</h3><div class="meta"><span class="badge good">推荐组件</span><span class="badge good">FreeText</span></div><ul><li>优点：可提取 bbox、图片、绘图和表格，渲染页面，并原生读写 FreeText 等批注。</li><li>不足：没有业务语义、翻译、术语审核和自动排版策略；AGPL/商业许可需要正式评估。</li></ul><div class="why">作为原 PDF 的唯一坐标真相源和最终写入层，避免结构解析结果直接改页。</div></article>
+        <article class="card reference"><h3>Docling / Marker / PyMuPDF4LLM</h3><div class="meta"><span class="badge warn">备选解析器</span></div><ul><li>共同优点：都能把复杂 PDF 转为结构化文本，支持不同程度的布局、表格和 OCR。</li><li>共同不足：目标是内容提取而非原页旁注，坐标回写、业务选择和审核必须另建。</li><li>选型差异：Docling 许可更宽松；Marker 部署更重且商业授权复杂；PyMuPDF4LLM 轻量但与 PyMuPDF 授权绑定。</li></ul><div class="why">保留为基准测试候选，不在 v1 同时引入，避免重复解析链。</div></article>
+        <article class="card unfit"><h3>SkillsHub 通用技能</h3><div class="meta"><span class="badge no">不可直接用</span><span class="badge">工作流说明</span></div><ul><li>OpenAI PDF skill 强调渲染与视觉验收，但没有翻译业务逻辑。</li><li>Azure Document Translation skill 支持格式和 glossary，但面向云端整文档翻译，需要 Azure 存储。</li><li>Docling/Markdown 类 skills 主要包装现有解析工具，没有解决服装规则与 FreeText 写回。</li></ul><div class="why">可作为操作规范或组件入口，不能当作现成的服装翻译批注 skill。</div></article>
+      </div>
+    </section>
+
+    <section id="architecture">
+      <h2>推荐组合：语义与坐标分权</h2>
+      <div class="panel">
+        <div class="flow">
+          <div class="node"><b>MinerU</b><br>阅读顺序 · 表格 · OCR · 区域类型</div><div class="arrow">→</div>
+          <div class="node"><b>业务与翻译层</b><br>服装规则 · 术语强约束 · DashScope · 人工审核</div><div class="arrow">→</div>
+          <div class="node"><b>PyMuPDF</b><br>坐标复核 · 红色 FreeText · 渲染 · 重叠闭环</div>
+        </div>
+        <p class="note"><b>关键边界：</b>MinerU 的结构节点只能提出候选；写入前必须通过页码、规范化文本、bbox 和邻近关系与 PyMuPDF 原始对象重新匹配。低可信匹配进入审核，不允许按猜测写入。</p>
+      </div>
+    </section>
+
+    <section id="sources">
+      <h2>一手来源</h2>
+      <ul class="sources">
+        <li><a href="https://github.com/PDFMathTranslate/PDFMathTranslate">PDFMathTranslate 官方仓库</a></li>
+        <li><a href="https://github.com/funstory-ai/BabelDOC">BabelDOC 官方仓库</a></li>
+        <li><a href="https://github.com/opendatalab/MinerU">MinerU 官方仓库</a></li>
+        <li><a href="https://github.com/pymupdf/PyMuPDF">PyMuPDF 官方仓库</a></li>
+        <li><a href="https://pymupdf.readthedocs.io/en/latest/recipes-annotations.html">PyMuPDF 批注文档</a></li>
+        <li><a href="https://github.com/docling-project/docling">Docling 官方仓库</a></li>
+        <li><a href="https://github.com/datalab-to/marker">Marker 官方仓库</a></li>
+        <li><a href="https://github.com/pymupdf/pymupdf4llm">PyMuPDF4LLM 官方仓库</a></li>
+        <li><a href="https://skillshub.wtf/docs">SkillsHub 官方检索文档</a></li>
+        <li><a href="https://skillshub.wtf/openai/skills/pdf">OpenAI PDF skill</a></li>
+        <li><a href="https://skillshub.wtf/microsoft/skills/azure-ai-translation-document-py">Microsoft Azure Document Translation skill</a></li>
+        <li><a href="https://skillshub.wtf/TerminalSkills/skills/doc-parser">SkillsHub Docling 文档解析 skill</a></li>
+      </ul>
+      <p class="note">检索截止 2026-08-02。开源许可证和商业使用条件可能变化，正式开发前应由法务或采购再次核对具体版本；本页不是法律意见。</p>
+    </section>
+  </main>
+  <footer><div class="wrap">服装 TechPack PDF 自动翻译批注 · 方案调研页 · 仅供规划决策</div></footer>
+</body>
+</html>
