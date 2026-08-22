@@ -203,10 +203,17 @@
         item.translation_host, item.translation_execution_mode, item.translation_model,
         item.translation_agent_role, item.translation_prompt_version
       ].join(" · "));
-      const models = new Set(data.items.map((candidate) => candidate.translation_model));
       const risks = [];
       if (item.translation_model === "unknown") risks.push("模型未知");
-      if (models.size > 1 || data.pipeline.execution_mode === "mixed") risks.push("任务中途模型或执行方式切换");
+      const switchFields = [
+        ["translation_host", "宿主切换"],
+        ["translation_model", "模型切换"],
+        ["translation_execution_mode", "执行方式切换"],
+        ["translation_prompt_version", "提示词版本切换"]
+      ];
+      switchFields.forEach(([field, label]) => {
+        if (new Set(data.items.map((candidate) => candidate[field])).size > 1) risks.push(label);
+      });
       text("model-risk", risks.join("；") || "无");
       renderList();
     }

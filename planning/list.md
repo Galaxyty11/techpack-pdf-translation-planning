@@ -233,7 +233,8 @@ skipped_duplicate | low_confidence
 - 支持按页面类型、风险、术语命中、审核状态和问题类型筛选。
 - 同时显示原文、建议译文、锁定 token、术语命中、选择原因、坐标可信度和布局风险。
 - 显示翻译宿主、主 Agent/sub-agent 执行方式、模型标识和提示词版本；模型未知或任务中途切换时标记风险。
-- 操作只有“批准”“修改后批准”“跳过”；低可信或冲突项不得默认批准。
+- 任务级 pipeline 必须由全部项目的逐项翻译来源确定性汇总；host、model、prompt version 各自出现多个值时汇总为 `mixed`，execution mode 出现多个值时汇总为 `mixed`。显式 pipeline 与该汇总矛盾时立即失败。
+- 操作只有“批准”“修改后批准”“跳过”；生成审核页时无条件清空所有传入项目的 `review_status` 和 `reviewed_translation`，不得继承任何预填审核结果。
 - 统计未审核、已批准、已修改、已跳过和阻断项数量。
 - 仅当所有项目有明确状态且阻断项为 0 时允许导出 `review.json`。
 - 对用户输入做 HTML 转义；JSON 下载使用固定 schema，不执行被审核文本中的 HTML/JavaScript。
@@ -276,7 +277,15 @@ leader_line, warnings
 approved | approved_edited | skipped
 ```
 
-`source.sha256`、`glossary.sha256`、页数或 `schema_version` 不匹配时，apply 阶段立即失败，不能提供“忽略并继续”选项。
+加载接口固定为 `load_review(path, job, expected_items) -> ReviewDocument`。`job` 必须是带 source/glossary 路径的 `JobManifest`；`expected_items` 是生成审核页时的可信项目快照。
+
+加载时必须重新计算当前 source/glossary SHA-256 和 PDF 页数，并要求 `job_id`、source/glossary 文件名与哈希、页数全部与 `JobManifest` 精确一致。review items 必须与 `expected_items` 数量和 ID 集合完全一致；除 `review_status` 和 `reviewed_translation` 外，每个 `ReviewItem` 字段都必须完全一致。缺失、额外、替换或重复项目立即失败。
+
+任务级 pipeline 必须与全部 item 的 `translation_host`、`translation_execution_mode`、`translation_model`、`translation_prompt_version` 确定性汇总完全一致。`review_completed_at` 只接受带时区的 ISO-8601 字符串。
+
+批准项以 `suggested_translation` 为最终译文，修改后批准项以 `reviewed_translation` 为最终译文；加载时必须重新验证锁定 token 的精确多重集/边界、普通术语的权威目标译法，以及 do-not-translate 命中的原文保留。
+
+`source.sha256`、`glossary.sha256`、页数、`schema_version`、JobManifest/候选集合绑定或上述确定性约束不匹配时，apply 阶段立即失败，不能提供“忽略并继续”选项。
 
 ## 7. FreeText 写入规范
 

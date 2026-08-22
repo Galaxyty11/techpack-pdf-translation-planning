@@ -5,9 +5,9 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, is_dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,14 +15,16 @@ import pymupdf
 from pydantic import ValidationError
 
 from .errors import TechpackError
+from .glossary import normalize_term
 from .inputs import sha256_file
-from .models import JobManifest, PipelineInfo, ReviewDocument, ReviewStatus
+from .models import JobManifest, PipelineInfo, ReviewDocument, ReviewItem, ReviewStatus
+from .selection import LockedText, LockedToken, validate_locked_tokens
 
 
 _TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "assets" / "review-template.html"
 _DATA_PLACEHOLDER = "__TECHPACK_REVIEW_DATA__"
 _PNG_PREFIX = "data:image/png;base64,"
-_JOB_ID = re.compile(r"^(?P<source>[0-9a-f]{12})-\d{8}T\d{6}Z$")
+_MUTABLE_REVIEW_FIELDS = frozenset({"review_status", "reviewed_translation"})
 
 
 def build_review_html(job: JobManifest, output: Any) -> str:
@@ -30,9 +32,9 @@ def build_review_html(job: JobManifest, output: Any) -> str:
     try:
         manifest = JobManifest.model_validate(job)
         raw_output = _mapping(output)
-        pipeline = _pipeline(raw_output)
         pages = _pages(raw_output)
         items = _items(raw_output)
+        pipeline = _pipeline(raw_output, items)
         page_count = _manifest_page_count(manifest, pages)
         blocking_issues = _json_value(raw_output.get("blocking_issues", []))
         if not isinstance(blocking_issues, list):
@@ -71,13 +73,25 @@ def build_review_html(job: JobManifest, output: Any) -> str:
         ) from None
 
 
-def load_review(path: str | Path, source: str | Path, glossary: str | Path) -> ReviewDocument:
+def load_review(
+    path: str | Path,
+    job: JobManifest,
+    expected_items: Sequence[ReviewItem | Mapping[str, Any]],
+) -> ReviewDocument:
     """Load a completed review only when it still matches the current inputs."""
     review_path = Path(path)
-    source_path = Path(source)
-    glossary_path = Path(glossary)
+    try:
+        manifest = JobManifest.model_validate(job)
+        if manifest.source.path is None or manifest.glossary.path is None:
+            raise ValueError("job input paths are required")
+        source_path = Path(manifest.source.path)
+        glossary_path = Path(manifest.glossary.path)
+        trusted_items = [ReviewItem.model_validate(item) for item in expected_items]
+    except (TypeError, ValueError, ValidationError):
+        _fail("review_job_invalid", "Review job binding is invalid")
     try:
         payload = json.loads(review_path.read_text(encoding="utf-8"))
+        _validate_review_timestamp(payload)
         review = ReviewDocument.model_validate(payload)
     except (OSError, TypeError, json.JSONDecodeError, ValidationError):
         _fail("review_schema_invalid", "Review JSON does not match schema 1.1")
@@ -86,18 +100,26 @@ def load_review(path: str | Path, source: str | Path, glossary: str | Path) -> R
     glossary_hash = _current_hash(glossary_path, "glossary")
     page_count = _pdf_page_count(source_path)
 
-    if review.source.filename != source_path.name:
+    if review.job_id != manifest.job_id:
+        _fail("review_job_mismatch", "Review job does not match")
+    if (
+        review.source.filename != manifest.source.filename
+        or review.source.filename != source_path.name
+    ):
         _fail("review_source_filename_mismatch", "Review source filename does not match")
-    if review.source.sha256 != source_hash:
+    if review.source.sha256 != manifest.source.sha256 or review.source.sha256 != source_hash:
         _fail("review_source_hash_mismatch", "Review source hash does not match")
-    if review.source.page_count != page_count:
+    if review.source.page_count != manifest.source.page_count or review.source.page_count != page_count:
         _fail("review_source_page_count_mismatch", "Review source page count does not match")
-    if review.glossary.filename != glossary_path.name:
+    if (
+        review.glossary.filename != manifest.glossary.filename
+        or review.glossary.filename != glossary_path.name
+    ):
         _fail("review_glossary_filename_mismatch", "Review glossary filename does not match")
-    if review.glossary.sha256 != glossary_hash:
+    if review.glossary.sha256 != manifest.glossary.sha256 or review.glossary.sha256 != glossary_hash:
         _fail("review_glossary_hash_mismatch", "Review glossary hash does not match")
-    if not _job_matches_source(review.job_id, source_hash):
-        _fail("review_job_mismatch", "Review job is not bound to the current source")
+    _validate_item_binding(review.items, trusted_items)
+    _validate_pipeline(review)
     if review.blocking_issues:
         _fail("review_blocked", "Review contains unresolved blocking issues")
     if review.review_completed_at is None:
@@ -136,6 +158,8 @@ def load_review(path: str | Path, source: str | Path, glossary: str | Path) -> R
                 "review_provenance_incomplete",
                 "Every review item needs complete translation provenance",
             )
+        if item.review_status is not ReviewStatus.SKIPPED:
+            _validate_final_translation(item)
     return review
 
 
@@ -164,26 +188,39 @@ def _json_value(value: Any) -> Any:
     return value
 
 
-def _pipeline(output: dict[str, Any]) -> dict[str, Any]:
+def _pipeline(output: dict[str, Any], items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     raw = output.get("pipeline")
+    aggregate = _aggregate_item_provenance(items)
     if raw is None:
-        translations = output.get("translations", [])
-        if translations:
-            translator = _mapping(translations[0]).get("translator")
-            if translator is not None:
-                translator = _mapping(translator)
-                raw = {
-                    "parser": output.get("parser"),
-                    "translation_executor": "host_agent",
-                    "host": translator.get("host"),
-                    "execution_mode": translator.get("execution_mode"),
-                    "model": translator.get("model"),
-                    "prompt_version": translator.get("prompt_version"),
-                }
-    if raw is None:
-        raise ValueError("pipeline provenance is required")
+        raw = {
+            "parser": output.get("parser"),
+            "translation_executor": output.get("translation_executor", "host_agent"),
+            **aggregate,
+        }
     info = PipelineInfo.model_validate(raw)
+    if items and any(
+        getattr(info, field) != value for field, value in aggregate.items()
+    ):
+        raise ValueError("pipeline contradicts item provenance")
     return info.model_dump(mode="json")
+
+
+def _aggregate_item_provenance(items: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    if not items:
+        return {}
+    fields = {
+        "host": "translation_host",
+        "execution_mode": "translation_execution_mode",
+        "model": "translation_model",
+        "prompt_version": "translation_prompt_version",
+    }
+    aggregate: dict[str, str] = {}
+    for pipeline_field, item_field in fields.items():
+        values = {str(item.get(item_field, "")).strip() for item in items}
+        if not values or "" in values:
+            raise ValueError("item translation provenance is incomplete")
+        aggregate[pipeline_field] = next(iter(values)) if len(values) == 1 else "mixed"
+    return aggregate
 
 
 def _items(output: dict[str, Any]) -> list[dict[str, Any]]:
@@ -193,17 +230,8 @@ def _items(output: dict[str, Any]) -> list[dict[str, Any]]:
             raise TypeError("items must be a list")
         items = [_mapping(item) for item in raw_items]
         for item in items:
-            warnings = item.get("warnings", [])
-            conflict = isinstance(warnings, list) and any(
-                "conflict" in str(warning).casefold() for warning in warnings
-            )
-            low_confidence = (
-                item.get("coordinate_confidence") != "high"
-                or item.get("decision_reason") == "low_confidence"
-                or item.get("page_type") == "unknown"
-            )
-            if item.get("review_status") == "approved" and (conflict or low_confidence):
-                item["review_status"] = None
+            item["review_status"] = None
+            item["reviewed_translation"] = None
         return items
 
     candidates = output.get("candidates")
@@ -349,9 +377,118 @@ def _pdf_page_count(path: Path) -> int:
         _fail("review_source_unavailable", "Current source PDF cannot be inspected")
 
 
-def _job_matches_source(job_id: str, source_hash: str) -> bool:
-    match = _JOB_ID.fullmatch(job_id)
-    return bool(match and match.group("source") == source_hash[:12])
+def _validate_item_binding(
+    reviewed_items: Sequence[ReviewItem], expected_items: Sequence[ReviewItem]
+) -> None:
+    reviewed_ids = [item.item_id for item in reviewed_items]
+    expected_ids = [item.item_id for item in expected_items]
+    if len(reviewed_ids) != len(set(reviewed_ids)):
+        _fail("review_item_duplicate", "Review contains duplicate item identifiers")
+    if len(expected_ids) != len(set(expected_ids)):
+        _fail("review_job_invalid", "Expected review items contain duplicate identifiers")
+    if set(reviewed_ids) != set(expected_ids):
+        _fail("review_item_set_mismatch", "Review item set does not match the job")
+
+    expected_by_id = {item.item_id: item for item in expected_items}
+    immutable_fields = set(ReviewItem.model_fields) - _MUTABLE_REVIEW_FIELDS
+    for item in reviewed_items:
+        actual = item.model_dump(mode="json", include=immutable_fields)
+        expected = expected_by_id[item.item_id].model_dump(
+            mode="json", include=immutable_fields
+        )
+        if actual != expected:
+            _fail("review_item_mismatch", "Review item content does not match the job")
+
+
+def _validate_review_timestamp(payload: Any) -> None:
+    if not isinstance(payload, Mapping):
+        return
+    value = payload.get("review_completed_at")
+    if value is None:
+        return
+    if not isinstance(value, str):
+        _fail("review_timestamp_invalid", "Review completion time is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        _fail("review_timestamp_invalid", "Review completion time is invalid")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        _fail("review_timestamp_invalid", "Review completion time needs a timezone")
+
+
+def _validate_pipeline(review: ReviewDocument) -> None:
+    try:
+        aggregate = _aggregate_item_provenance(
+            [item.model_dump(mode="json") for item in review.items]
+        )
+    except ValueError:
+        _fail(
+            "review_provenance_incomplete",
+            "Review item translation provenance is incomplete",
+        )
+    if any(
+        getattr(review.pipeline, field) != value
+        for field, value in aggregate.items()
+    ):
+        _fail("review_pipeline_mismatch", "Review pipeline contradicts item provenance")
+
+
+def _validate_final_translation(item: ReviewItem) -> None:
+    final_translation = (
+        item.reviewed_translation
+        if item.review_status is ReviewStatus.APPROVED_EDITED
+        else item.suggested_translation
+    )
+    if not _nonblank(final_translation):
+        _fail("review_translation_missing", "Approved item has no final translation")
+
+    for hit in item.glossary_hits:
+        if not isinstance(hit, Mapping):
+            _fail("review_glossary_invalid", "Review glossary hit is invalid")
+        if bool(hit.get("do_not_translate")):
+            normalized_values = {
+                normalize_term(value)
+                for value in (hit.get("matched_text"), hit.get("source_term"))
+                if value
+            }
+            exact_values = [
+                token
+                for token in item.locked_tokens
+                if normalize_term(token) in normalized_values
+            ]
+            if not exact_values or any(
+                item.source_text.count(value) <= 0
+                or final_translation.count(value) != item.source_text.count(value)
+                for value in exact_values
+            ):
+                _fail(
+                    "review_glossary_dnt_mismatch",
+                    "Final translation changed a do-not-translate term",
+                )
+
+    tokens: list[LockedToken] = []
+    cursor = 0
+    for value in item.locked_tokens:
+        start = item.source_text.find(value, cursor)
+        if start < 0:
+            _fail("review_locked_token_mismatch", "Final translation changed locked tokens")
+        end = start + len(value)
+        tokens.append(LockedToken(value=value, start=start, end=end, kind="review"))
+        cursor = end
+    locked = LockedText(text=item.source_text, tokens=tuple(tokens))
+    if not validate_locked_tokens(locked, final_translation):
+        _fail("review_locked_token_mismatch", "Final translation changed locked tokens")
+
+    normalized_translation = normalize_term(final_translation)
+    for hit in item.glossary_hits:
+        if bool(hit.get("do_not_translate")):
+            continue
+        target = str(hit.get("target_term") or "")
+        if not target or normalize_term(target) not in normalized_translation:
+            _fail(
+                "review_glossary_target_missing",
+                "Final translation omitted an authoritative glossary target",
+            )
 
 
 def _nonblank(value: str | None) -> bool:

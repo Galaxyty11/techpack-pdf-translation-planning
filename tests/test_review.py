@@ -2,6 +2,7 @@ import hashlib
 import inspect
 import json
 import traceback
+from copy import deepcopy
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 
@@ -109,15 +110,15 @@ def test_build_review_html_rejects_non_png_or_remote_thumbnail(tmp_path) -> None
         build_review_html(job, output)
 
 
-def test_build_review_html_never_defaults_risky_or_conflicting_item_to_approved(tmp_path) -> None:
+@pytest.mark.parametrize("prefilled_status", ["approved", "approved_edited", "skipped"])
+def test_build_review_html_unconditionally_resets_prefilled_review_state(
+    tmp_path, prefilled_status
+) -> None:
     job, _source, _glossary = _job(tmp_path)
     output = _review_output("Shell 12 mm")
     output["items"][0].update(
-        coordinate_confidence="low",
-        decision_reason="low_confidence",
-        risk_level="high",
-        warnings=["coordinate_conflict"],
-        review_status="approved",
+        review_status=prefilled_status,
+        reviewed_translation="</script><script>prefilledBypass()</script>",
     )
 
     html = build_review_html(job, output)
@@ -126,15 +127,75 @@ def test_build_review_html_never_defaults_risky_or_conflicting_item_to_approved(
     embedded = json.loads("".join(probe.script_text))
 
     assert embedded["items"][0]["review_status"] is None
+    assert embedded["items"][0]["reviewed_translation"] is None
+    assert '<button id="export-review" type="button" disabled>' in html
+
+
+def test_build_review_html_aggregates_mixed_execution_modes_from_all_items(tmp_path) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    output = _review_output("Shell 12 mm")
+    second = deepcopy(output["items"][0])
+    second.update(item_id="p001-i002", translation_execution_mode="main_agent")
+    output["items"].append(second)
+    output["pipeline"]["execution_mode"] = "mixed"
+
+    embedded = _embedded_payload(build_review_html(job, output))
+
+    assert embedded["pipeline"]["execution_mode"] == "mixed"
+
+
+def test_build_review_html_aggregates_and_flags_all_provenance_switches(tmp_path) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    output = _review_output("Shell 12 mm")
+    second = deepcopy(output["items"][0])
+    second.update(
+        item_id="p001-i002",
+        translation_host="chatgpt",
+        translation_execution_mode="main_agent",
+        translation_model="gpt-5",
+        translation_prompt_version="2.0",
+    )
+    output["items"].append(second)
+    output["pipeline"].update(
+        host="mixed", execution_mode="mixed", model="mixed", prompt_version="mixed"
+    )
+
+    html = build_review_html(job, output)
+    embedded = _embedded_payload(html)
+
+    assert embedded["pipeline"] == {
+        "parser": "pymupdf+mineru",
+        "translation_executor": "host_agent",
+        "host": "mixed",
+        "execution_mode": "mixed",
+        "model": "mixed",
+        "prompt_version": "mixed",
+    }
+    for risk_label in ("宿主切换", "模型切换", "执行方式切换", "提示词版本切换"):
+        assert risk_label in html
+
+
+def test_build_review_html_rejects_explicit_pipeline_contradiction(tmp_path) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    output = _review_output("Shell 12 mm")
+    second = deepcopy(output["items"][0])
+    second.update(item_id="p001-i002", translation_execution_mode="main_agent")
+    output["items"].append(second)
+
+    with pytest.raises(TechpackError) as caught:
+        build_review_html(job, output)
+
+    assert caught.value.code == "review_page_invalid"
 
 
 def test_load_review_accepts_schema_1_1_and_all_three_explicit_statuses(tmp_path) -> None:
-    job, source, glossary = _job(tmp_path, page_count=3)
+    job, _source, _glossary = _job(tmp_path, page_count=3)
     payload = _review_document(job, statuses=("approved", "approved_edited", "skipped"))
+    expected_items = _expected_items(payload)
     review_path = tmp_path / "review.json"
     review_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
-    review = load_review(review_path, source, glossary)
+    review = load_review(review_path, job, expected_items)
 
     assert review.schema_version == "1.1"
     assert [item.review_status.value for item in review.items] == [
@@ -154,20 +215,26 @@ def test_load_review_accepts_schema_1_1_and_all_three_explicit_statuses(tmp_path
         (lambda payload: payload["source"].update(page_count=99), "review_source_page_count_mismatch"),
         (lambda payload: payload["glossary"].update(filename="other.csv"), "review_glossary_filename_mismatch"),
         (lambda payload: payload["glossary"].update(sha256="0" * 64), "review_glossary_hash_mismatch"),
-        (lambda payload: payload.update(job_id="f" * 12 + "-20260822T000000Z"), "review_job_mismatch"),
+        (
+            lambda payload: payload.update(
+                job_id=payload["job_id"][:13] + "20260822T010000Z"
+            ),
+            "review_job_mismatch",
+        ),
     ],
 )
 def test_load_review_rejects_stale_or_unbound_review(
     tmp_path, mutation, expected_code
 ) -> None:
-    job, source, glossary = _job(tmp_path)
+    job, _source, _glossary = _job(tmp_path)
     payload = _review_document(job)
+    expected_items = _expected_items(payload)
     mutation(payload)
     review_path = tmp_path / "review.json"
     review_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(TechpackError) as caught:
-        load_review(review_path, source, glossary)
+        load_review(review_path, job, expected_items)
 
     assert caught.value.code == expected_code
 
@@ -189,49 +256,72 @@ def test_load_review_rejects_stale_or_unbound_review(
             lambda payload: payload["items"][0].update(
                 review_status="approved", suggested_translation=None
             ),
-            "review_translation_missing",
+            "review_item_mismatch",
         ),
         (lambda payload: payload["items"][0].update(translation_model=""), "review_schema_invalid"),
-        (lambda payload: payload["items"][0].update(translation_agent_role=None), "review_provenance_incomplete"),
+        (lambda payload: payload["items"][0].update(translation_agent_role=None), "review_item_mismatch"),
     ],
 )
 def test_load_review_requires_complete_review_contract(
     tmp_path, mutation, expected_code
 ) -> None:
-    job, source, glossary = _job(tmp_path)
+    job, _source, _glossary = _job(tmp_path)
     payload = _review_document(job)
+    expected_items = _expected_items(payload)
     mutation(payload)
     review_path = tmp_path / "review.json"
     review_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(TechpackError) as caught:
-        load_review(review_path, source, glossary)
+        load_review(review_path, job, expected_items)
 
     assert caught.value.code == expected_code
 
 
 def test_load_review_recomputes_current_input_hashes(tmp_path) -> None:
-    job, source, glossary = _job(tmp_path)
+    job, _source, glossary = _job(tmp_path)
+    payload = _review_document(job)
     review_path = tmp_path / "review.json"
-    review_path.write_text(json.dumps(_review_document(job)), encoding="utf-8")
+    review_path.write_text(json.dumps(payload), encoding="utf-8")
     glossary.write_text("source_term,target_term\nshell,面料\n", encoding="utf-8")
 
     with pytest.raises(TechpackError) as caught:
-        load_review(review_path, source, glossary)
+        load_review(review_path, job, _expected_items(payload))
 
     assert caught.value.code == "review_glossary_hash_mismatch"
 
 
-def test_load_review_errors_do_not_leak_business_text(tmp_path) -> None:
-    job, source, glossary = _job(tmp_path)
+@pytest.mark.parametrize(
+    "invalid_timestamp",
+    [0, 1787385600.0, "2026-08-22T08:00:00"],
+)
+def test_load_review_requires_iso_timestamp_with_timezone(
+    tmp_path, invalid_timestamp
+) -> None:
+    job, _source, _glossary = _job(tmp_path)
     payload = _review_document(job)
+    expected_items = _expected_items(payload)
+    payload["review_completed_at"] = invalid_timestamp
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(TechpackError) as caught:
+        load_review(review_path, job, expected_items)
+
+    assert caught.value.code == "review_timestamp_invalid"
+
+
+def test_load_review_errors_do_not_leak_business_text(tmp_path) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    payload = _review_document(job)
+    expected_items = _expected_items(payload)
     payload["items"][0]["source_text"] = "PRIVATE-CUSTOMER-MEASUREMENTS"
     payload["items"][0]["review_status"] = "pending"
     review_path = tmp_path / "review.json"
     review_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(TechpackError) as caught:
-        load_review(review_path, source, glossary)
+        load_review(review_path, job, expected_items)
 
     rendered = "".join(traceback.format_exception(caught.value))
     assert caught.value.__suppress_context__ is True
@@ -239,7 +329,168 @@ def test_load_review_errors_do_not_leak_business_text(tmp_path) -> None:
 
 
 def test_load_review_has_no_bypass_or_ignore_parameter() -> None:
-    assert list(inspect.signature(load_review).parameters) == ["path", "source", "glossary"]
+    assert list(inspect.signature(load_review).parameters) == ["path", "job", "expected_items"]
+
+
+@pytest.mark.parametrize("missing_path", ["source", "glossary"])
+def test_load_review_requires_job_manifest_input_paths(tmp_path, missing_path) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    payload = _review_document(job)
+    artifact = getattr(job, missing_path).model_copy(update={"path": None})
+    unbound_job = job.model_copy(update={missing_path: artifact})
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(TechpackError) as caught:
+        load_review(review_path, unbound_job, _expected_items(payload))
+
+    assert caught.value.code == "review_job_invalid"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    [
+        (lambda items: items.pop(), "review_item_set_mismatch"),
+        (lambda items: items.append(deepcopy(items[0])), "review_item_duplicate"),
+        (
+            lambda items: items[0].update(source_text="REPLACED-CUSTOMER-CONTENT"),
+            "review_item_mismatch",
+        ),
+        (
+            lambda items: items.append(
+                {**deepcopy(items[0]), "item_id": "p001-i999"}
+            ),
+            "review_item_set_mismatch",
+        ),
+    ],
+)
+def test_load_review_rejects_missing_extra_replaced_or_duplicate_items(
+    tmp_path, mutation, expected_code
+) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    payload = _review_document(job)
+    expected_items = _expected_items(payload)
+    mutation(payload["items"])
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(TechpackError) as caught:
+        load_review(review_path, job, expected_items)
+
+    assert caught.value.code == expected_code
+
+
+def test_load_review_rejects_pipeline_that_contradicts_item_provenance(tmp_path) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    payload = _review_document(job)
+    payload["items"].append(
+        {
+            **deepcopy(payload["items"][0]),
+            "item_id": "p001-i002",
+            "translation_execution_mode": "main_agent",
+        }
+    )
+    expected_items = _expected_items(payload)
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(TechpackError) as caught:
+        load_review(review_path, job, expected_items)
+
+    assert caught.value.code == "review_pipeline_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("status", "suggested", "reviewed"),
+    [
+        ("approved", "大身 12", None),
+        ("approved", "大身 12 mm 2", None),
+        ("approved_edited", "大身 12 mm", "人工修改 13 mm"),
+    ],
+)
+def test_load_review_revalidates_locked_tokens_in_the_final_translation(
+    tmp_path, status, suggested, reviewed
+) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    payload = _review_document(job)
+    payload["items"][0].update(
+        source_text="Shell 12 mm",
+        normalized_text="shell 12 mm",
+        locked_tokens=["12", "mm"],
+        glossary_hits=[],
+        suggested_translation=suggested,
+        reviewed_translation=reviewed,
+        review_status=status,
+    )
+    expected_items = _expected_items(payload)
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(TechpackError) as caught:
+        load_review(review_path, job, expected_items)
+
+    assert caught.value.code == "review_locked_token_mismatch"
+
+
+def test_load_review_rejects_missing_authoritative_glossary_target(tmp_path) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    payload = _review_document(job)
+    payload["items"][0].update(
+        source_text="Shell 12 mm",
+        normalized_text="shell 12 mm",
+        suggested_translation="外壳 12 mm",
+        glossary_hits=[_glossary_hit("shell", "大身", "Shell")],
+    )
+    expected_items = _expected_items(payload)
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(TechpackError) as caught:
+        load_review(review_path, job, expected_items)
+
+    assert caught.value.code == "review_glossary_target_missing"
+
+
+def test_load_review_rejects_changed_do_not_translate_term(tmp_path) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    payload = _review_document(job)
+    payload["items"][0].update(
+        source_text="Use AcmeTex 12 mm",
+        normalized_text="use acmetex 12 mm",
+        locked_tokens=["AcmeTex", "12", "mm"],
+        suggested_translation="使用艾克米 12 mm",
+        glossary_hits=[_glossary_hit("AcmeTex", "", "acmetex", do_not_translate=True)],
+    )
+    expected_items = _expected_items(payload)
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(TechpackError) as caught:
+        load_review(review_path, job, expected_items)
+
+    assert caught.value.code == "review_glossary_dnt_mismatch"
+
+
+def test_load_review_accepts_preserved_tokens_glossary_target_and_dnt(tmp_path) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    payload = _review_document(job)
+    payload["items"][0].update(
+        source_text="Use AcmeTex shell 12 mm",
+        normalized_text="use acmetex shell 12 mm",
+        locked_tokens=["AcmeTex", "12", "mm"],
+        suggested_translation="使用 AcmeTex 大身 12 mm",
+        glossary_hits=[
+            _glossary_hit("AcmeTex", "", "acmetex", do_not_translate=True),
+            _glossary_hit("shell", "大身", "shell", start=12),
+        ],
+    )
+    expected_items = _expected_items(payload)
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    review = load_review(review_path, job, expected_items)
+
+    assert review.items[0].review_status.value == "approved"
 
 
 def _job(tmp_path, page_count: int = 1):
@@ -311,12 +562,12 @@ def _review_document(job: JobManifest, statuses=("approved",)) -> dict:
             "parser": "pymupdf+mineru",
             "translation_executor": "host_agent",
             "host": "codex",
-            "execution_mode": "mixed" if len(statuses) > 1 else "subagent",
+            "execution_mode": "subagent",
             "model": "unknown",
             "prompt_version": "1.0",
         },
         "items": [
-            _item(index, status, text=f"Source {index} 12 mm")
+            _item(index, status, text=f"Source {chr(65 + index)} 12 mm")
             for index, status in enumerate(statuses)
         ],
         "blocking_issues": [],
@@ -336,7 +587,7 @@ def _item(page_index: int, status: str, *, text: str) -> dict:
         "coordinate_confidence": "high",
         "decision_reason": "field_rule",
         "locked_tokens": ["12", "mm"],
-        "glossary_hits": [{"source_term": "shell", "target_term": "大身"}],
+        "glossary_hits": [],
         "suggested_translation": text,
         "reviewed_translation": "人工修改 12 mm" if status == "approved_edited" else None,
         "review_status": status,
@@ -356,3 +607,36 @@ def _item(page_index: int, status: str, *, text: str) -> dict:
 
 def _sha256(path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _expected_items(payload: dict) -> list[dict]:
+    expected = deepcopy(payload["items"])
+    for item in expected:
+        item["review_status"] = None
+        item["reviewed_translation"] = None
+    return expected
+
+
+def _embedded_payload(html: str) -> dict:
+    probe = _HtmlProbe()
+    probe.feed(html)
+    return json.loads("".join(probe.script_text))
+
+
+def _glossary_hit(
+    source_term: str,
+    target_term: str,
+    matched_text: str,
+    *,
+    do_not_translate: bool = False,
+    start: int = 0,
+) -> dict:
+    return {
+        "source_term": source_term,
+        "target_term": target_term,
+        "matched_text": matched_text,
+        "start": start,
+        "end": start + len(matched_text),
+        "do_not_translate": do_not_translate,
+        "priority": 1,
+    }

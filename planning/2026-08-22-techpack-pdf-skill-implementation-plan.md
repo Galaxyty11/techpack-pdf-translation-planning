@@ -346,13 +346,13 @@ git commit -m "feat: validate host Agent translation exchange"
 
 **Interfaces:**
 - Consumes: JobManifest、候选、已验证译文、内嵌缩略图。
-- Produces: build_review_html(job, output)；load_review(path, source, glossary) -> ReviewDocument。
+- Produces: build_review_html(job, output)；load_review(path, job, expected_items) -> ReviewDocument。`job` 必须携带 source/glossary 路径，`expected_items` 是生成审核页时的可信项目快照。
 
 - [ ] **Step 1: 写离线与契约失败测试**
 
 生成含 “</script><script>alert(1)</script>” 的源文和译文，断言输出不产生第二个 script 节点，且模板不包含 http://、https://、CDN、fetch 或 WebSocket。解析内嵌 JSON，验证图片是 data:image/png;base64。
 
-review.json 测试覆盖 schema 1.1、源/术语哈希、页数、三种审核状态、全部项目明确状态、blocking_issues 为空、翻译来源字段完整和过期审核拒绝。
+review.json 测试覆盖 schema 1.1、精确 JobManifest 与候选集合绑定、源/术语哈希、页数、三种审核状态、全部项目明确状态、blocking_issues 为空、翻译来源字段完整、最终译文 token/术语重校验、带时区 ISO-8601 时间戳和过期审核拒绝。
 
 - [ ] **Step 2: 运行并确认 review 模块与模板缺失**
 
@@ -362,9 +362,9 @@ review.json 测试覆盖 schema 1.1、源/术语哈希、页数、三种审核�
 
 - [ ] **Step 3: 实现审核页面**
 
-模板使用单个 application/json script 节点承载将 “<” 转义为 “\u003c” 的 JSON；所有可见文本用 textContent 写入，不使用 innerHTML。界面提供页面类型、风险、术语、状态、问题筛选；点击项目高亮 bbox；按钮只有批准、修改后批准、跳过。导出按钮只有在每项状态有效且阻断数为零时启用。
+模板使用单个 application/json script 节点承载将 “<” 转义为 “\u003c” 的 JSON；所有可见文本用 textContent 写入，不使用 innerHTML。界面提供页面类型、风险、术语、状态、问题筛选；点击项目高亮 bbox；按钮只有批准、修改后批准、跳过。生成页面时无条件清空传入审核状态；导出按钮只有在每项状态有效且阻断数为零时启用。任务级 pipeline 从全部逐项翻译来源确定性汇总，显式矛盾立即失败。
 
-review.py 重新计算 source/glossary SHA-256，要求 source.filename、page_count、schema_version 全部匹配；没有“忽略继续”参数。
+review.py 从 JobManifest 路径重新计算 source/glossary SHA-256 和 PDF 页数，要求 schema、精确 job metadata、可信 expected item 集合及所有不可变字段完全匹配；重新验证最终译文的锁定 token、普通术语、DNT 命中和 pipeline 汇总，并只接受带时区 ISO-8601 完成时间；没有“忽略继续”参数。
 
 - [ ] **Step 4: 运行测试**
 
