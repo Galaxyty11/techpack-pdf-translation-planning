@@ -5,10 +5,12 @@ from email.policy import default
 from pathlib import Path
 
 import httpx
+import pymupdf
 import pytest
 
 from techpack_pdf.errors import TechpackError
 from techpack_pdf.mineru import MinerUClient
+from techpack_pdf.pdf_analysis import inspect_pdf
 
 
 def _multipart_parts(request: httpx.Request) -> dict[str, tuple[str | None, bytes]]:
@@ -123,3 +125,62 @@ def test_parse_rejects_malformed_json_response(tmp_path: Path) -> None:
         MinerUClient(transport=httpx.MockTransport(handler)).parse(source)
 
     assert raised.value.code == "mineru_invalid_response"
+
+
+def _native_manifest(tmp_path: Path, *, complete: bool):
+    source = tmp_path / ("native-complete.pdf" if complete else "native-incomplete.pdf")
+    document = pymupdf.open()
+    document.new_page(width=100, height=100).insert_text((10, 20), "PAGE ONE")
+    second = document.new_page(width=100, height=100)
+    if complete:
+        second.insert_text((10, 20), "PAGE TWO")
+    else:
+        pixmap = pymupdf.Pixmap(
+            pymupdf.csRGB,
+            pymupdf.IRect(0, 0, 100, 100),
+            False,
+        )
+        pixmap.clear_with(200)
+        second.insert_image(second.rect, pixmap=pixmap)
+    document.save(source)
+    document.close()
+    return source, inspect_pdf(source, tmp_path / "manifest-job")
+
+
+def test_parse_or_degrade_marks_every_complete_native_page_medium_risk(
+    tmp_path: Path,
+) -> None:
+    source, manifest = _native_manifest(tmp_path, complete=True)
+
+    def cannot_connect(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    outcome = MinerUClient(
+        transport=httpx.MockTransport(cannot_connect)
+    ).parse_or_degrade(source, manifest)
+
+    assert manifest.native_text_complete is True
+    assert outcome.mode == "degraded_native_only"
+    assert [(page.page_index, page.risk_level) for page in outcome.pages] == [
+        (0, "medium"),
+        (1, "medium"),
+    ]
+
+
+def test_parse_or_degrade_blocks_when_any_page_needs_ocr(tmp_path: Path) -> None:
+    source, manifest = _native_manifest(tmp_path, complete=False)
+
+    def cannot_connect(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    with pytest.raises(TechpackError) as raised:
+        MinerUClient(
+            transport=httpx.MockTransport(cannot_connect)
+        ).parse_or_degrade(source, manifest)
+
+    assert manifest.native_text_complete is False
+    assert raised.value.code == "mineru_unavailable"
+    assert raised.value.details == {
+        "page_index": 1,
+        "error_code": "native_text_incomplete",
+    }

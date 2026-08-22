@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
 from .errors import TechpackError
+from .pdf_analysis import PdfManifest
+
+
+@dataclass(frozen=True)
+class DegradedPage:
+    page_index: int
+    risk_level: Literal["medium"] = "medium"
+
+
+@dataclass(frozen=True)
+class NativeOnlyDegradation:
+    mode: Literal["degraded_native_only"] = "degraded_native_only"
+    pages: tuple[DegradedPage, ...] = ()
 
 
 class MinerUClient:
@@ -21,6 +35,33 @@ class MinerUClient:
         self.base_url = base_url
         self.timeout = timeout
         self.transport = transport
+
+    def parse_or_degrade(
+        self,
+        path: Path,
+        manifest: PdfManifest,
+    ) -> dict[str, Any] | NativeOnlyDegradation:
+        try:
+            return self.parse(path)
+        except TechpackError as exc:
+            if exc.code not in {"mineru_unavailable", "mineru_invalid_response"}:
+                raise
+            incomplete_page = next(
+                (page for page in manifest.pages if not page.native_text_complete),
+                None,
+            )
+            if incomplete_page is not None:
+                raise TechpackError(
+                    "mineru_unavailable",
+                    "MinerU failed and native text is incomplete",
+                    {
+                        "page_index": incomplete_page.page_index,
+                        "error_code": "native_text_incomplete",
+                    },
+                ) from exc
+            return NativeOnlyDegradation(
+                pages=tuple(DegradedPage(page.page_index) for page in manifest.pages)
+            )
 
     def parse(self, path: Path) -> dict[str, Any]:
         source_path = Path(path)

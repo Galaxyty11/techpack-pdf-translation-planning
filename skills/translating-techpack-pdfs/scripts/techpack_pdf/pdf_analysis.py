@@ -24,16 +24,24 @@ class NativeSpan:
 class PdfPageManifest:
     page_index: int
     media_box: tuple[float, float, float, float]
+    pdf_crop_box: tuple[float, float, float, float]
     crop_box: tuple[float, float, float, float]
     rotation: int
     native_spans: tuple[NativeSpan, ...]
     native_text_area_ratio: float
+    image_bboxes: tuple[tuple[float, float, float, float], ...]
     image_coverage_ratio: float
+    drawing_bboxes: tuple[tuple[float, float, float, float], ...]
     drawing_count: int
+    annotation_bboxes: tuple[tuple[float, float, float, float], ...]
     annotation_count: int
     is_scanned: bool
     needs_ocr_regions: tuple[tuple[float, float, float, float], ...]
     thumbnail_path: Path
+
+    @property
+    def native_text_complete(self) -> bool:
+        return not self.needs_ocr_regions
 
 
 @dataclass(frozen=True)
@@ -43,6 +51,10 @@ class PdfManifest:
     page_count: int
     has_existing_annotations: bool
     pages: tuple[PdfPageManifest, ...]
+
+    @property
+    def native_text_complete(self) -> bool:
+        return all(page.native_text_complete for page in self.pages)
 
 
 def inspect_pdf(path: Path, job_dir: Path) -> PdfManifest:
@@ -90,38 +102,51 @@ def inspect_pdf(path: Path, job_dir: Path) -> PdfManifest:
 
 
 def _inspect_page(page: pymupdf.Page, thumbnail_path: Path) -> PdfPageManifest:
-    crop_box = page.cropbox
+    pdf_crop_box = page.cropbox
     media_box = page.mediabox
-    if not _valid_box(crop_box) or not media_box.contains(crop_box):
+    if not _valid_box(pdf_crop_box) or not media_box.contains(pdf_crop_box):
         raise TechpackError(
             "pdf_corrupt",
             "PDF contains an invalid CropBox",
             {"page_index": page.number, "error_code": "invalid_crop_box"},
         )
 
+    crop_box = pymupdf.Rect(0, 0, pdf_crop_box.width, pdf_crop_box.height)
     native_spans = _native_spans(page)
+    image_bboxes = tuple(
+        _box_tuple(pymupdf.Rect(image["bbox"])) for image in page.get_image_info()
+    )
+    drawing_bboxes = tuple(
+        _box_tuple(pymupdf.Rect(drawing["rect"])) for drawing in page.get_drawings()
+    )
+    annotation_bboxes = tuple(_box_tuple(annotation.rect) for annotation in page.annots())
     page_area = crop_box.get_area()
-    native_text_area = sum(pymupdf.Rect(span.bbox).get_area() for span in native_spans)
-    image_area = sum(
-        (pymupdf.Rect(image["bbox"]) & crop_box).get_area()
-        for image in page.get_image_info()
+    native_text_area = _union_area(
+        tuple(pymupdf.Rect(span.bbox) & crop_box for span in native_spans)
+    )
+    image_area = _union_area(
+        tuple(pymupdf.Rect(bbox) & crop_box for bbox in image_bboxes)
     )
     native_text_area_ratio = min(native_text_area / page_area, 1.0)
     image_coverage_ratio = min(image_area / page_area, 1.0)
     is_scanned = native_text_area_ratio < 0.01 and image_coverage_ratio >= 0.5
-    needs_ocr_regions = (_box_tuple(crop_box),) if is_scanned else ()
+    needs_ocr_regions = _ocr_regions(image_bboxes, crop_box) if is_scanned else ()
 
     page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False).save(thumbnail_path)
     return PdfPageManifest(
         page_index=page.number,
         media_box=_box_tuple(media_box),
+        pdf_crop_box=_box_tuple(pdf_crop_box),
         crop_box=_box_tuple(crop_box),
         rotation=page.rotation,
         native_spans=native_spans,
         native_text_area_ratio=native_text_area_ratio,
+        image_bboxes=image_bboxes,
         image_coverage_ratio=image_coverage_ratio,
-        drawing_count=len(page.get_drawings()),
-        annotation_count=sum(1 for _ in page.annots()),
+        drawing_bboxes=drawing_bboxes,
+        drawing_count=len(drawing_bboxes),
+        annotation_bboxes=annotation_bboxes,
+        annotation_count=len(annotation_bboxes),
         is_scanned=is_scanned,
         needs_ocr_regions=needs_ocr_regions,
         thumbnail_path=thumbnail_path,
@@ -152,6 +177,43 @@ def _valid_box(rect: pymupdf.Rect) -> bool:
         and rect.width > 0
         and rect.height > 0
     )
+
+
+def _union_area(rectangles: tuple[pymupdf.Rect, ...]) -> float:
+    rects = tuple(rect for rect in rectangles if _valid_box(rect))
+    x_edges = sorted({edge for rect in rects for edge in (rect.x0, rect.x1)})
+    area = 0.0
+    for x0, x1 in zip(x_edges, x_edges[1:]):
+        intervals = sorted(
+            (rect.y0, rect.y1)
+            for rect in rects
+            if rect.x0 < x1 and rect.x1 > x0
+        )
+        covered_y = 0.0
+        if intervals:
+            start, end = intervals[0]
+            for next_start, next_end in intervals[1:]:
+                if next_start > end:
+                    covered_y += end - start
+                    start, end = next_start, next_end
+                else:
+                    end = max(end, next_end)
+            covered_y += end - start
+        area += (x1 - x0) * covered_y
+    return area
+
+
+def _ocr_regions(
+    image_bboxes: tuple[tuple[float, float, float, float], ...],
+    crop_box: pymupdf.Rect,
+) -> tuple[tuple[float, float, float, float], ...]:
+    regions: list[tuple[float, float, float, float]] = []
+    for bbox in image_bboxes:
+        clipped = pymupdf.Rect(bbox) & crop_box
+        region = _box_tuple(clipped)
+        if _valid_box(clipped) and region not in regions:
+            regions.append(region)
+    return tuple(regions)
 
 
 def _box_tuple(rect: pymupdf.Rect) -> tuple[float, float, float, float]:

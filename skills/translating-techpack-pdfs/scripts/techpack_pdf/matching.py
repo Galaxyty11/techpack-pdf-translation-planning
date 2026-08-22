@@ -98,7 +98,7 @@ def _match_one(
         (
             (
                 fuzz.ratio(text, candidate) / 100.0,
-                -_distance_ratio(
+                _distance_ratio(
                     _optional_bbox(native_spans[index].get("bbox")),
                     _optional_bbox(mineru_nodes[mineru_index].get("bbox")),
                     diagonal,
@@ -108,18 +108,18 @@ def _match_one(
             for index, candidate in enumerate(native_text)
             if candidate
         ),
-        reverse=True,
+        key=lambda candidate: (-candidate[0], candidate[1], candidate[2]),
     )
     if not ranked:
         return _unmatched(mineru_index, mineru_nodes, text)
 
-    similarity, negative_distance, native_index = ranked[0]
-    distance = -negative_distance
-    confidence = (
-        CoordinateConfidence.MEDIUM
-        if similarity >= 0.92 and distance <= 0.03
-        else CoordinateConfidence.LOW
-    )
+    eligible = [
+        candidate
+        for candidate in ranked
+        if candidate[0] >= 0.92 and candidate[1] <= 0.03
+    ]
+    similarity, distance, native_index = eligible[0] if eligible else ranked[0]
+    confidence = CoordinateConfidence.MEDIUM if eligible else CoordinateConfidence.LOW
     return _result(
         mineru_index,
         native_index,

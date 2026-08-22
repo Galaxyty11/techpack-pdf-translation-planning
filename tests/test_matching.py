@@ -103,3 +103,20 @@ def test_ocr_only_node_has_no_source_bbox_and_cannot_be_auto_approved() -> None:
     assert matched[0].coordinate_confidence is CoordinateConfidence.LOW
     assert matched[0].source_bbox is None
     assert matched[0].auto_approvable is False
+
+
+def test_fuzzy_matching_prefers_eligible_near_candidate_over_higher_far_similarity() -> None:
+    native = [
+        {"text": "abcdefghijklmnopqrstuvwxz", "bbox": [80, 10, 90, 20]},
+        {"text": "abcdefghijklmnopqrstuvwzz", "bbox": [11, 10, 21, 20]},
+    ]
+    mineru = [
+        {"text": "abcdefghijklmnopqrstuvwxy", "bbox": [10, 10, 20, 20]},
+    ]
+
+    matched = match_nodes(native, mineru, PAGE_RECT)
+
+    assert matched[0].similarity == pytest.approx(0.92)
+    assert matched[0].distance_ratio < 0.03
+    assert matched[0].coordinate_confidence is CoordinateConfidence.MEDIUM
+    assert matched[0].source_bbox == (11.0, 10.0, 21.0, 20.0)
