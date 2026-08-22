@@ -501,6 +501,51 @@ def test_lexical_patterns_do_not_extract_inside_latin_digit_identifiers() -> Non
     assert "50%" not in values
 
 
+@pytest.mark.parametrize(
+    ("text", "forbidden_value"),
+    [
+        ("e\u0301cm", "cm"),
+        ("e\u0301ABC123", "ABC123"),
+        ("cm\u0301", "cm"),
+        ("ABC123\u0301", "ABC123"),
+    ],
+)
+def test_lexical_tokens_do_not_split_decomposed_latin_graphemes(
+    text: str,
+    forbidden_value: str,
+) -> None:
+    values = [token.value for token in lock_tokens(text).tokens]
+
+    assert forbidden_value not in values
+
+
+def test_exact_locked_value_rejects_a_trailing_combining_mark() -> None:
+    source = lock_tokens("cm")
+
+    assert validate_locked_tokens(source, "长度cm\u0301宽度") is False
+    assert validate_locked_tokens(source, "长度cm宽度") is True
+
+
+@pytest.mark.parametrize(
+    ("text", "forbidden_value"),
+    [
+        ("éSTYLE ST-2048", "ST-2048"),
+        ("e\u0301STYLE ST-2048", "ST-2048"),
+        ("éMATERIAL MAT-7788", "MAT-7788"),
+        ("e\u0301MATERIAL MAT-7788", "MAT-7788"),
+        ("éDESIGNER: Jane Doe", "Jane Doe"),
+        ("e\u0301DESIGNER: Jane Doe", "Jane Doe"),
+    ],
+)
+def test_named_group_tokens_require_the_full_marker_match_to_be_boundary_safe(
+    text: str,
+    forbidden_value: str,
+) -> None:
+    values = [token.value for token in lock_tokens(text).tokens]
+
+    assert forbidden_value not in values
+
+
 def test_marked_person_exact_value_allows_cjk_adjacency_during_validation() -> None:
     source = lock_tokens("DESIGNER: Jane Doe")
 

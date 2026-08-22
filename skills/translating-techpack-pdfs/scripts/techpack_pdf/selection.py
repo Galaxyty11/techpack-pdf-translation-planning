@@ -263,10 +263,25 @@ def lock_tokens(text: str) -> LockedText:
     """Record protected token occurrences exactly as written and in source order."""
     found: list[LockedToken] = []
     occupied: list[tuple[int, int]] = []
+    unsafe_group_spans: list[tuple[int, int]] = []
     for kind, pattern, group_name in _TOKEN_PATTERNS:
         for match in pattern.finditer(text):
+            if group_name:
+                match_start, match_end = match.span()
+                if not _is_exact_token_occurrence(
+                    text,
+                    match_start,
+                    match_end,
+                    text[match_start:match_end],
+                ):
+                    unsafe_group_spans.append(match.span(group_name))
+                    continue
             start, end = match.span(group_name) if group_name else match.span()
+            if any(_overlaps(start, end, used_start, used_end) for used_start, used_end in unsafe_group_spans):
+                continue
             if not _is_exact_token_occurrence(text, start, end, text[start:end]):
+                if group_name:
+                    unsafe_group_spans.append((start, end))
                 continue
             if any(start < used_end and end > used_start for used_start, used_end in occupied):
                 continue
@@ -328,12 +343,22 @@ def _source_token_occurrences(source: LockedText, text: str) -> tuple[LockedToke
 def _is_exact_token_occurrence(text: str, start: int, end: int, value: str) -> bool:
     normalized_value = normalize_term(value)
     if _is_latin_identifier_char(normalized_value[0]):
-        if start > 0 and _is_latin_identifier_char(text[start - 1]):
+        left_base = _preceding_grapheme_base(text, start)
+        if left_base is not None and _is_latin_identifier_char(left_base):
             return False
+    if end < len(text) and unicodedata.combining(text[end]):
+        return False
     if _is_latin_identifier_char(normalized_value[-1]):
         if end < len(text) and _is_latin_identifier_char(text[end]):
             return False
     return True
+
+
+def _preceding_grapheme_base(text: str, start: int) -> str | None:
+    index = start - 1
+    while index >= 0 and unicodedata.combining(text[index]):
+        index -= 1
+    return text[index] if index >= 0 else None
 
 
 def _is_latin_identifier_char(character: str) -> bool:
