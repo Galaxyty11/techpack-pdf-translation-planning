@@ -454,13 +454,13 @@ git commit -m "feat: apply collision-safe editable PDF annotations"
 
 - [ ] **Step 3: 实现状态机**
 
-workflow 状态固定为 initialized、parsed、translation_requested、translation_validated、review_ready、review_completed、applying、succeeded、failed。每次转换把 state.json 写到同目录临时文件后 replace；恢复时只从最后完整状态继续。翻译中断、上下文不足、额度耗尽或 sub-agent 失败由宿主写 agent-failure.json，工作流保持 translation_requested 并退出 4。
+workflow 状态固定为 initialized、parsed、translation_requested、translation_validated、review_ready、review_completed、applying、succeeded、failed。每次转换把 state.json 写到同目录临时文件后 replace；恢复时只从同一任务目录的最后完整状态继续：`initialized` 可重新完成快照、inspect/MinerU 和 analysis 后进入 `parsed`，`parsed` 只规范化重建请求并进入 `translation_requested`，均不得另建任务。翻译中断、上下文不足、额度耗尽或 sub-agent 失败由宿主写 agent-failure.json，工作流保持 translation_requested 并退出 4。
 
-状态及工件仅采用轻量完整性：严格模型和 SHA-256 摘要，不创建 HMAC 签名、外部 trust root、密钥或凭据库依赖。恢复时重建并核对 canonical request/response/expected-output；review 在 `review_ready -> review_completed` 时只快照一次，后续不再依赖外部 review.json，Task 8 调用前后均复核可信 review 摘要。bootstrap 失败仍返回已创建的 job_id/job_dir。临时文件仅由创建者按已捕获身份清理。
+状态及工件仅采用轻量完整性：严格模型和 SHA-256 摘要，不创建 HMAC 签名、外部 trust root、密钥或凭据库依赖。恢复时重建并核对 canonical request/response/expected-output；review 候选先写入所有权受控 pending 文件并通过 Task 7 验证，再以 no-clobber 方式发布并完成 `review_ready -> review_completed`，无效或中断 pending 不得作为可信快照；后续不再依赖外部 review.json，Task 8 调用前后均复核可信 review 摘要。bootstrap manifest/初始 state 写入失败仍返回已创建任务的安全 job_id、绝对 job_dir 和 input_index。临时文件在独占创建后、任何写入/读取/fsync 前捕获 descriptor 所有权，且仅由创建者按该身份清理。
 
 `WorkflowResult.state` 只能是上述九种状态或 `None`；`workflow_busy`、恢复等待等结果放在 `status`/`wait_reason`。同任务保护必须非阻塞，busy 路径不得写 state。状态终止操作在保护内使用 revision/token 比较，避免过期调用覆盖较新状态。
 
-CLI 使用 argparse，不提供 skip-review、ignore-hash、force-overlap 或 flatten 参数。--output 必须精确等于源文件 stem 加 “.annotated.pdf”，已存在时返回 output_exists，不能覆盖。
+CLI 使用 argparse，不提供 skip-review、ignore-hash、force-overlap 或 flatten 参数。--output 必须精确等于原文件完整文件名加 “.annotated.pdf”（例如 `a.pdf.annotated.pdf`），已存在时返回 output_exists，不能覆盖。
 
 - [ ] **Step 4: 运行全部自动测试**
 

@@ -321,6 +321,7 @@ class WorkflowResult:
             result["state"] = self.state
         if self.job_dir is not None:
             result["job_id"] = self.job_dir.name
+            result["job_dir"] = str(self.job_dir)
         if self.input_index is not None:
             result["input_index"] = self.input_index
         if self.jobs:
@@ -401,6 +402,22 @@ def _prepare_review_locked(job_dir: str | Path) -> WorkflowResult:
     _load_state_payload(directory)
     job = _load_job(directory)
     state = _load_state(directory, job)
+    if state.state is WorkflowState.INITIALIZED:
+        job = _resume_initialized_job(directory, job, MinerUClient())
+        state = _load_state(directory, job)
+    if state.state is WorkflowState.PARSED:
+        analysis = _load_model(directory, "analysis.json", _AnalysisSnapshot)
+        _assert_snapshot_binding(analysis, job)
+        _atomic_translation_request(directory, _candidates_from_analysis(analysis), job)
+        _write_state(
+            directory,
+            job,
+            WorkflowState.TRANSLATION_REQUESTED,
+            state.revision + 1,
+            state.expected_attempt,
+            "host_translation",
+        )
+        state = _load_state(directory, job)
     _verify_bound_inputs(directory, job)
     if state.state not in {WorkflowState.TRANSLATION_REQUESTED, WorkflowState.TRANSLATION_VALIDATED, WorkflowState.REVIEW_READY}:
         raise _workflow_error("workflow_state_conflict", "Job cannot prepare review from its current state")
@@ -468,8 +485,10 @@ def apply(
     source_path = _absolute_user_path(source, must_exist=True, regular=True)
     output_path = _absolute_user_path(output, must_exist=False, regular=False)
     expected_path = source_path.with_name(source_path.name + ".annotated.pdf")
-    if output_path != expected_path or (output_path.exists() and not (directory / "state.json").is_file()):
+    if output_path != expected_path:
         raise _workflow_error("output_invalid", "Output path is not available for this job")
+    if output_path.exists() and not (directory / "state.json").is_file():
+        raise _workflow_error("output_exists", "Output already exists")
     try:
         with _job_lock(directory) as guard:
             try:
@@ -545,7 +564,7 @@ def _apply_locked(
                 status="recovery_required", wait_reason="apply_recovery",
             )
     if not resuming_apply and output_path.exists():
-        raise _workflow_error("output_invalid", "Output path is not available for this job")
+        raise _workflow_error("output_exists", "Output already exists")
     if state.state not in {WorkflowState.REVIEW_READY, WorkflowState.REVIEW_COMPLETED, WorkflowState.APPLYING}:
         raise _workflow_error("workflow_state_conflict", "Job is not ready to apply")
     trusted_review = _inside(directory, _TRUSTED_REVIEW_NAME)
@@ -553,23 +572,48 @@ def _apply_locked(
     if state.state is WorkflowState.REVIEW_READY:
         review_path = _absolute_user_path(review_path, must_exist=True, regular=True)
         review_bytes = _bounded_binary_read(review_path)
-        _atomic_binary_write(trusted_review, review_bytes)
+        pending_review = _inside(directory, f".trusted-review.{uuid.uuid4().hex}.pending")
+        pending_owner = _atomic_binary_write(pending_review, review_bytes)
         trusted_review_digest = _sha256_bytes(review_bytes)
-
-    # This is the same authoritative validation that apply_review repeats internally.
-    try:
+        try:
+            try:
+                load_review(pending_review, job, expected.output)
+            except TechpackError:
+                _atomic_json_write(directory / "apply-result.json", _apply_result_snapshot(
+                    directory,
+                    job,
+                    "failed",
+                    review_sha256_override=trusted_review_digest,
+                    problems=({"code": "review_validation_failed"},),
+                ).model_dump(mode="json"))
+                _write_state(directory, job, WorkflowState.FAILED, state.revision + 1, state.expected_attempt, None)
+                return WorkflowResult(5, WorkflowState.FAILED, directory)
+            if (
+                _owner_identity(pending_review.lstat()) != pending_owner
+                or _sha256_artifact(directory, pending_review.name) != trusted_review_digest
+            ):
+                raise _workflow_error("workflow_artifact_invalid", "Review candidate changed during validation")
+            _publish_review_no_clobber(pending_review, trusted_review, pending_owner, trusted_review_digest)
+            try:
+                _write_state(
+                    directory,
+                    job,
+                    WorkflowState.REVIEW_COMPLETED,
+                    state.revision + 1,
+                    state.expected_attempt,
+                    None,
+                )
+            except BaseException:
+                if not _unlink_owned(trusted_review, pending_owner):
+                    raise _workflow_error("workflow_atomic_cleanup_failed", "Validated review rollback failed") from None
+                raise
+            state = _load_state(directory, job)
+        finally:
+            if pending_review.exists() and not _unlink_owned(pending_review, pending_owner):
+                raise _workflow_error("workflow_atomic_cleanup_failed", "Review candidate cleanup failed") from None
+    else:
+        # Resume validates the one already-bound review snapshot; external review.json is irrelevant.
         load_review(trusted_review, job, expected.output)
-    except TechpackError:
-        _atomic_json_write(directory / "apply-result.json", _apply_result_snapshot(
-            directory, job, "failed", problems=({"code": "review_validation_failed"},),
-        ).model_dump(mode="json"))
-        _write_state(directory, job, WorkflowState.FAILED, state.revision + 1, state.expected_attempt, None)
-        return WorkflowResult(5, WorkflowState.FAILED, directory)
-    if state.state is WorkflowState.REVIEW_READY:
-        if trusted_review_digest is None or _sha256_artifact(directory, _TRUSTED_REVIEW_NAME) != trusted_review_digest:
-            raise _workflow_error("workflow_artifact_invalid", "Trusted review changed during validation")
-        _write_state(directory, job, WorkflowState.REVIEW_COMPLETED, state.revision + 1, state.expected_attempt, None)
-        state = _load_state(directory, job)
     if state.state is WorkflowState.REVIEW_COMPLETED:
         _write_state(directory, job, WorkflowState.APPLYING, state.revision + 1, state.expected_attempt, None)
     before_task8_review = _sha256_artifact(directory, _TRUSTED_REVIEW_NAME)
@@ -692,34 +736,13 @@ def _analyze_one(
     glossary_path = _absolute_user_path(glossary_path, must_exist=True, regular=True)
     job_root = _absolute_user_path(job_root, must_exist=False, regular=False)
     job = create_job(source, glossary_path, job_root, now)
-    directory = _job_directory(job.job_dir)
-    _atomic_json_write(directory / "manifest.json", job.model_dump(mode="json"))
-    _write_state(directory, job, WorkflowState.INITIALIZED, 0, 0, None)
+    directory = Path(job.job_dir)
     try:
-        identities = _input_identities(source, glossary_path)
-        snapshot_source, snapshot_glossary = _snapshot_inputs(directory, job, identities)
-        snapshot_identities = _input_identities(snapshot_source, snapshot_glossary)
-        _verify_snapshot_inputs(directory, job, snapshot_identities)
-        glossary = load_glossary(snapshot_glossary)
-        _verify_snapshot_inputs(directory, job, snapshot_identities)
-        pdf = inspect_pdf(snapshot_source, directory)
-        _verify_snapshot_inputs(directory, job, snapshot_identities)
-        if pdf.sha256 != job.source.sha256:
-            raise _workflow_error("workflow_input_changed", "Input snapshot does not match manifest")
-        job = job.model_copy(
-            update={
-                "source": job.source.model_copy(update={"page_count": pdf.page_count}),
-            }
-        )
+        directory = _job_directory(directory)
         _atomic_json_write(directory / "manifest.json", job.model_dump(mode="json"))
-        parsed = mineru_client.parse_or_degrade(snapshot_source, pdf)
-        _verify_snapshot_inputs(directory, job, snapshot_identities)
-        analysis = _analysis_snapshot(directory, job, pdf, parsed, glossary)
-        _ensure_techpack_gate(analysis)
-        _verify_snapshot_inputs(directory, job, snapshot_identities)
-        _verify_original_inputs(job, identities)
-        _atomic_json_write(directory / "analysis.json", analysis.model_dump(mode="json"))
-        _write_state(directory, job, WorkflowState.PARSED, 1, 0, None)
+        _write_state(directory, job, WorkflowState.INITIALIZED, 0, 0, None)
+        job = _resume_initialized_job(directory, job, mineru_client)
+        analysis = _load_model(directory, "analysis.json", _AnalysisSnapshot)
         _atomic_translation_request(directory, _candidates_from_analysis(analysis), job)
         _write_state(directory, job, WorkflowState.TRANSLATION_REQUESTED, 2, 0, "host_translation")
         return WorkflowResult(4, WorkflowState.TRANSLATION_REQUESTED, directory)
@@ -733,6 +756,39 @@ def _analyze_one(
         if isinstance(error, TechpackError):
             return WorkflowResult(_exit_for(error), WorkflowState.FAILED, directory)
         return WorkflowResult(2, WorkflowState.FAILED, directory)
+
+
+def _resume_initialized_job(
+    directory: Path,
+    job: JobManifest,
+    mineru_client: MinerUClient,
+) -> JobManifest:
+    """Deterministically rebuild an initialized job through its parsed checkpoint."""
+    source = _absolute_user_path(job.source.path, must_exist=True, regular=True)
+    glossary_path = _absolute_user_path(job.glossary.path, must_exist=True, regular=True)
+    identities = _input_identities(source, glossary_path)
+    snapshot_source, snapshot_glossary = _snapshot_inputs(directory, job, identities)
+    snapshot_identities = _input_identities(snapshot_source, snapshot_glossary)
+    _verify_snapshot_inputs(directory, job, snapshot_identities)
+    glossary = load_glossary(snapshot_glossary)
+    _verify_snapshot_inputs(directory, job, snapshot_identities)
+    pdf = inspect_pdf(snapshot_source, directory)
+    _verify_snapshot_inputs(directory, job, snapshot_identities)
+    if pdf.sha256 != job.source.sha256:
+        raise _workflow_error("workflow_input_changed", "Input snapshot does not match manifest")
+    job = job.model_copy(update={
+        "source": job.source.model_copy(update={"page_count": pdf.page_count}),
+    })
+    _atomic_json_write(directory / "manifest.json", job.model_dump(mode="json"))
+    parsed = mineru_client.parse_or_degrade(snapshot_source, pdf)
+    _verify_snapshot_inputs(directory, job, snapshot_identities)
+    analysis = _analysis_snapshot(directory, job, pdf, parsed, glossary)
+    _ensure_techpack_gate(analysis)
+    _verify_snapshot_inputs(directory, job, snapshot_identities)
+    _verify_original_inputs(job, identities)
+    _atomic_json_write(directory / "analysis.json", analysis.model_dump(mode="json"))
+    _write_state(directory, job, WorkflowState.PARSED, 1, 0, None)
+    return job
 
 
 def _analysis_snapshot(
@@ -909,22 +965,32 @@ def _candidates_from_analysis(analysis: _AnalysisSnapshot) -> list[Any]:
 
 def _atomic_translation_request(directory: Path, candidates: Sequence[Any], job: JobManifest) -> None:
     temp = directory / f".translation-request.{uuid.uuid4().hex}.tmp"
-    owned_identity: tuple[int, int, int, int] | None = None
+    owned_identity: tuple[int, int] | None = None
     primary_failed = False
     cleanup_failed = False
     try:
+        descriptor = os.open(
+            temp,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            owned_identity = _owner_identity(os.fstat(descriptor))
+        finally:
+            os.close(descriptor)
         write_translation_request(candidates, temp, job)
         with temp.open("rb+") as stream:
             stream.flush()
             os.fsync(stream.fileno())
-        owned_identity = _file_stat_identity(temp.lstat())
+        if _owner_identity(temp.lstat()) != owned_identity:
+            raise OSError
         os.replace(temp, directory / "translation-request.json")
         _fsync_parent(directory)
     except (OSError, TechpackError):
         primary_failed = True
     finally:
         try:
-            if temp.exists() and owned_identity is not None and _file_stat_identity(temp.lstat()) == owned_identity:
+            if temp.exists() and owned_identity is not None and _owner_identity(temp.lstat()) == owned_identity:
                 temp.unlink()
             elif temp.exists():
                 cleanup_failed = True
@@ -1028,6 +1094,7 @@ def _apply_result_snapshot(
     status: Literal["succeeded", "failed"],
     *,
     output_sha256: str | None = None,
+    review_sha256_override: str | None = None,
     final_output_retained: bool = False,
     problems: Sequence[Any] = (),
     unresolved: Sequence[Any] = (),
@@ -1038,7 +1105,7 @@ def _apply_result_snapshot(
         source_sha256=job.source.sha256,
         glossary_sha256=job.glossary.sha256,
         expected_output_sha256=sha256_file(_inside(directory, "expected-output.json")),
-        review_sha256=sha256_file(_inside(directory, _TRUSTED_REVIEW_NAME)),
+        review_sha256=review_sha256_override or sha256_file(_inside(directory, _TRUSTED_REVIEW_NAME)),
         status=status,
         output_sha256=output_sha256,
         final_output_retained=final_output_retained,
@@ -1420,16 +1487,24 @@ def _stable_copy(source: Path, target: Path, expected_sha256: str, identity: tup
     if _file_identity(source) != identity:
         raise _workflow_error("workflow_input_changed", "Job input changed while being snapshotted")
     temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-    owned_identity: tuple[int, int, int, int] | None = None
+    owned_identity: tuple[int, int] | None = None
     primary: TechpackError | None = None
     cleanup_failed = False
     try:
-        with source.open("rb") as reader, temporary.open("xb") as writer:
-            while chunk := reader.read(1024 * 1024):
-                writer.write(chunk)
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        owned_identity = _owner_identity(os.fstat(descriptor))
+        with os.fdopen(descriptor, "wb") as writer:
+            with source.open("rb") as reader:
+                while chunk := reader.read(1024 * 1024):
+                    writer.write(chunk)
             writer.flush()
             os.fsync(writer.fileno())
-        owned_identity = _file_stat_identity(temporary.lstat())
+        if _owner_identity(temporary.lstat()) != owned_identity:
+            raise OSError
         if _file_identity(source) != identity or sha256_file(temporary) != expected_sha256:
             raise _workflow_error("workflow_input_changed", "Job input changed while being snapshotted")
         os.replace(temporary, target)
@@ -1442,7 +1517,7 @@ def _stable_copy(source: Path, target: Path, expected_sha256: str, identity: tup
         try:
             if temporary.exists():
                 details = temporary.lstat()
-                if owned_identity is None or _file_stat_identity(details) != owned_identity:
+                if owned_identity is None or _owner_identity(details) != owned_identity:
                     cleanup_failed = True
                 else:
                     temporary.unlink()
@@ -1644,6 +1719,58 @@ def _file_stat_identity(details: Any) -> tuple[int, int, int, int]:
     return (details.st_dev, details.st_ino, details.st_size, details.st_mtime_ns)
 
 
+def _owner_identity(details: Any) -> tuple[int, int]:
+    """Identity fields that remain stable while an exclusively created file is written."""
+    return (details.st_dev, details.st_ino)
+
+
+def _unlink_owned(path: Path, owner: tuple[int, int]) -> bool:
+    """Remove only the exact regular file object captured by its creator."""
+    try:
+        details = path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if _is_reparse_or_link(details) or not stat.S_ISREG(details.st_mode) or _owner_identity(details) != owner:
+        return False
+    try:
+        path.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _publish_review_no_clobber(
+    pending: Path,
+    trusted: Path,
+    owner: tuple[int, int],
+    digest: str,
+) -> None:
+    """Atomically expose one validated pending review without overwriting any file."""
+    published = False
+    try:
+        if _owner_identity(pending.lstat()) != owner or trusted.exists():
+            raise OSError
+        os.link(pending, trusted, follow_symlinks=False)
+        published = True
+        _fsync_parent(trusted.parent)
+        details = trusted.lstat()
+        if (
+            _is_reparse_or_link(details)
+            or not stat.S_ISREG(details.st_mode)
+            or _owner_identity(details) != owner
+            or _sha256_artifact(trusted.parent, trusted.name) != digest
+        ):
+            raise OSError
+    except BaseException as error:
+        if published and not _unlink_owned(trusted, owner):
+            raise _workflow_error("workflow_atomic_cleanup_failed", "Validated review rollback failed") from None
+        if isinstance(error, (OSError, TechpackError)):
+            raise _workflow_error("workflow_artifact_invalid", "Validated review could not be published") from None
+        raise
+
+
 def _sha256_bytes(value: bytes) -> str:
     import hashlib
 
@@ -1688,18 +1815,25 @@ def _atomic_text_write(path: Path, text: str) -> None:
     _atomic_binary_write(path, text.encode("utf-8"))
 
 
-def _atomic_binary_write(path: Path, value: bytes) -> None:
+def _atomic_binary_write(path: Path, value: bytes) -> tuple[int, int]:
     directory = path.parent
     temp = directory / f".{path.name}.{uuid.uuid4().hex}.tmp"
-    owned_identity: tuple[int, int, int, int] | None = None
+    owned_identity: tuple[int, int] | None = None
     primary_failed = False
     cleanup_failed = False
     try:
-        with temp.open("xb") as stream:
+        descriptor = os.open(
+            temp,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        owned_identity = _owner_identity(os.fstat(descriptor))
+        with os.fdopen(descriptor, "wb") as stream:
             stream.write(value)
             stream.flush()
             os.fsync(stream.fileno())
-        owned_identity = _file_stat_identity(temp.lstat())
+        if _owner_identity(temp.lstat()) != owned_identity:
+            raise OSError
         os.replace(temp, path)
         _fsync_parent(directory)
     except OSError:
@@ -1708,7 +1842,7 @@ def _atomic_binary_write(path: Path, value: bytes) -> None:
         try:
             if temp.exists():
                 details = temp.lstat()
-                if owned_identity is not None and _file_stat_identity(details) != owned_identity:
+                if owned_identity is not None and _owner_identity(details) != owned_identity:
                     cleanup_failed = True
                 elif owned_identity is not None:
                     temp.unlink()
@@ -1721,6 +1855,9 @@ def _atomic_binary_write(path: Path, value: bytes) -> None:
         raise _workflow_error(code, "Workflow artifact could not be committed")
     if cleanup_failed:
         raise _workflow_error("workflow_atomic_cleanup_failed", "Workflow temporary artifact could not be cleaned")
+    if owned_identity is None:
+        raise _workflow_error("workflow_atomic_write_failed", "Workflow artifact ownership was not captured")
+    return owned_identity
 
 
 def _fsync_parent(directory: Path) -> None:
