@@ -894,6 +894,13 @@ def test_prepare_accepts_explicit_null_agent_role_for_main_agent(tmp_path):
     assert result.state == "review_ready"
     expected = json.loads((job.job_dir / "expected-output.json").read_text(encoding="utf-8"))
     assert expected["output"]["items"][0]["translation_agent_role"] is None
+    review_path = _write_approved_review(job.job_dir)
+    output = source.with_name(source.name + ".annotated.pdf")
+
+    applied = apply(source, review_path, output)
+
+    assert (applied.exit_code, applied.state) == (0, "succeeded")
+    assert output.is_file()
 
 
 def test_expected_output_promotes_unknown_model_translation_warning_and_nonhigh_coordinate_risk(tmp_path, monkeypatch):

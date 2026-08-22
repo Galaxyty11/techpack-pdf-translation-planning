@@ -352,7 +352,7 @@ git commit -m "feat: validate host Agent translation exchange"
 
 生成含 “</script><script>alert(1)</script>” 的源文和译文，断言输出不产生第二个 script 节点，且模板不包含 http://、https://、CDN、fetch 或 WebSocket。解析内嵌 JSON，验证图片是 data:image/png;base64。
 
-review.json 测试覆盖必填 schema 1.1、精确 JobManifest 与可信完整输出快照绑定、源/术语哈希、页数、三种审核状态、全部项目明确状态、可信 blocking_issues、完整 pipeline、翻译来源字段、最终译文 token/术语重校验、带时区 ISO-8601 时间戳和过期审核拒绝。
+review.json 测试覆盖必填 schema 1.1、精确 JobManifest 与可信完整输出快照绑定、源/术语哈希、页数、三种审核状态、全部项目明确状态、可信 blocking_issues、完整 pipeline、翻译来源字段、最终译文 token/术语重校验、带时区 ISO-8601 时间戳和过期审核拒绝。ReviewItem 的 `translation_agent_role` 缺键必须 schema 失败；main_agent 显式 null 通过完整生成/导出/加载链路，subagent/mixed 的 null 或空白失败且非空角色通过。
 
 - [ ] **Step 2: 运行并确认 review 模块与模板缺失**
 
@@ -364,7 +364,7 @@ review.json 测试覆盖必填 schema 1.1、精确 JobManifest 与可信完整�
 
 模板使用单个 application/json script 节点承载将 “<” 转义为 “\u003c” 的 JSON；所有可见文本用 textContent 写入，不使用 innerHTML。界面提供页面类型、风险、术语、状态、问题筛选；点击项目高亮 bbox；按钮只有批准、修改后批准、跳过。生成页面时无条件清空传入审核状态；导出按钮只有在每项状态有效且阻断数为零时启用。任务级 pipeline 从全部逐项翻译来源确定性汇总，显式矛盾立即失败。
 
-review.py 从 JobManifest 路径重新计算 source/glossary SHA-256 和 PDF 页数，并以生成审核页时的同一 `expected_output` 为完整信任边界：用同一确定性 helper 派生清零 items、包含 parser/executor 的聚合 pipeline 和 blocking_issues，要求提交值及全部不可变 item 字段精确匹配。重新验证最终译文的锁定 token、普通术语及独立于 locked_tokens 的 DNT 精确源文拼写/多重数，并只接受带时区 ISO-8601 完成时间；没有“忽略继续”参数。
+review.py 从 JobManifest 路径重新计算 source/glossary SHA-256 和 PDF 页数，并以生成审核页时的同一 `expected_output` 为完整信任边界：用同一确定性 helper 派生清零 items、包含 parser/executor 的聚合 pipeline 和 blocking_issues，要求提交值及全部不可变 item 字段精确匹配。ReviewItem 保留结构必填、可空的 `translation_agent_role`，并与 Task 6 使用同一条件语义：main_agent 可显式 null 或提供无首尾空白的非空角色，subagent/mixed 必须提供非空角色，不设置冲突的后置 provenance 门。重新验证最终译文的锁定 token、普通术语及独立于 locked_tokens 的 DNT 精确源文拼写/多重数，并只接受带时区 ISO-8601 完成时间；没有“忽略继续”参数。
 
 - [ ] **Step 4: 运行测试**
 

@@ -1,7 +1,13 @@
 import pytest
 from pydantic import ValidationError
 
-from techpack_pdf.models import PipelineInfo, ReviewDocument, ReviewStatus, TranslatorInfo
+from techpack_pdf.models import (
+    PipelineInfo,
+    ReviewDocument,
+    ReviewItem,
+    ReviewStatus,
+    TranslatorInfo,
+)
 from techpack_pdf.errors import TechpackError
 
 
@@ -35,6 +41,51 @@ def test_review_document_accepts_explicit_empty_items_issues_and_null_completion
     assert document.items == []
     assert document.blocking_issues == []
     assert document.review_completed_at is None
+
+
+def test_review_item_requires_structural_translation_agent_role_key():
+    payload = _valid_review_item_payload()
+    payload.pop("translation_agent_role")
+
+    with pytest.raises(ValidationError, match="translation_agent_role"):
+        ReviewItem.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("execution_mode", "agent_role"),
+    [
+        ("main_agent", None),
+        ("main_agent", "primary-translator"),
+        ("subagent", "techpack-translator"),
+        ("mixed", "translation-coordinator"),
+    ],
+)
+def test_review_item_accepts_provenance_allowed_by_translation_contract(
+    execution_mode,
+    agent_role,
+):
+    payload = _valid_review_item_payload()
+    payload.update(
+        translation_execution_mode=execution_mode,
+        translation_agent_role=agent_role,
+    )
+
+    item = ReviewItem.model_validate(payload)
+
+    assert item.translation_agent_role == agent_role
+
+
+@pytest.mark.parametrize("execution_mode", ["subagent", "mixed"])
+@pytest.mark.parametrize("agent_role", [None, "", "   "])
+def test_review_item_rejects_missing_delegated_role(execution_mode, agent_role):
+    payload = _valid_review_item_payload()
+    payload.update(
+        translation_execution_mode=execution_mode,
+        translation_agent_role=agent_role,
+    )
+
+    with pytest.raises(ValidationError, match="translation_agent_role|delegated"):
+        ReviewItem.model_validate(payload)
 
 
 def test_translator_info_rejects_empty_model_but_accepts_unknown():
@@ -192,4 +243,34 @@ def _valid_review_document_payload() -> dict:
         "items": [],
         "blocking_issues": [],
         "review_completed_at": None,
+    }
+
+
+def _valid_review_item_payload() -> dict:
+    return {
+        "item_id": "p001-i001",
+        "page_index": 0,
+        "page_type": "bom",
+        "source_text": "Shell 12 mm",
+        "normalized_text": "shell 12 mm",
+        "source_bbox": [10.0, 10.0, 90.0, 20.0],
+        "source_kind": "body",
+        "coordinate_confidence": "high",
+        "decision_reason": "field_rule",
+        "locked_tokens": ["12", "mm"],
+        "glossary_hits": [],
+        "suggested_translation": "大身 12 mm",
+        "reviewed_translation": None,
+        "review_status": None,
+        "risk_level": "low",
+        "translation_host": "codex",
+        "translation_execution_mode": "main_agent",
+        "translation_model": "unknown",
+        "translation_agent_role": None,
+        "translation_prompt_version": "1.0",
+        "placement_strategy": "same_region",
+        "target_rect": [100.0, 10.0, 180.0, 30.0],
+        "font_size": 6.0,
+        "leader_line": None,
+        "warnings": [],
     }

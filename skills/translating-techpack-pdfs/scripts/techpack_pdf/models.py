@@ -5,7 +5,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class StrictModel(BaseModel):
@@ -123,7 +123,7 @@ class ReviewItem(StrictModel):
     translation_host: str = Field(min_length=1)
     translation_execution_mode: ExecutionMode
     translation_model: str = Field(min_length=1)
-    translation_agent_role: str | None = None
+    translation_agent_role: str | None
     translation_prompt_version: str = Field(min_length=1)
     placement_strategy: str | None = None
     target_rect: list[float] | None = Field(default=None, min_length=4, max_length=4)
@@ -137,6 +137,24 @@ class ReviewItem(StrictModel):
         if value is not None and not value.strip():
             raise ValueError("translation must not be blank")
         return value
+
+    @field_validator("translation_agent_role")
+    @classmethod
+    def translation_agent_role_is_normalized(cls, value: str | None) -> str | None:
+        if value is not None and (not value.strip() or value != value.strip()):
+            raise ValueError(
+                "translation_agent_role must be nonblank and have no surrounding whitespace"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def delegated_translation_has_role(self) -> "ReviewItem":
+        if (
+            self.translation_execution_mode is not ExecutionMode.MAIN_AGENT
+            and self.translation_agent_role is None
+        ):
+            raise ValueError("delegated translation requires translation_agent_role")
+        return self
 
 
 class ReviewDocument(StrictModel):

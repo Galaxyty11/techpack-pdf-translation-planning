@@ -152,15 +152,21 @@ def load_review(
             item.suggested_translation
         ):
             _fail("review_translation_missing", "An approval needs a validated translation")
-        if not all(
+        base_provenance = all(
             _nonblank(value)
             for value in (
                 item.translation_host,
                 item.translation_model,
-                item.translation_agent_role,
                 item.translation_prompt_version,
             )
-        ):
+        )
+        if item.translation_execution_mode.value == "main_agent":
+            role_provenance = item.translation_agent_role is None or _nonblank(
+                item.translation_agent_role
+            )
+        else:
+            role_provenance = _nonblank(item.translation_agent_role)
+        if not base_provenance or not role_provenance:
             _fail(
                 "review_provenance_incomplete",
                 "Every review item needs complete translation provenance",
