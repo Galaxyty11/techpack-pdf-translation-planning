@@ -65,6 +65,22 @@ class TranslatorInfo(StrictModel):
     agent_role: str | None = None
 
 
+class PipelineInfo(StrictModel):
+    parser: str = Field(min_length=1)
+    translation_executor: Literal["host_agent"]
+    host: str = Field(min_length=1)
+    execution_mode: ExecutionMode
+    model: str = Field(min_length=1)
+    prompt_version: str = Field(min_length=1)
+
+    @field_validator("parser", "host", "model", "prompt_version")
+    @classmethod
+    def provenance_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("pipeline provenance must not be blank")
+        return value
+
+
 class FileArtifact(StrictModel):
     filename: str = Field(min_length=1)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -128,7 +144,7 @@ class ReviewDocument(StrictModel):
     job_id: str = Field(min_length=1)
     source: FileArtifact
     glossary: FileArtifact
-    pipeline: TranslatorInfo
+    pipeline: PipelineInfo
     items: list[ReviewItem] = Field(default_factory=list)
     blocking_issues: list[dict[str, Any]] = Field(default_factory=list)
     review_completed_at: datetime | None = None

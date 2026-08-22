@@ -55,6 +55,8 @@ def test_build_review_html_is_offline_and_script_injection_safe(tmp_path) -> Non
     assert embedded["items"][0]["source_text"] == _MALICIOUS
     assert embedded["items"][0]["suggested_translation"] == _MALICIOUS
     assert embedded["pages"][0]["thumbnail"] == _PNG_DATA_URI
+    assert embedded["pipeline"]["parser"] == "pymupdf+mineru"
+    assert embedded["pipeline"]["translation_executor"] == "host_agent"
     assert _MALICIOUS not in html
     assert "\\u003c/script>\\u003cscript>alert(1)\\u003c/script>" in html
 
@@ -272,11 +274,12 @@ def _job(tmp_path, page_count: int = 1):
 def _review_output(text: str) -> dict:
     return {
         "pipeline": {
+            "parser": "pymupdf+mineru",
+            "translation_executor": "host_agent",
             "host": "codex",
             "execution_mode": "subagent",
             "model": "unknown",
             "prompt_version": "1.0",
-            "agent_role": "techpack-translator",
         },
         "items": [_item(0, "approved", text=text)],
         "blocking_issues": [],
@@ -305,11 +308,12 @@ def _review_document(job: JobManifest, statuses=("approved",)) -> dict:
             "sha256": job.glossary.sha256,
         },
         "pipeline": {
+            "parser": "pymupdf+mineru",
+            "translation_executor": "host_agent",
             "host": "codex",
             "execution_mode": "mixed" if len(statuses) > 1 else "subagent",
             "model": "unknown",
             "prompt_version": "1.0",
-            "agent_role": "techpack-translator",
         },
         "items": [
             _item(index, status, text=f"Source {index} 12 mm")

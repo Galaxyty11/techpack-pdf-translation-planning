@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 from .errors import TechpackError
 from .inputs import sha256_file
-from .models import JobManifest, ReviewDocument, ReviewStatus, TranslatorInfo
+from .models import JobManifest, PipelineInfo, ReviewDocument, ReviewStatus
 
 
 _TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "assets" / "review-template.html"
@@ -169,10 +169,20 @@ def _pipeline(output: dict[str, Any]) -> dict[str, Any]:
     if raw is None:
         translations = output.get("translations", [])
         if translations:
-            raw = _mapping(translations[0]).get("translator")
+            translator = _mapping(translations[0]).get("translator")
+            if translator is not None:
+                translator = _mapping(translator)
+                raw = {
+                    "parser": output.get("parser"),
+                    "translation_executor": "host_agent",
+                    "host": translator.get("host"),
+                    "execution_mode": translator.get("execution_mode"),
+                    "model": translator.get("model"),
+                    "prompt_version": translator.get("prompt_version"),
+                }
     if raw is None:
         raise ValueError("pipeline provenance is required")
-    info = TranslatorInfo.model_validate(raw)
+    info = PipelineInfo.model_validate(raw)
     return info.model_dump(mode="json")
 
 

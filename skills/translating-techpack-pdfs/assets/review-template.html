@@ -244,11 +244,12 @@
         source: {filename: data.source.filename, sha256: data.source.sha256, page_count: data.source.page_count},
         glossary: {filename: data.glossary.filename, sha256: data.glossary.sha256},
         pipeline: {
+          parser: data.pipeline.parser,
+          translation_executor: data.pipeline.translation_executor,
           host: data.pipeline.host,
           execution_mode: data.pipeline.execution_mode,
           model: data.pipeline.model,
-          prompt_version: data.pipeline.prompt_version,
-          agent_role: data.pipeline.agent_role
+          prompt_version: data.pipeline.prompt_version
         },
         items: data.items.map((item) => Object.fromEntries(itemFields.map((field) => [field, item[field]]))),
         blocking_issues: [],

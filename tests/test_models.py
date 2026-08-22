@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from techpack_pdf.models import ReviewStatus, TranslatorInfo
+from techpack_pdf.models import PipelineInfo, ReviewStatus, TranslatorInfo
 from techpack_pdf.errors import TechpackError
 
 
@@ -31,6 +31,68 @@ def test_translator_info_rejects_empty_model_but_accepts_unknown():
         prompt_version="v1",
     )
     assert info.model == "unknown"
+
+
+def test_review_pipeline_requires_parser_and_host_agent_executor():
+    pipeline = PipelineInfo(
+        parser="pymupdf+mineru",
+        translation_executor="host_agent",
+        host="codex",
+        execution_mode="mixed",
+        model="unknown",
+        prompt_version="v1",
+    )
+
+    assert pipeline.parser == "pymupdf+mineru"
+    assert pipeline.translation_executor == "host_agent"
+
+    with pytest.raises(ValidationError, match="translation_executor"):
+        PipelineInfo(
+            parser="pymupdf+mineru",
+            translation_executor="direct_api",
+            host="codex",
+            execution_mode="mixed",
+            model="unknown",
+            prompt_version="v1",
+        )
+
+
+def test_review_pipeline_forbids_uncontracted_fields_without_changing_translator_info():
+    with pytest.raises(ValidationError, match="extra"):
+        PipelineInfo(
+            parser="pymupdf",
+            translation_executor="host_agent",
+            host="codex",
+            execution_mode="main_agent",
+            model="gpt-5",
+            prompt_version="v1",
+            agent_role="not-a-pipeline-field",
+        )
+
+    translator = TranslatorInfo(
+        host="codex",
+        execution_mode="subagent",
+        model="gpt-5",
+        prompt_version="v1",
+        agent_role="techpack-translator",
+    )
+    assert translator.agent_role == "techpack-translator"
+
+
+@pytest.mark.parametrize("field", ["parser", "host", "model", "prompt_version"])
+def test_review_pipeline_rejects_blank_provenance(field):
+    values = {
+        "parser": "pymupdf",
+        "translation_executor": "host_agent",
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "prompt_version": "v1",
+    }
+    values[field] = "   "
+
+    with pytest.raises(ValidationError, match=field):
+        PipelineInfo(**values)
 
 
 def test_models_forbid_uncontracted_fields():
