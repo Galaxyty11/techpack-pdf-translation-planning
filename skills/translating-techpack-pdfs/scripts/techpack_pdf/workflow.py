@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import stat
+import threading
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, is_dataclass
@@ -39,6 +45,11 @@ from .translation import TranslationValidationError, validate_translation_respon
 _SCHEMA_VERSION = "1.1"
 _MAX_JSON_BYTES = 8 * 1024 * 1024
 _TRUSTED_REVIEW_NAME = "trusted-review.json"
+_TRUST_ROOT_NAME = ".techpack-pdf-trust"
+_LOCK_TIMEOUT_SECONDS = 5.0
+_LOCK_POLL_SECONDS = 0.02
+_THREAD_LOCK_GUARD = threading.Lock()
+_THREAD_LOCKS: dict[str, threading.Lock] = {}
 _STATES = (
     "initialized",
     "parsed",
@@ -88,6 +99,18 @@ class _StateSnapshot(_StrictModel):
     expected_attempt: Literal[0, 1]
     wait_reason: Literal["host_translation", "host_correction", "agent_failure", "human_review_required", "human_review"] | None
     artifacts: "_ArtifactDigests"
+    trust_hmac: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class _TrustRecord(_StrictModel):
+    """Private per-job signing material, intentionally stored outside the job."""
+
+    schema_version: Literal["1.1"]
+    job_id: str = Field(min_length=1)
+    job_dir: str = Field(min_length=1)
+    manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    key_b64: str = Field(min_length=40, max_length=128)
+    record_hmac: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class _ArtifactDigests(_StrictModel):
@@ -95,7 +118,9 @@ class _ArtifactDigests(_StrictModel):
     request: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     response: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     expected_output: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    review_html: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     review: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    correction_request: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     apply_result: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
@@ -116,6 +141,16 @@ class _AnalysisPage(_StrictModel):
     nodes: list[_AnalysisNode]
 
 
+class _GlossaryHitSnapshot(_StrictModel):
+    source_term: str = Field(min_length=1)
+    target_term: str = Field(min_length=1)
+    matched_text: str = Field(min_length=1)
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    do_not_translate: bool
+    priority: int
+
+
 class _CandidateSnapshot(_StrictModel):
     item_id: str = Field(pattern=r"^p[0-9]{3}-i[0-9]{3}$")
     page_index: int = Field(ge=0)
@@ -132,7 +167,7 @@ class _CandidateSnapshot(_StrictModel):
     should_translate: bool
     decision_reason: DecisionReason
     locked_tokens: list[str]
-    glossary_hits: list[dict[str, Any]]
+    glossary_hits: list[_GlossaryHitSnapshot]
 
 
 class _AnalysisSnapshot(_StrictModel):
@@ -188,6 +223,7 @@ class _ApplyResultSnapshot(_StrictModel):
     source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     glossary_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     expected_output_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    review_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     status: Literal["succeeded", "failed"]
     output_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     final_output_retained: bool = False
@@ -206,48 +242,84 @@ class _SafeApplyProblem(_StrictModel):
     nested: list["_SafeApplyProblem"] = Field(default_factory=list)
 
 
+class _WorkflowBusy(Exception):
+    pass
+
+
 @contextmanager
 def _job_lock(directory: Path):
-    """Real OS advisory lock, kept open for a single job operation."""
-    path = directory / ".workflow.lock"
-    stream = path.open("a+b")
+    """Hold both process-local and OS locks for the whole public job operation."""
+    key = str(directory)
+    with _THREAD_LOCK_GUARD:
+        local = _THREAD_LOCKS.setdefault(key, threading.Lock())
+    if not local.acquire(timeout=_LOCK_TIMEOUT_SECONDS):
+        raise _WorkflowBusy
+    stream = None
+    os_acquired = False
     try:
+        path = _inside(directory, ".workflow.lock")
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
+        stream = os.fdopen(descriptor, "r+b", buffering=0)
+        before = path.lstat()
+        opened = os.fstat(stream.fileno())
+        if _is_reparse_or_link(before) or not stat.S_ISREG(before.st_mode) or _file_stat_identity(before) != _file_stat_identity(opened):
+            raise _workflow_error("workflow_lock_invalid", "Workflow lock is invalid")
         if os.name == "nt":
             import msvcrt
             stream.seek(0)
-            if stream.tell() == 0 and path.stat().st_size == 0:
+            if opened.st_size == 0:
                 stream.write(b"0")
                 stream.flush()
+                before = path.lstat()
             stream.seek(0)
-            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+            lock = lambda: msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
         else:
             import fcntl
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            lock = lambda: fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                lock()
+                os_acquired = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise _WorkflowBusy
+                time.sleep(_LOCK_POLL_SECONDS)
+        if _file_stat_identity(before) != _file_stat_identity(path.lstat()):
+            raise _workflow_error("workflow_lock_invalid", "Workflow lock changed while being acquired")
         yield
     finally:
         try:
-            if os.name == "nt":
+            if stream is not None and os_acquired and os.name == "nt":
                 import msvcrt
                 stream.seek(0)
                 msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
+            elif stream is not None and os_acquired:
                 import fcntl
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
         finally:
-            stream.close()
+            try:
+                if stream is not None:
+                    stream.close()
+            finally:
+                local.release()
 
 
 @dataclass(frozen=True)
 class WorkflowResult:
     exit_code: int
-    state: str
+    state: str | None
     job_dir: Path | None = None
     jobs: tuple["WorkflowResult", ...] = ()
     input_index: int | None = None
     batch_status: Literal["completed"] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        result: dict[str, Any] = {"exit_code": self.exit_code, "state": self.state}
+        result: dict[str, Any] = {"exit_code": self.exit_code}
+        if self.state is not None:
+            result["state"] = self.state
         if self.job_dir is not None:
             result["job_id"] = self.job_dir.name
         if self.input_index is not None:
@@ -295,7 +367,7 @@ def analyze(
             results.append(WorkflowResult(2, "failed", input_index=offset))
     if len(results) == 1:
         return results[0]
-    return WorkflowResult(_batch_exit_code(results), "batch_status", jobs=tuple(results), batch_status="completed")
+    return WorkflowResult(_batch_exit_code(results), None, jobs=tuple(results), batch_status="completed")
 
 
 def prepare_review(job_dir: str | Path) -> WorkflowResult:
@@ -303,6 +375,8 @@ def prepare_review(job_dir: str | Path) -> WorkflowResult:
     try:
         with _job_lock(directory):
             return _prepare_review_locked(directory)
+    except _WorkflowBusy:
+        return WorkflowResult(4, "workflow_busy", directory)
     except TechpackError:
         raise
     except Exception:
@@ -388,6 +462,8 @@ def apply(
     try:
         with _job_lock(directory):
             return _apply_locked(source, review_path, output)
+    except _WorkflowBusy:
+        return WorkflowResult(4, "workflow_busy", directory)
     except TechpackError:
         raise
     except Exception:
@@ -415,24 +491,39 @@ def _apply_locked(
     _verify_bound_inputs(directory, job)
     if source_path != _absolute_user_path(job.source.path, must_exist=True, regular=True):
         raise _workflow_error("source_job_mismatch", "Source does not match the job")
+    expected = _load_model(directory, "expected-output.json", _ExpectedOutputSnapshot)
+    _assert_snapshot_binding(expected, job)
+    _verify_apply_trust_closure(directory, job, state, expected)
     resuming_apply = state.state is WorkflowState.APPLYING
     if resuming_apply:
-        if _artifact_exists(directory, "apply-result.json") and expected_path.exists():
-            report = _load_model(directory, "apply-result.json", _ApplyResultSnapshot)
-            expected_digest = _sha256_artifact(directory, "expected-output.json")
-            if (report.job_id == job.job_id and report.source_sha256 == job.source.sha256
+        # A published final is recoverable only if this applying state already
+        # authenticated the exact success report.  An unbound report could have
+        # been placed after a crash and must never complete the job.
+        if state.artifacts.apply_result is None:
+            if _artifact_exists(directory, "apply-result.json") or expected_path.exists():
+                return WorkflowResult(5, "recovery_required", directory)
+        else:
+            try:
+                report = _load_model(directory, "apply-result.json", _ApplyResultSnapshot)
+                expected_digest = _sha256_artifact(directory, "expected-output.json")
+                review_digest = _sha256_artifact(directory, _TRUSTED_REVIEW_NAME)
+                final = _absolute_user_path(expected_path, must_exist=True, regular=True)
+                valid = (
+                    report.job_id == job.job_id and report.source_sha256 == job.source.sha256
                     and report.glossary_sha256 == job.glossary.sha256 and report.status == "succeeded"
-                    and report.expected_output_sha256 == expected_digest and report.output_sha256 == sha256_file(expected_path)):
+                    and report.expected_output_sha256 == expected_digest and report.review_sha256 == review_digest
+                    and report.output_sha256 == sha256_file(final)
+                )
+            except TechpackError:
+                valid = False
+            if valid:
                 _write_state(directory, job, WorkflowState.SUCCEEDED, state.revision + 1, state.expected_attempt, None)
                 return WorkflowResult(0, WorkflowState.SUCCEEDED, directory)
-        if expected_path.exists():
-            return WorkflowResult(5, WorkflowState.APPLYING, directory)
+            return WorkflowResult(5, "recovery_required", directory)
     if not resuming_apply and output_path.exists():
         raise _workflow_error("output_invalid", "Output path is not available for this job")
     if state.state not in {WorkflowState.REVIEW_READY, WorkflowState.REVIEW_COMPLETED, WorkflowState.APPLYING}:
         raise _workflow_error("workflow_state_conflict", "Job is not ready to apply")
-    expected = _load_model(directory, "expected-output.json", _ExpectedOutputSnapshot)
-    _assert_snapshot_binding(expected, job)
     trusted_review = _inside(directory, _TRUSTED_REVIEW_NAME)
     trusted_review_digest: str | None = None
     if not resuming_apply:
@@ -462,7 +553,11 @@ def _apply_locked(
             directory, job, "succeeded", output_sha256=sha256_file(expected_path),
         ).model_dump(mode="json"))
         applying = _load_state(directory, job)
-        _write_state(directory, job, WorkflowState.SUCCEEDED, applying.revision + 1, applying.expected_attempt, None)
+        # Bind the committed success report while remaining in ``applying``;
+        # only that signed checkpoint may be recovered to ``succeeded``.
+        _write_state(directory, job, WorkflowState.APPLYING, applying.revision + 1, applying.expected_attempt, None)
+        bound = _load_state(directory, job)
+        _write_state(directory, job, WorkflowState.SUCCEEDED, bound.revision + 1, bound.expected_attempt, None)
         return WorkflowResult(0, WorkflowState.SUCCEEDED, directory)
     applying = _load_state(directory, job)
     _atomic_json_write(directory / "apply-result.json", _apply_result_snapshot(
@@ -471,6 +566,57 @@ def _apply_locked(
     ).model_dump(mode="json"))
     _write_state(directory, job, WorkflowState.FAILED, applying.revision + 1, applying.expected_attempt, None)
     return WorkflowResult(5, WorkflowState.FAILED, directory)
+
+
+def _canonical_request_bytes(directory: Path, analysis: _AnalysisSnapshot, job: JobManifest) -> bytes:
+    """Rebuild the exact Task 6 request without accepting a job-local substitute."""
+    path = _inside(directory, f".canonical-request.{uuid.uuid4().hex}.tmp")
+    try:
+        write_translation_request(_candidates_from_analysis(analysis), path, job)
+        return _bounded_binary_read(path)
+    except (OSError, TechpackError):
+        raise _workflow_error("workflow_binding_mismatch", "Workflow request does not match trusted analysis") from None
+    finally:
+        try:
+            if path.exists() and stat.S_ISREG(path.lstat().st_mode):
+                path.unlink()
+        except OSError:
+            pass
+
+
+def _verify_apply_trust_closure(
+    directory: Path,
+    job: JobManifest,
+    state: _StateSnapshot,
+    expected: _ExpectedOutputSnapshot,
+) -> None:
+    """Reconstruct every signed upstream contract before editing a PDF."""
+    try:
+        analysis = _load_model(directory, "analysis.json", _AnalysisSnapshot)
+        _assert_snapshot_binding(analysis, job)
+        request_bytes = _bounded_binary_read(_inside(directory, "translation-request.json"))
+        if request_bytes != _canonical_request_bytes(directory, analysis, job):
+            raise ValueError
+        request = json.loads(request_bytes.decode("utf-8"))
+        canonical_ids = [item.item_id for item in analysis.candidates if item.should_translate]
+        request_ids = [item["item_id"] for item in request.get("items", [])]
+        if request_ids != canonical_ids or len(request_ids) != len(set(request_ids)):
+            raise ValueError
+        translations = validate_translation_response(
+            request,
+            _response_input(directory),
+            load_glossary(_snapshot_glossary_path(directory, job)),
+            job,
+            expected_attempt=state.expected_attempt,
+        )
+        translated_ids = [item.item_id for item in translations]
+        if translated_ids != canonical_ids or len(translated_ids) != len(set(translated_ids)):
+            raise ValueError
+        rebuilt = _trusted_output(directory, job, analysis, translations)
+        if rebuilt.model_dump(mode="json") != expected.output.model_dump(mode="json"):
+            raise ValueError
+    except (KeyError, UnicodeError, json.JSONDecodeError, TranslationValidationError, TechpackError, ValueError):
+        raise _workflow_error("workflow_binding_mismatch", "Workflow artifacts do not form a trusted closure") from None
 
 
 def _analyze_one(
@@ -486,12 +632,17 @@ def _analyze_one(
     job = create_job(source, glossary_path, job_root, now)
     directory = _job_directory(job.job_dir)
     _atomic_json_write(directory / "manifest.json", job.model_dump(mode="json"))
+    _create_trust_record(directory, job)
     _write_state(directory, job, WorkflowState.INITIALIZED, 0, 0, None)
     try:
         identities = _input_identities(source, glossary_path)
         snapshot_source, snapshot_glossary = _snapshot_inputs(directory, job, identities)
+        snapshot_identities = _input_identities(snapshot_source, snapshot_glossary)
+        _verify_snapshot_inputs(directory, job, snapshot_identities)
         glossary = load_glossary(snapshot_glossary)
+        _verify_snapshot_inputs(directory, job, snapshot_identities)
         pdf = inspect_pdf(snapshot_source, directory)
+        _verify_snapshot_inputs(directory, job, snapshot_identities)
         if pdf.sha256 != job.source.sha256:
             raise _workflow_error("workflow_input_changed", "Input snapshot does not match manifest")
         job = job.model_copy(
@@ -500,9 +651,12 @@ def _analyze_one(
             }
         )
         _atomic_json_write(directory / "manifest.json", job.model_dump(mode="json"))
+        _update_trust_manifest(directory, job)
         parsed = mineru_client.parse_or_degrade(snapshot_source, pdf)
+        _verify_snapshot_inputs(directory, job, snapshot_identities)
         analysis = _analysis_snapshot(directory, job, pdf, parsed, glossary)
         _ensure_techpack_gate(analysis)
+        _verify_snapshot_inputs(directory, job, snapshot_identities)
         _verify_original_inputs(job, identities)
         _atomic_json_write(directory / "analysis.json", analysis.model_dump(mode="json"))
         _write_state(directory, job, WorkflowState.PARSED, 1, 0, None)
@@ -517,8 +671,8 @@ def _analyze_one(
         except Exception:
             pass
         if isinstance(error, TechpackError):
-            raise
-        raise _workflow_error("workflow_analysis_failed", "Analysis failed") from None
+            return WorkflowResult(_exit_for(error), WorkflowState.FAILED, directory)
+        return WorkflowResult(2, WorkflowState.FAILED, directory)
 
 
 def _analysis_snapshot(
@@ -686,7 +840,7 @@ def _candidates_from_analysis(analysis: _AnalysisSnapshot) -> list[Any]:
             source_text=item.source_text,
             source_kind=item.source_kind,
             locked_tokens=tuple(item.locked_tokens),
-            glossary_hits=tuple(_Hit(hit["source_term"], hit["target_term"]) for hit in item.glossary_hits),
+            glossary_hits=tuple(_Hit(hit.source_term, hit.target_term) for hit in item.glossary_hits),
             page_type=item.page_type,
         )
         for item in analysis.candidates
@@ -750,7 +904,7 @@ def _trusted_output(
                 "coordinate_confidence": candidate.coordinate_confidence.value,
                 "decision_reason": candidate.decision_reason.value,
                 "locked_tokens": candidate.locked_tokens,
-                "glossary_hits": candidate.glossary_hits,
+                "glossary_hits": [hit.model_dump(mode="json") for hit in candidate.glossary_hits],
                 "suggested_translation": translation.translated_text,
                 "reviewed_translation": None,
                 "review_status": None,
@@ -824,6 +978,7 @@ def _apply_result_snapshot(
         source_sha256=job.source.sha256,
         glossary_sha256=job.glossary.sha256,
         expected_output_sha256=sha256_file(_inside(directory, "expected-output.json")),
+        review_sha256=sha256_file(_inside(directory, _TRUSTED_REVIEW_NAME)),
         status=status,
         output_sha256=output_sha256,
         final_output_retained=final_output_retained,
@@ -836,6 +991,14 @@ def _apply_result_snapshot(
 _SAFE_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SAFE_RESOURCE_KINDS = {
     "output", "final_output", "temporary", "snapshot", "failure_report", "annotation", "resource",
+}
+_TASK8_KIND_TO_RESOURCE_KIND = {
+    "output": "output", "final_output": "final_output", "pdf": "final_output",
+    "temporary": "temporary", "temp": "temporary", "staging": "temporary",
+    "snapshot": "snapshot", "input_snapshot": "snapshot",
+    "failure_report": "failure_report", "report": "failure_report",
+    "annotation": "annotation", "freetext": "annotation", "redaction": "annotation",
+    "resource": "resource", "file": "resource",
 }
 _SAFE_OWNERSHIP = {"owned", "foreign_or_unknown", "unknown"}
 
@@ -852,7 +1015,12 @@ def _safe_problem_tree(value: Any) -> _SafeApplyProblem:
     ownership = _safe_identifier(ownership_value, None)
     if ownership not in _SAFE_OWNERSHIP:
         ownership = None
-    kind = _safe_identifier(source.get("resource_kind") or details.get("resource_kind"), None)
+    raw_kind = source.get("resource_kind") or details.get("resource_kind")
+    if raw_kind is None:
+        raw_kind = source.get("kind") or details.get("kind")
+    kind = _TASK8_KIND_TO_RESOURCE_KIND.get(raw_kind) if isinstance(raw_kind, str) else None
+    if kind is None:
+        kind = _safe_identifier(raw_kind, None)
     if kind not in _SAFE_RESOURCE_KINDS:
         kind = _kind_for_code(code)
     exists = _bool_or_none(source.get("exists") if "exists" in source else details.get("exists"))
@@ -921,18 +1089,138 @@ def _with_absolute_thumbnails(directory: Path, output: Mapping[str, Any]) -> dic
     return converted
 
 
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _hmac_sha256(key: bytes, value: Any) -> str:
+    return hmac.new(key, _canonical_json_bytes(value), hashlib.sha256).hexdigest()
+
+
+def _trust_root(directory: Path) -> Path:
+    """Return the user-owned trust root beside, never inside, the job directory."""
+    root = directory.parent / _TRUST_ROOT_NAME
+    try:
+        _assert_no_reparse_components(root)
+        if not root.exists():
+            root.mkdir(mode=0o700)
+        details = root.lstat()
+        if _is_reparse_or_link(details) or not stat.S_ISDIR(details.st_mode):
+            raise OSError
+        if os.name != "nt":
+            os.chmod(root, 0o700)
+        return root
+    except (OSError, TechpackError):
+        raise _workflow_error("workflow_trust_invalid", "Workflow trust record is invalid") from None
+
+
+def _trust_record_path(directory: Path) -> Path:
+    return _trust_root(directory) / f"{directory.name}.trust.json"
+
+
+def _trust_key(record: _TrustRecord) -> bytes:
+    try:
+        key = base64.b64decode(record.key_b64.encode("ascii"), validate=True)
+    except (ValueError, UnicodeError):
+        raise _workflow_error("workflow_trust_invalid", "Workflow trust record is invalid") from None
+    if len(key) != 32:
+        raise _workflow_error("workflow_trust_invalid", "Workflow trust record is invalid")
+    return key
+
+
+def _record_material(record: _TrustRecord) -> dict[str, Any]:
+    return record.model_dump(mode="json", exclude={"record_hmac"})
+
+
+def _state_material(state: _StateSnapshot) -> dict[str, Any]:
+    return state.model_dump(mode="json", exclude={"trust_hmac"})
+
+
+def _read_trust_record(directory: Path) -> _TrustRecord:
+    path = _trust_record_path(directory)
+    try:
+        record = _TrustRecord.model_validate(json.loads(_bounded_binary_read(path).decode("utf-8")))
+        key = _trust_key(record)
+        if not hmac.compare_digest(record.record_hmac, _hmac_sha256(key, _record_material(record))):
+            raise ValueError
+        return record
+    except (OSError, UnicodeError, ValueError, ValidationError, TechpackError):
+        raise _workflow_error("workflow_trust_invalid", "Workflow trust record is invalid") from None
+
+
+def _validated_trust_record(directory: Path, job: JobManifest) -> _TrustRecord:
+    record = _read_trust_record(directory)
+    if (
+        record.job_id != job.job_id
+        or record.job_dir != str(directory)
+        or record.manifest_sha256 != _sha256_bytes(_canonical_json_bytes(job.model_dump(mode="json")))
+    ):
+        raise _workflow_error("workflow_trust_invalid", "Workflow trust record does not bind this job")
+    return record
+
+
+def _write_trust_record(path: Path, record: _TrustRecord) -> None:
+    try:
+        _atomic_json_write(path, record.model_dump(mode="json"))
+        if os.name != "nt":
+            os.chmod(path, 0o600)
+    except (OSError, TechpackError):
+        raise _workflow_error("workflow_trust_invalid", "Workflow trust record could not be committed") from None
+
+
+def _create_trust_record(directory: Path, job: JobManifest) -> None:
+    path = _trust_record_path(directory)
+    try:
+        if path.exists():
+            raise OSError
+        key = secrets.token_bytes(32)
+        unsigned = _TrustRecord(
+            schema_version=_SCHEMA_VERSION,
+            job_id=job.job_id,
+            job_dir=str(directory),
+            manifest_sha256=_sha256_bytes(_canonical_json_bytes(job.model_dump(mode="json"))),
+            key_b64=base64.b64encode(key).decode("ascii"),
+            record_hmac="0" * 64,
+        )
+        record = unsigned.model_copy(update={"record_hmac": _hmac_sha256(key, _record_material(unsigned))})
+        _write_trust_record(path, record)
+    except (OSError, TechpackError):
+        raise _workflow_error("workflow_trust_invalid", "Workflow trust record could not be created") from None
+
+
+def _update_trust_manifest(directory: Path, job: JobManifest) -> None:
+    record = _read_trust_record(directory)
+    key = _trust_key(record)
+    if record.job_id != job.job_id or record.job_dir != str(directory):
+        raise _workflow_error("workflow_trust_invalid", "Workflow trust record does not bind this job")
+    unsigned = record.model_copy(update={
+        "manifest_sha256": _sha256_bytes(_canonical_json_bytes(job.model_dump(mode="json"))),
+        "record_hmac": "0" * 64,
+    })
+    _write_trust_record(
+        _trust_record_path(directory),
+        unsigned.model_copy(update={"record_hmac": _hmac_sha256(key, _record_material(unsigned))}),
+    )
+
+
 def _load_job(directory: Path) -> JobManifest:
     job = _load_model(directory, "manifest.json", JobManifest)
     if _absolute_user_path(job.job_dir, must_exist=True, regular=False) != directory:
         raise _workflow_error("workflow_job_invalid", "Manifest job directory does not match")
     if job.source.path is None or job.glossary.path is None:
         raise _workflow_error("workflow_job_invalid", "Manifest input paths are missing")
+    _validated_trust_record(directory, job)
     return job
 
 
 def _load_state(directory: Path, job: JobManifest) -> _StateSnapshot:
     state = _load_state_payload(directory)
     _assert_snapshot_binding(state, job)
+    record = _validated_trust_record(directory, job)
+    if state.trust_hmac is None or not hmac.compare_digest(
+        state.trust_hmac, _hmac_sha256(_trust_key(record), _state_material(state))
+    ):
+        raise _workflow_error("workflow_trust_invalid", "Workflow state signature is invalid")
     if state.state.value not in _STATES:
         raise _workflow_error("workflow_state_invalid", "Workflow state is unknown")
     _verify_state_artifacts(directory, state)
@@ -940,7 +1228,11 @@ def _load_state(directory: Path, job: JobManifest) -> _StateSnapshot:
 
 
 def _verify_state_artifacts(directory: Path, state: _StateSnapshot) -> None:
-    names = {"analysis": "analysis.json", "request": "translation-request.json", "response": "translation-response.json", "expected_output": "expected-output.json", "review": _TRUSTED_REVIEW_NAME, "apply_result": "apply-result.json"}
+    names = {
+        "analysis": "analysis.json", "request": "translation-request.json", "response": "translation-response.json",
+        "expected_output": "expected-output.json", "review_html": "review.html", "review": _TRUSTED_REVIEW_NAME,
+        "correction_request": "correction-request.json", "apply_result": "apply-result.json",
+    }
     for field, name in names.items():
         digest = getattr(state.artifacts, field)
         if digest is None:
@@ -953,7 +1245,7 @@ def _verify_state_artifacts(directory: Path, state: _StateSnapshot) -> None:
     required = {
         WorkflowState.TRANSLATION_REQUESTED: ("analysis", "request"),
         WorkflowState.TRANSLATION_VALIDATED: ("analysis", "request", "response"),
-        WorkflowState.REVIEW_READY: ("analysis", "request", "response", "expected_output"),
+        WorkflowState.REVIEW_READY: ("analysis", "request", "response", "expected_output", "review_html"),
     }
     if any(getattr(state.artifacts, field) is None for field in required.get(state.state, ())):
         raise _workflow_error("workflow_state_invalid", "Workflow state lacks required artifacts")
@@ -965,10 +1257,10 @@ def _verify_state_invariants(state: _StateSnapshot) -> None:
         WorkflowState.PARSED: ("analysis",),
         WorkflowState.TRANSLATION_REQUESTED: ("analysis", "request"),
         WorkflowState.TRANSLATION_VALIDATED: ("analysis", "request", "response"),
-        WorkflowState.REVIEW_READY: ("analysis", "request", "response", "expected_output"),
-        WorkflowState.REVIEW_COMPLETED: ("analysis", "request", "response", "expected_output", "review"),
-        WorkflowState.APPLYING: ("analysis", "request", "response", "expected_output", "review"),
-        WorkflowState.SUCCEEDED: ("analysis", "request", "response", "expected_output", "review", "apply_result"),
+        WorkflowState.REVIEW_READY: ("analysis", "request", "response", "expected_output", "review_html"),
+        WorkflowState.REVIEW_COMPLETED: ("analysis", "request", "response", "expected_output", "review_html", "review"),
+        WorkflowState.APPLYING: ("analysis", "request", "response", "expected_output", "review_html", "review"),
+        WorkflowState.SUCCEEDED: ("analysis", "request", "response", "expected_output", "review_html", "review", "apply_result"),
         WorkflowState.FAILED: (),
     }
     if any(getattr(state.artifacts, field) is None for field in required[state.state]):
@@ -976,13 +1268,13 @@ def _verify_state_invariants(state: _StateSnapshot) -> None:
     allowed = {
         WorkflowState.INITIALIZED: set(),
         WorkflowState.PARSED: {"analysis"},
-        WorkflowState.TRANSLATION_REQUESTED: {"analysis", "request"},
-        WorkflowState.TRANSLATION_VALIDATED: {"analysis", "request", "response"},
-        WorkflowState.REVIEW_READY: {"analysis", "request", "response", "expected_output"},
-        WorkflowState.REVIEW_COMPLETED: {"analysis", "request", "response", "expected_output", "review"},
-        WorkflowState.APPLYING: {"analysis", "request", "response", "expected_output", "review", "apply_result"},
-        WorkflowState.SUCCEEDED: {"analysis", "request", "response", "expected_output", "review", "apply_result"},
-        WorkflowState.FAILED: {"analysis", "request", "response", "expected_output", "review", "apply_result"},
+        WorkflowState.TRANSLATION_REQUESTED: {"analysis", "request", "correction_request"},
+        WorkflowState.TRANSLATION_VALIDATED: {"analysis", "request", "response", "correction_request"},
+        WorkflowState.REVIEW_READY: {"analysis", "request", "response", "expected_output", "review_html", "correction_request"},
+        WorkflowState.REVIEW_COMPLETED: {"analysis", "request", "response", "expected_output", "review_html", "review", "correction_request"},
+        WorkflowState.APPLYING: {"analysis", "request", "response", "expected_output", "review_html", "review", "correction_request", "apply_result"},
+        WorkflowState.SUCCEEDED: {"analysis", "request", "response", "expected_output", "review_html", "review", "correction_request", "apply_result"},
+        WorkflowState.FAILED: {"analysis", "request", "response", "expected_output", "review_html", "review", "correction_request", "apply_result"},
     }
     if state.state is not WorkflowState.FAILED and any(
         getattr(state.artifacts, field) is not None and field not in allowed[state.state]
@@ -1013,6 +1305,8 @@ def _verify_state_invariants(state: _StateSnapshot) -> None:
             raise _workflow_error("workflow_state_invalid", "Workflow attempt is contradictory")
         if state.wait_reason in {"host_correction", "human_review_required"} and state.expected_attempt != 1:
             raise _workflow_error("workflow_state_invalid", "Workflow attempt is contradictory")
+        if state.wait_reason in {"host_correction", "human_review_required"} and state.artifacts.correction_request is None:
+            raise _workflow_error("workflow_state_invalid", "Workflow state lacks its correction request")
 
 
 def _load_state_payload(directory: Path) -> _StateSnapshot:
@@ -1028,7 +1322,7 @@ def _write_state(directory: Path, job: JobManifest, state: WorkflowState, revisi
     path = directory / "state.json"
     previous: _StateSnapshot | None = None
     if path.exists():
-        previous = _load_state_payload(directory)
+        previous = _load_state(directory, job)
         if previous.revision + 1 != revision or state.value not in _TRANSITIONS[previous.state.value]:
             raise _workflow_error("workflow_state_conflict", "Workflow transition is not legal")
     elif revision != 0 or state is not WorkflowState.INITIALIZED:
@@ -1048,6 +1342,10 @@ def _write_state(directory: Path, job: JobManifest, state: WorkflowState, revisi
         artifacts=artifacts,
     )
     _verify_state_invariants(snapshot)
+    record = _validated_trust_record(directory, job)
+    snapshot = snapshot.model_copy(update={
+        "trust_hmac": _hmac_sha256(_trust_key(record), _state_material(snapshot)),
+    })
     _atomic_json_write(path, snapshot.model_dump(mode="json"))
 
 
@@ -1066,7 +1364,8 @@ def _artifact_digests(directory: Path) -> _ArtifactDigests:
     names = {
         "analysis": "analysis.json", "request": "translation-request.json",
         "response": "translation-response.json", "expected_output": "expected-output.json",
-        "review": _TRUSTED_REVIEW_NAME, "apply_result": "apply-result.json",
+        "review_html": "review.html", "review": _TRUSTED_REVIEW_NAME,
+        "correction_request": "correction-request.json", "apply_result": "apply-result.json",
     }
     values: dict[str, str | None] = {}
     for field, name in names.items():
@@ -1115,28 +1414,84 @@ def _snapshot_inputs(
     return source_snapshot, glossary_snapshot
 
 
+def _stable_snapshot_sha256(path: Path) -> str:
+    """Hash one regular snapshot through a no-follow descriptor and stable identity."""
+    try:
+        before = path.lstat()
+        if _is_reparse_or_link(before) or not stat.S_ISREG(before.st_mode):
+            raise OSError
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(descriptor)
+            if _file_stat_identity(before) != _file_stat_identity(opened):
+                raise OSError
+            digest = hashlib.sha256()
+            while chunk := os.read(descriptor, 1024 * 1024):
+                digest.update(chunk)
+            after = os.fstat(descriptor)
+            current = path.lstat()
+            if _file_stat_identity(before) != _file_stat_identity(opened) or _file_stat_identity(opened) != _file_stat_identity(after) or _file_stat_identity(after) != _file_stat_identity(current):
+                raise OSError
+            return digest.hexdigest()
+        finally:
+            os.close(descriptor)
+    except OSError:
+        raise _workflow_error("workflow_input_changed", "Job input snapshot changed during analysis") from None
+
+
+def _verify_snapshot_inputs(
+    directory: Path,
+    job: JobManifest,
+    identities: tuple[tuple[int, int, int, int], tuple[int, int, int, int]],
+) -> None:
+    if (
+        _file_identity(_snapshot_source_path(directory)) != identities[0]
+        or _file_identity(_snapshot_glossary_path(directory, job)) != identities[1]
+        or
+        _stable_snapshot_sha256(_snapshot_source_path(directory)) != job.source.sha256
+        or _stable_snapshot_sha256(_snapshot_glossary_path(directory, job)) != job.glossary.sha256
+    ):
+        raise _workflow_error("workflow_input_changed", "Job input snapshot does not match its manifest")
+
+
 def _stable_copy(source: Path, target: Path, expected_sha256: str, identity: tuple[int, int, int, int]) -> None:
     if source.is_symlink() or not source.is_file():
         raise _workflow_error("workflow_input_invalid", "Job input is invalid")
     if _file_identity(source) != identity:
         raise _workflow_error("workflow_input_changed", "Job input changed while being snapshotted")
     temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    owned_identity: tuple[int, int, int, int] | None = None
+    primary: TechpackError | None = None
+    cleanup_failed = False
     try:
         with source.open("rb") as reader, temporary.open("xb") as writer:
             while chunk := reader.read(1024 * 1024):
                 writer.write(chunk)
             writer.flush()
             os.fsync(writer.fileno())
+        owned_identity = _file_stat_identity(temporary.lstat())
         if _file_identity(source) != identity or sha256_file(temporary) != expected_sha256:
             raise _workflow_error("workflow_input_changed", "Job input changed while being snapshotted")
         os.replace(temporary, target)
-    except TechpackError:
-        raise
+        _fsync_parent(target.parent)
+    except TechpackError as error:
+        primary = error
     except OSError:
-        raise _workflow_error("workflow_input_unavailable", "Job input snapshot is unavailable") from None
+        primary = _workflow_error("workflow_input_unavailable", "Job input snapshot is unavailable")
     finally:
-        if temporary.exists():
-            temporary.unlink(missing_ok=True)
+        try:
+            if temporary.exists():
+                details = temporary.lstat()
+                if owned_identity is None or _file_stat_identity(details) != owned_identity:
+                    cleanup_failed = True
+                else:
+                    temporary.unlink()
+        except OSError:
+            cleanup_failed = True
+    if cleanup_failed:
+        raise _workflow_error("workflow_input_snapshot_cleanup_failed", "Job input snapshot cleanup failed") from None
+    if primary is not None:
+        raise primary
 
 
 def _verify_original_inputs(job: JobManifest, identities: tuple[tuple[int, int, int, int]]) -> None:

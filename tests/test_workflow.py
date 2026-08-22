@@ -64,6 +64,18 @@ class _ExplodingMinerUFixture:
         raise RuntimeError("must be redacted")
 
 
+class _SnapshotMutatingMinerUFixture(_MinerUFixture):
+    def parse_or_degrade(self, source, manifest):
+        original = source.read_bytes()
+        changed = source.with_name("changed-snapshot.pdf")
+        changed.write_bytes(original + b"temporary snapshot mutation")
+        os.replace(changed, source)
+        restored = source.with_name("restored-snapshot.pdf")
+        restored.write_bytes(original)
+        os.replace(restored, source)
+        return super().parse_or_degrade(source, manifest)
+
+
 def _techpack_pdf(path):
     document = pymupdf.open()
     page = document.new_page()
@@ -304,7 +316,7 @@ def test_analysis_uses_hashed_job_snapshots_and_rejects_original_input_changes(t
 
     assert result.exit_code == 2
     assert result.state == "failed"
-    job_dir = next((tmp_path / "jobs").iterdir())
+    job_dir = next(path for path in (tmp_path / "jobs").iterdir() if path.name != ".techpack-pdf-trust")
     manifest = json.loads((job_dir / "manifest.json").read_text(encoding="utf-8"))
     assert (job_dir / "input-source.pdf").is_file()
     assert (job_dir / "input-glossary.csv").is_file()
@@ -326,6 +338,18 @@ def test_original_input_change_blocks_resume_but_restoring_manifest_bytes_recove
     assert (prepare_review(job.job_dir).exit_code, prepare_review(job.job_dir).state) == (4, "translation_requested")
 
 
+def test_analysis_rejects_snapshot_replacement_even_when_bytes_are_restored(tmp_path):
+    source, glossary = tmp_path / "techpack.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+
+    result = analyze(source, glossary, tmp_path / "jobs", mineru_client=_SnapshotMutatingMinerUFixture())
+
+    assert (result.exit_code, result.state) == (2, "failed")
+    job_dir = next(path for path in (tmp_path / "jobs").iterdir() if path.name != ".techpack-pdf-trust")
+    assert json.loads((job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "failed"
+
+
 def test_non_techpack_analysis_exception_marks_its_created_job_failed_without_leaking(tmp_path):
     source, glossary = tmp_path / "techpack.pdf", tmp_path / "terms.csv"
     _techpack_pdf(source)
@@ -334,7 +358,9 @@ def test_non_techpack_analysis_exception_marks_its_created_job_failed_without_le
     result = analyze(source, glossary, tmp_path / "jobs", now=datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc), mineru_client=_ExplodingMinerUFixture())
 
     assert (result.exit_code, result.state, result.input_index) == (2, "failed", 0)
-    job_dir = next((tmp_path / "jobs").iterdir())
+    assert result.job_dir is not None
+    job_dir = next(path for path in (tmp_path / "jobs").iterdir() if path.name != ".techpack-pdf-trust")
+    assert result.job_dir == job_dir
     assert json.loads((job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "failed"
 
 
@@ -668,6 +694,11 @@ def test_applying_recovery_finishes_only_with_bound_success_report_and_retries_w
     workflow._atomic_json_write(second.job_dir / "apply-result.json", workflow._apply_result_snapshot(
         second.job_dir, second_job, "succeeded", output_sha256=hashlib.sha256(second_output.read_bytes()).hexdigest(),
     ).model_dump(mode="json"))
+    applying = workflow._load_state(second.job_dir, second_job)
+    workflow._write_state(
+        second.job_dir, second_job, workflow.WorkflowState.APPLYING,
+        applying.revision + 1, applying.expected_attempt, None,
+    )
 
     recovered = apply(second_source, second_review, second_output)
     assert (recovered.exit_code, recovered.state) == (0, "succeeded")
@@ -750,7 +781,10 @@ def test_batch_exit_priority_and_safe_input_indexes_preserve_independent_jobs(tm
     result = analyze(tmp_path, glossary, tmp_path / "jobs", now=datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc), mineru_client=_MinerUFixture())
 
     assert result.exit_code == 3
-    assert result.state == "batch_status"
+    assert result.state is None
+    assert result.batch_status == "completed"
+    assert "state" not in result.to_dict()
+    assert result.to_dict()["batch_status"] == "completed"
     assert [(item.input_index, item.exit_code) for item in result.jobs] == [(0, 3), (1, 2), (2, 4)]
     assert result.jobs[2].job_dir is not None
     assert json.loads((result.jobs[2].job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "translation_requested"
@@ -903,6 +937,25 @@ def test_atomic_cleanup_never_deletes_a_replaced_foreign_temp_file(tmp_path, mon
     assert leftovers[0].read_text(encoding="utf-8") == "foreign-owner"
 
 
+def test_stable_copy_never_deletes_a_replaced_foreign_temp_file(tmp_path, monkeypatch):
+    source, target = tmp_path / "source.bin", tmp_path / "snapshot.bin"
+    source.write_bytes(b"original")
+
+    def replace_with_foreign(temp, _target):
+        Path(temp).unlink()
+        Path(temp).write_text("foreign-owner", encoding="utf-8")
+        raise OSError("replace")
+
+    monkeypatch.setattr(workflow.os, "replace", replace_with_foreign)
+    with pytest.raises(TechpackError) as caught:
+        workflow._stable_copy(source, target, hashlib.sha256(source.read_bytes()).hexdigest(), workflow._file_identity(source))
+
+    assert caught.value.code == "workflow_input_snapshot_cleanup_failed"
+    leftovers = list(tmp_path.glob(".snapshot.bin.*.tmp"))
+    assert len(leftovers) == 1
+    assert leftovers[0].read_text(encoding="utf-8") == "foreign-owner"
+
+
 def test_parent_directory_fsync_is_attempted_when_supported_and_ignored_when_unavailable(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(workflow.os, "name", "posix")
@@ -942,6 +995,113 @@ def test_public_operations_expose_a_per_job_exclusive_lock_boundary(tmp_path):
         assert (tmp_path / ".workflow.lock").exists()
 
 
+def test_busy_job_lock_returns_waiting_without_mutating_state(tmp_path, monkeypatch):
+    source, glossary = tmp_path / "a.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    before = (job.job_dir / "state.json").read_bytes()
+    acquired, release = Event(), Event()
+    monkeypatch.setattr(workflow, "_LOCK_TIMEOUT_SECONDS", 0.05, raising=False)
+
+    def hold_lock():
+        with workflow._job_lock(job.job_dir):
+            acquired.set()
+            assert release.wait(3)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        holder = executor.submit(hold_lock)
+        assert acquired.wait(3)
+        try:
+            contender = executor.submit(prepare_review, job.job_dir)
+            result = contender.result(timeout=2)
+        finally:
+            release.set()
+        holder.result(timeout=2)
+
+    assert (result.exit_code, result.state) == (4, "workflow_busy")
+    assert (job.job_dir / "state.json").read_bytes() == before
+
+
+def test_job_lock_rejects_preexisting_symlink_without_touching_its_target(tmp_path):
+    source, glossary = tmp_path / "a.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    target = tmp_path / "external-lock"
+    target.write_bytes(b"external")
+    lock = job.job_dir / ".workflow.lock"
+    try:
+        lock.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this Windows runner")
+
+    with pytest.raises(TechpackError):
+        prepare_review(job.job_dir)
+
+    assert target.read_bytes() == b"external"
+
+
+def test_applying_recovery_rejects_unbound_success_report_even_with_matching_pdf(tmp_path):
+    source, glossary = tmp_path / "a.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    request = json.loads((job.job_dir / "translation-request.json").read_text(encoding="utf-8"))
+    (job.job_dir / "translation-response.json").write_text(json.dumps(_response_for(request), ensure_ascii=False), encoding="utf-8")
+    assert prepare_review(job.job_dir).state == "review_ready"
+    review_path = _write_approved_review(job.job_dir)
+    trusted = job.job_dir / "trusted-review.json"
+    trusted.write_bytes(review_path.read_bytes())
+    manifest = workflow._load_job(job.job_dir)
+    state = workflow._load_state(job.job_dir, manifest)
+    workflow._write_state(job.job_dir, manifest, workflow.WorkflowState.REVIEW_COMPLETED, state.revision + 1, 0, None)
+    state = workflow._load_state(job.job_dir, manifest)
+    workflow._write_state(job.job_dir, manifest, workflow.WorkflowState.APPLYING, state.revision + 1, 0, None)
+    output = source.with_name(source.name + ".annotated.pdf")
+    _techpack_pdf(output)
+    fake = {
+        "schema_version": "1.1", "job_id": manifest.job_id,
+        "source_sha256": manifest.source.sha256, "glossary_sha256": manifest.glossary.sha256,
+        "expected_output_sha256": workflow._sha256_artifact(job.job_dir, "expected-output.json"),
+        "status": "succeeded", "output_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+        "final_output_retained": False, "problems": [], "unresolved": [], "unresolved_overlap_count": 0,
+    }
+    (job.job_dir / "apply-result.json").write_text(json.dumps(fake), encoding="utf-8")
+
+    result = apply(source, review_path, output)
+
+    assert (result.exit_code, result.state) == (5, "recovery_required")
+    assert json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "applying"
+
+
+def test_review_ready_fails_closed_when_bound_review_html_is_missing(tmp_path):
+    source, glossary = tmp_path / "a.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    request = json.loads((job.job_dir / "translation-request.json").read_text(encoding="utf-8"))
+    (job.job_dir / "translation-response.json").write_text(json.dumps(_response_for(request), ensure_ascii=False), encoding="utf-8")
+    assert prepare_review(job.job_dir).state == "review_ready"
+    (job.job_dir / "review.html").unlink()
+
+    with pytest.raises(TechpackError) as caught:
+        prepare_review(job.job_dir)
+
+    assert caught.value.code == "workflow_artifact_invalid"
+
+
+def test_safe_apply_problem_projector_maps_task8_kind_without_retaining_content():
+    projected = workflow._safe_problem_tree({
+        "code": "publish_failed",
+        "details": {"kind": "temporary", "exists": True, "message": "DO-NOT-LEAK"},
+    })
+
+    assert projected.resource_kind == "temporary"
+    assert projected.exists is True
+    assert "DO-NOT-LEAK" not in projected.model_dump_json()
+
+
 def test_real_approved_review_applies_editable_freetext_and_writes_bound_success_report(tmp_path):
     source, glossary = tmp_path / "a.pdf", tmp_path / "terms.csv"
     _techpack_pdf(source)
@@ -965,6 +1125,31 @@ def test_real_approved_review_applies_editable_freetext_and_writes_bound_success
     report = json.loads((job.job_dir / "apply-result.json").read_text(encoding="utf-8"))
     assert report["status"] == "succeeded"
     assert report["output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()
+
+
+def test_external_trust_root_blocks_coordinated_state_and_request_tampering(tmp_path):
+    source, glossary = tmp_path / "a.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    result = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    directory = result.job_dir
+
+    trust = tmp_path / "jobs" / ".techpack-pdf-trust" / f"{directory.name}.trust.json"
+    assert trust.is_file()
+    state_path = directory / "state.json"
+    request_path = directory / "translation-request.json"
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    request["items"][0]["source_text"] = "coordinated external mutation"
+    request_path.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["artifacts"]["request"] = hashlib.sha256(request_path.read_bytes()).hexdigest()
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(TechpackError) as caught:
+        prepare_review(directory)
+
+    assert caught.value.code == "workflow_trust_invalid"
+    assert "coordinated external mutation" not in str(caught.value)
 
 
 def _request_hash(payload):
