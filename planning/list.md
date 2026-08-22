@@ -384,7 +384,7 @@ apply 写入接口固定为 `apply_review(source_pdf, review_path, job, expected
 | 翻译响应漏项、无效 JSON 或 token 被改 | 校验失败；一次定向纠偏后转人工 |
 | sub-agent 尝试修改 PDF、审核状态或任务文件 | 丢弃越权变更，只接受符合契约的 JSON 响应 |
 | review.json 与输入不匹配 | apply 阶段阻断 |
-| `review_ready` 下存在未绑定的 `trusted-review.json` | 仅在 Task 7 严格复验并确认 job/expected-output 全绑定后以 CAS 补全 `review_completed`；无效或不匹配文件保持原样并返回 `recovery_required`，不得覆盖、删除或终止任务 |
+| `review_ready` 下存在未绑定的 `trusted-review.json` | 仅在 Task 7 严格复验并确认 job/expected-output 全绑定后以 CAS 补全 `review_completed`；无效、不可读、非普通、reparse/link 或不匹配文件保持原样并返回 `recovery_required`，不得覆盖、删除或终止任务 |
 | `<原文件完整文件名>.annotated.pdf` 已存在 | 返回 `output_exists`，绝不覆盖 |
 | 同一任务已有工作流操作正在执行 | 不等待、不排队且不修改 state；返回 `status=workflow_busy`、退出码 4 |
 | FreeText 无法消除重叠 | `unresolved_overlap`，阻止交付 |

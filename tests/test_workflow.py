@@ -684,6 +684,44 @@ def test_review_ready_preserves_unbound_existing_snapshot_and_waits_for_recovery
     assert (job.job_dir / "state.json").read_bytes() == state_before
 
 
+def test_review_ready_reserved_reparse_snapshot_waits_without_terminalizing(tmp_path, monkeypatch):
+    source, glossary = tmp_path / "reserved-reparse.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    request = json.loads((job.job_dir / "translation-request.json").read_text(encoding="utf-8"))
+    (job.job_dir / "translation-response.json").write_text(json.dumps(_response_for(request)), encoding="utf-8")
+    assert prepare_review(job.job_dir).state == "review_ready"
+    review = _write_approved_review(job.job_dir)
+    trusted = job.job_dir / "trusted-review.json"
+    trusted.write_bytes(review.read_bytes())
+    trusted_before = trusted.read_bytes()
+    state_before = (job.job_dir / "state.json").read_bytes()
+    original_lstat = Path.lstat
+
+    def reserved_reparse(path):
+        details = original_lstat(path)
+        if Path(path) == trusted:
+            return SimpleNamespace(
+                st_mode=details.st_mode,
+                st_dev=details.st_dev,
+                st_ino=details.st_ino,
+                st_size=details.st_size,
+                st_mtime_ns=details.st_mtime_ns,
+                st_file_attributes=0x0400,
+            )
+        return details
+
+    monkeypatch.setattr(Path, "lstat", reserved_reparse)
+    result = apply(source, review, source.with_name(source.name + ".annotated.pdf"))
+
+    assert (result.exit_code, result.state, result.status, result.wait_reason) == (
+        5, "review_ready", "recovery_required", "review_recovery",
+    )
+    assert trusted.read_bytes() == trusted_before
+    assert (job.job_dir / "state.json").read_bytes() == state_before
+
+
 def test_apply_rejects_review_symlink_before_resolution(tmp_path):
     source, glossary = tmp_path / "techpack.pdf", tmp_path / "terms.csv"
     _techpack_pdf(source)

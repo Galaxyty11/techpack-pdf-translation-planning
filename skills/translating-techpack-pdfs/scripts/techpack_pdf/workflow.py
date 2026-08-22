@@ -568,7 +568,10 @@ def _apply_locked(
         raise _workflow_error("output_exists", "Output already exists")
     if state.state not in {WorkflowState.REVIEW_READY, WorkflowState.REVIEW_COMPLETED, WorkflowState.APPLYING}:
         raise _workflow_error("workflow_state_conflict", "Job is not ready to apply")
-    trusted_review = _inside(directory, _TRUSTED_REVIEW_NAME)
+    # Keep this reserved lexical path inspectable only for the review_ready
+    # crash-recovery exception.  Every read still goes through strict _inside /
+    # bounded Task 7 validation; all other artifact paths retain _inside here.
+    trusted_review = directory / _TRUSTED_REVIEW_NAME
     trusted_review_digest = state.artifacts.review
     if state.state is WorkflowState.REVIEW_READY:
         try:
