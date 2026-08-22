@@ -1,10 +1,12 @@
+import csv
 import hashlib
 import json
 from dataclasses import replace
+import traceback
 
 import pytest
 
-from techpack_pdf.glossary import Glossary, GlossaryHit
+from techpack_pdf.glossary import Glossary, GlossaryHit, load_glossary
 from techpack_pdf.models import CoordinateConfidence, DecisionReason, PageType
 from techpack_pdf.selection import Candidate, lock_tokens
 from techpack_pdf.translation import (
@@ -96,6 +98,46 @@ def test_response_is_strictly_pydantic_validated_before_semantic_checks(
     assert caught.value.error_codes == (expected_code,)
 
 
+@pytest.mark.parametrize(
+    "untrusted_id",
+    [
+        "customer confidential measurement notes",
+        "p1-i1",
+        f"p{'1' * 80}-i001",
+    ],
+)
+def test_schema_failure_never_copies_untrusted_item_ids_to_correction(untrusted_id) -> None:
+    request = _request(("p001-i001", "Shell 12 mm", "direct"))
+    item = _response(untrusted_id, "敏感业务译文 12 mm", "direct", ["12", "mm"])
+    item["unexpected"] = "force schema failure"
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(request, [item], _empty_glossary())
+
+    serialized = json.dumps(caught.value.result, ensure_ascii=False)
+    assert caught.value.failed_item_ids == ("p001-i001",)
+    assert untrusted_id not in serialized
+    assert "敏感业务译文" not in serialized
+
+
+def test_schema_failure_suppresses_pydantic_chain_with_raw_translation() -> None:
+    request = _request(("p001-i001", "Shell 12 mm", "direct"))
+    item = _response(
+        "p001-i001",
+        "DO-NOT-LEAK-FULL-TRANSLATION 12 mm",
+        "direct",
+        ["12", "mm"],
+    )
+    item.pop("translator")
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(request, [item], _empty_glossary())
+
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert caught.value.__suppress_context__ is True
+    assert "DO-NOT-LEAK-FULL-TRANSLATION" not in rendered
+
+
 def test_response_rejects_missing_and_unexpected_ids_without_index_guessing() -> None:
     request = _request(
         ("p001-i001", "Shell 12 mm", "direct"),
@@ -179,6 +221,117 @@ def test_response_rejects_translation_without_required_glossary_target() -> None
     assert caught.value.error_codes == ("glossary_target_missing",)
 
 
+def test_authoritative_glossary_match_overrides_stale_request_target(tmp_path) -> None:
+    glossary = _loaded_glossary(
+        tmp_path,
+        [{"source_term": "topstitch", "target_term": "明线"}],
+    )
+    request = _request_with_glossary("p001-i001")
+    request[0]["glossary_terms"][0]["target_term"] = "旧译"
+    response = [
+        _response(
+            "p001-i001",
+            "边缘明线 0.6 cm",
+            "direct",
+            ["0.6", "cm"],
+            glossary_terms_used=["topstitch"],
+        )
+    ]
+
+    validated = validate_translation_response(request, response, glossary)
+
+    assert validated[0].translated_text == "边缘明线 0.6 cm"
+
+
+def test_authoritative_glossary_match_resolves_alias(tmp_path) -> None:
+    glossary = _loaded_glossary(
+        tmp_path,
+        [
+            {
+                "source_term": "topstitch",
+                "target_term": "明线",
+                "aliases": "edge stitch",
+            }
+        ],
+    )
+    request = _request(("p001-i001", "EDGE STITCH 0.6 cm FROM EDGE", "direct"))
+    request[0]["glossary_terms"] = [{"source_term": "topstitch", "target_term": "旧译"}]
+    response = [
+        _response(
+            "p001-i001",
+            "边缘明线 0.6 cm",
+            "direct",
+            ["0.6", "cm"],
+            glossary_terms_used=["topstitch"],
+        )
+    ]
+
+    validated = validate_translation_response(request, response, glossary)
+
+    assert validated[0].glossary_terms_used == ("topstitch",)
+
+
+def test_authoritative_glossary_match_uses_selected_priority(tmp_path) -> None:
+    glossary = _loaded_glossary(
+        tmp_path,
+        [
+            {"source_term": "stitch", "target_term": "低优先", "priority": 1},
+            {"source_term": "stitch", "target_term": "高优先", "priority": 9},
+        ],
+    )
+    request = _request(("p001-i001", "STITCH 0.6 cm", "direct"))
+    request[0]["glossary_terms"] = [{"source_term": "stitch", "target_term": "过期"}]
+    response = [
+        _response(
+            "p001-i001",
+            "高优先 0.6 cm",
+            "direct",
+            ["0.6", "cm"],
+            glossary_terms_used=["stitch"],
+        )
+    ]
+
+    validated = validate_translation_response(request, response, glossary)
+
+    assert validated[0].translated_text == "高优先 0.6 cm"
+
+
+def test_authoritative_do_not_translate_match_requires_only_locked_source_token(tmp_path) -> None:
+    glossary = _loaded_glossary(
+        tmp_path,
+        [
+            {
+                "source_term": "AcmeTex",
+                "target_term": "艾克米",
+                "do_not_translate": False,
+                "priority": 99,
+            },
+            {
+                "source_term": "AcmeTex",
+                "target_term": "",
+                "do_not_translate": True,
+                "priority": 0,
+            },
+        ],
+    )
+    request = _request(("p001-i001", "Use AcmeTex fabric", "direct"))
+    request[0]["locked_tokens"] = ["AcmeTex"]
+    request[0]["glossary_terms"] = [{"source_term": "AcmeTex", "target_term": "艾克米"}]
+    response = [
+        _response(
+            "p001-i001",
+            "使用AcmeTex面料",
+            "direct",
+            ["AcmeTex"],
+            glossary_terms_used=["AcmeTex"],
+        )
+    ]
+
+    validated = validate_translation_response(request, response, glossary)
+
+    assert validated[0].translated_text == "使用AcmeTex面料"
+
+
 def test_response_rejects_mode_mismatch() -> None:
     request = _request(("p001-i001", "Reduce sleeve 0.6 cm", "faithful_digest"))
     response = [_response("p001-i001", "袖长减少 0.6 cm", "direct", ["0.6", "cm"])]
@@ -244,16 +397,22 @@ def test_attempt_on_request_envelope_also_stops_after_one_correction() -> None:
 def test_cache_key_uses_canonical_request_and_known_models_cross_jobs() -> None:
     request = _request(("p001-i001", "Shell 12 mm", "direct"))
     reordered = [{key: request[0][key] for key in reversed(request[0])}]
-    canonical = json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    cache_material = [
+        ["request", request],
+        ["glossary_sha256", "a" * 64],
+        ["prompt_version", "1.0"],
+        ["host", "codex"],
+        ["model", "gpt-5"],
+        ["execution_mode", "subagent"],
+    ]
+    canonical = json.dumps(
+        cache_material,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     expected = hashlib.sha256(
-        (
-            canonical
-            + "a" * 64
-            + "1.0"
-            + "codex"
-            + "gpt-5"
-            + "subagent"
-        ).encode("utf-8")
+        canonical.encode("utf-8")
     ).hexdigest()
 
     first = translation_cache_key(
@@ -265,6 +424,19 @@ def test_cache_key_uses_canonical_request_and_known_models_cross_jobs() -> None:
 
     assert first == expected
     assert second == expected
+
+
+def test_cache_key_separates_provenance_field_boundaries() -> None:
+    request = _request(("p001-i001", "Shell 12 mm", "direct"))
+
+    first = translation_cache_key(
+        request, "a" * 64, "ab", "c", "gpt-5", "subagent"
+    )
+    second = translation_cache_key(
+        request, "a" * 64, "a", "bc", "gpt-5", "subagent"
+    )
+
+    assert first != second
 
 
 def test_unknown_model_cache_is_scoped_to_job() -> None:
@@ -365,3 +537,20 @@ def _empty_glossary() -> Glossary:
 
 def _topstitch_glossary() -> Glossary:
     return Glossary(entries=(), _terms=())
+
+
+def _loaded_glossary(tmp_path, rows: list[dict]) -> Glossary:
+    path = tmp_path / "glossary.csv"
+    fieldnames = (
+        "source_term",
+        "target_term",
+        "aliases",
+        "do_not_translate",
+        "priority",
+    )
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    return load_glossary(path)

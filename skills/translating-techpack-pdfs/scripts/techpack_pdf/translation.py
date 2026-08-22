@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,11 +13,12 @@ from typing import Any, Literal, Sequence
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 
 from .errors import TechpackError
-from .glossary import Glossary, normalize_term
+from .glossary import Glossary, GlossaryHit, normalize_term
 from .selection import Candidate, LockedText, LockedToken, validate_locked_tokens
 
 
 TranslationMode = Literal["direct", "faithful_digest"]
+_STABLE_ITEM_ID = re.compile(r"^p[0-9]{3}-i[0-9]{3}$")
 _REQUEST_ADAPTER = TypeAdapter(list["_TranslationRequestItem"])
 _RESPONSE_ADAPTER = TypeAdapter(list["_TranslationResponseItem"])
 
@@ -244,12 +246,7 @@ def translation_cache_key(
     """Hash canonical request and execution provenance in the mandated order."""
     request_payload, _ = _decode_input(request)
     request_items = _validate_request_payload(request_payload)
-    canonical_request = json.dumps(
-        [item.model_dump(mode="json") for item in request_items],
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    canonical_request = [item.model_dump(mode="json") for item in request_items]
     if len(glossary_sha256) != 64 or any(character not in "0123456789abcdef" for character in glossary_sha256):
         raise ValueError("glossary_sha256 must be a lowercase SHA-256 hex digest")
     for field_name, value in (
@@ -263,19 +260,23 @@ def translation_cache_key(
     if model == "unknown" and (not isinstance(job_id, str) or not job_id.strip()):
         raise ValueError("job_id is required when model is unknown")
 
-    digest = hashlib.sha256()
-    for value in (
-        canonical_request,
-        glossary_sha256,
-        prompt_version,
-        host,
-        model,
-        execution_mode,
-    ):
-        digest.update(value.encode("utf-8"))
+    cache_material: list[list[Any]] = [
+        ["request", canonical_request],
+        ["glossary_sha256", glossary_sha256],
+        ["prompt_version", prompt_version],
+        ["host", host],
+        ["model", model],
+        ["execution_mode", execution_mode],
+    ]
     if model == "unknown":
-        digest.update(job_id.encode("utf-8"))  # type: ignore[union-attr]
-    return digest.hexdigest()
+        cache_material.append(["job_id", job_id])
+    canonical_material = json.dumps(
+        cache_material,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical_material.encode("utf-8")).hexdigest()
 
 
 def _request_payload(candidate: Candidate) -> dict[str, Any]:
@@ -321,8 +322,10 @@ def _schema_failure(exc: Exception, raw_response: Any) -> tuple[list[str], list[
     raw_items = raw_response.get("items", []) if isinstance(raw_response, dict) else raw_response
     if isinstance(raw_items, list):
         for item in raw_items:
-            if isinstance(item, dict) and isinstance(item.get("item_id"), str):
-                failed_ids.add(item["item_id"])
+            if isinstance(item, dict):
+                item_id = item.get("item_id")
+                if isinstance(item_id, str) and _STABLE_ITEM_ID.fullmatch(item_id):
+                    failed_ids.add(item_id)
 
     if isinstance(exc, ValidationError):
         for error in exc.errors():
@@ -363,19 +366,25 @@ def _validate_item(
         codes.add("glossary_terms_used_mismatch")
 
     normalized_translation = normalize_term(response.translated_text)
+    authoritative_hits = glossary.match(request.source_text)
     for term in request.glossary_terms:
-        target = _authoritative_target(term, glossary)
+        target = _authoritative_target(term, authoritative_hits)
         if target and normalize_term(target) not in normalized_translation:
             codes.add("glossary_target_missing")
     return codes
 
 
-def _authoritative_target(term: _GlossaryTerm, glossary: Glossary) -> str:
+def _authoritative_target(
+    term: _GlossaryTerm,
+    authoritative_hits: Sequence[GlossaryHit],
+) -> str:
     normalized_source = normalize_term(term.source_term)
-    for entry in glossary.entries:
-        sources = (entry.source_term, *entry.aliases)
-        if any(normalize_term(source) == normalized_source for source in sources):
-            return entry.target_term
+    for hit in authoritative_hits:
+        if normalized_source in {
+            normalize_term(hit.source_term),
+            normalize_term(hit.matched_text),
+        }:
+            return hit.target_term
     return term.target_term
 
 
@@ -408,7 +417,7 @@ def _raise_validation_failure(
             {"status": "human_review_required"},
             unique_ids,
             unique_codes,
-        )
+        ) from None
 
     result = {
         "attempt": 1,
@@ -422,7 +431,7 @@ def _raise_validation_failure(
             json.dumps(result, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-    raise TranslationValidationError(result, unique_ids, unique_codes)
+    raise TranslationValidationError(result, unique_ids, unique_codes) from None
 
 
 def _required_fix(error_code: str) -> str:
