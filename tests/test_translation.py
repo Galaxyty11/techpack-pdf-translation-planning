@@ -3,6 +3,7 @@ import hashlib
 import json
 import traceback
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -182,7 +183,7 @@ def test_invalid_second_response_stops_for_human_review_without_guessing(tmp_pat
     second = _bound_response([], request, attempt=1)
 
     with pytest.raises(TranslationValidationError) as caught:
-        validate_translation_response(request_path, second, _empty_glossary(), job)
+        validate_translation_response(request_path, second, _empty_glossary(), job, expected_attempt=1)
 
     assert caught.value.result == {"status": "human_review_required"}
     assert caught.value.correction_request is None
@@ -371,7 +372,8 @@ def test_response_rejects_missing_and_unexpected_ids_without_index_guessing():
         _validate_items(request, response, _empty_glossary())
 
     assert caught.value.error_codes == ("item_id_set_mismatch",)
-    assert caught.value.failed_item_ids == ("p001-i002", "p999-i999")
+    assert caught.value.failed_item_ids == ("p001-i002",)
+    assert "p999-i999" not in json.dumps(caught.value.result, ensure_ascii=False)
 
 
 def test_response_rejects_duplicate_ids():
@@ -493,6 +495,206 @@ def test_cache_key_separates_provenance_field_boundaries():
     job = _job("job-a", "a" * 64, "b" * 64)
     request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
     assert translation_cache_key(request, "b" * 64, "ab", "c", "gpt-5", "subagent") != translation_cache_key(request, "b" * 64, "a", "bc", "gpt-5", "subagent")
+
+
+def test_trusted_expected_attempt_one_rejects_a_valid_initial_response_without_rewriting_correction(tmp_path):
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+    request_path = tmp_path / "translation-request.json"
+    correction_path = tmp_path / "correction-request.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    correction_path.write_text("preexisting correction must remain", encoding="utf-8")
+    initial_response = _bound_response([_item("p001-i001", "大身 12 mm", "direct", ["12", "mm"])], request)
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(request_path, initial_response, _empty_glossary(), job, expected_attempt=1)
+
+    assert caught.value.result == {"status": "human_review_required"}
+    assert caught.value.error_codes == ("response_attempt_invalid",)
+    assert correction_path.read_text(encoding="utf-8") == "preexisting correction must remain"
+
+
+def test_trusted_expected_attempt_one_accepts_only_a_bound_correction_response():
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+    correction_response = _bound_response([_item("p001-i001", "大身 12 mm", "direct", ["12", "mm"])], request, attempt=1)
+
+    validated = validate_translation_response(request, correction_response, _empty_glossary(), job, expected_attempt=1)
+
+    assert [item.item_id for item in validated] == ["p001-i001"]
+
+
+def test_trusted_expected_attempt_one_malformed_response_is_terminal_and_redacted(tmp_path):
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+    request_path = tmp_path / "translation-request.json"
+    correction_path = tmp_path / "correction-request.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    correction_path.write_text("do not overwrite", encoding="utf-8")
+    malformed = '{"items": ["DO-NOT-LEAK-COMPLETE-RESPONSE"]'
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(request_path, malformed, _empty_glossary(), job, expected_attempt=1)
+
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert caught.value.result == {"status": "human_review_required"}
+    assert correction_path.read_text(encoding="utf-8") == "do not overwrite"
+    assert "DO-NOT-LEAK-COMPLETE-RESPONSE" not in rendered
+
+
+def test_trusted_expected_initial_attempt_writes_one_bound_correction_for_malformed_json(tmp_path):
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+    request_path = tmp_path / "translation-request.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(request_path, '{"items": [', _empty_glossary(), job)
+
+    correction = json.loads((tmp_path / "correction-request.json").read_text(encoding="utf-8"))
+    assert caught.value.result == correction
+    assert correction["attempt"] == 1
+    assert correction["request_sha256"] == request["request_sha256"]
+    assert correction["failed_item_ids"] == ["p001-i001"]
+    assert correction["error_codes"] == ["invalid_json"]
+
+
+def test_trusted_expected_correction_attempt_schema_failure_is_terminal_without_clobbering(tmp_path):
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+    request_path = tmp_path / "translation-request.json"
+    correction_path = tmp_path / "correction-request.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    correction_path.write_text("must remain unchanged", encoding="utf-8")
+    response = _bound_response([_item("p001-i001", "大身 12 mm", "direct", ["12", "mm"])], request, attempt=1)
+    response["items"][0]["unexpected"] = "schema failure"
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(request_path, response, _empty_glossary(), job, expected_attempt=1)
+
+    assert caught.value.result == {"status": "human_review_required"}
+    assert caught.value.error_codes == ("response_schema_invalid",)
+    assert correction_path.read_text(encoding="utf-8") == "must remain unchanged"
+
+
+def test_external_stable_response_id_never_leaks_when_no_trusted_id_is_missing():
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+    response = _bound_response([
+        _item("p001-i001", "大身 12 mm", "direct", ["12", "mm"]),
+        _item("p999-i999", "SECRET-EXTERNAL-TRANSLATION", "direct", ["12", "mm"]),
+    ], request)
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(request, response, _empty_glossary(), job)
+
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert caught.value.failed_item_ids == ("p001-i001",)
+    assert "p999-i999" not in json.dumps(caught.value.result, ensure_ascii=False)
+    assert "SECRET-EXTERNAL-TRANSLATION" not in rendered
+
+
+def test_schema_failure_never_reports_a_legal_but_external_response_id():
+    request = _items(("p001-i001", "Shell 12 mm", "direct"))
+    response = _item("p999-i999", "SECRET-SCHEMA-TRANSLATION", "direct", ["12", "mm"])
+    response["unexpected"] = "schema failure"
+
+    with pytest.raises(TranslationValidationError) as caught:
+        _validate_items(request, [response], _empty_glossary())
+
+    assert caught.value.failed_item_ids == ("p001-i001",)
+    assert "p999-i999" not in json.dumps(caught.value.result, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("model", [" gpt-5", "unknown "])
+def test_response_model_rejects_edge_whitespace(model):
+    request = _items(("p001-i001", "Shell 12 mm", "direct"))
+    response = _item("p001-i001", "大身 12 mm", "direct", ["12", "mm"], model=model)
+
+    with pytest.raises(TranslationValidationError) as caught:
+        _validate_items(request, [response], _empty_glossary())
+
+    assert caught.value.error_codes == ("model_missing",)
+
+
+def test_response_model_normalizes_case_insensitive_unknown():
+    request = _items(("p001-i001", "Shell 12 mm", "direct"))
+
+    validated = _validate_items(request, [_item("p001-i001", "大身 12 mm", "direct", ["12", "mm"], model="UNKNOWN")], _empty_glossary())
+
+    assert validated[0].translator.model == "unknown"
+
+
+def test_cache_model_normalizes_unknown_and_rejects_edge_whitespace():
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+    unknown = translation_cache_key(request, "b" * 64, "1.0", "codex", "unknown", "main_agent", job_id="job-a")
+
+    assert translation_cache_key(request, "b" * 64, "1.0", "codex", "UNKNOWN", "main_agent", job_id="job-a") == unknown
+    with pytest.raises(ValueError, match="job_id"):
+        translation_cache_key(request, "b" * 64, "1.0", "codex", "UNKNOWN", "main_agent", job_id="wrong-job")
+    with pytest.raises(ValueError, match="model"):
+        translation_cache_key(request, "b" * 64, "1.0", "codex", "unknown ", "main_agent", job_id="job-a")
+    with pytest.raises(ValueError, match="model"):
+        translation_cache_key(request, "b" * 64, "1.0", "codex", " gpt-5", "main_agent")
+
+
+def test_request_and_cache_read_failures_are_safe_and_do_not_expose_paths_or_payloads(tmp_path, monkeypatch):
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request_path = tmp_path / "REQUEST-PATH-SECRET.json"
+
+    def fail_read(self, *args, **kwargs):
+        raise OSError(f"REQUEST-IO-SECRET {self}")
+
+    monkeypatch.setattr(Path, "read_text", fail_read)
+    malformed_cache_json = '{"payload":"CACHE-JSON-SECRET"'
+    with pytest.raises(TechpackError) as request_error:
+        validate_translation_response(request_path, object(), _empty_glossary(), job)
+    with pytest.raises(TechpackError) as cache_error:
+        translation_cache_key(malformed_cache_json, "b" * 64, "1.0", "codex", "gpt-5", "main_agent")
+
+    request_rendered = "".join(traceback.format_exception(request_error.value))
+    cache_rendered = "".join(traceback.format_exception(cache_error.value))
+    assert request_error.value.code == "translation_request_invalid"
+    assert cache_error.value.code == "translation_request_invalid"
+    assert "REQUEST-IO-SECRET" not in request_rendered
+    assert str(request_path) not in request_rendered
+    assert "CACHE-JSON-SECRET" not in cache_rendered
+
+
+def test_request_and_correction_write_failures_are_safe_and_do_not_expose_paths_or_payloads(tmp_path, monkeypatch):
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request_path = tmp_path / "WRITE-PATH-SECRET.json"
+    candidate = _candidate("p001-i001", PageType.BOM, "Shell 12 mm")
+
+    def fail_all_writes(self, *args, **kwargs):
+        raise OSError(f"WRITE-IO-SECRET {self}")
+
+    monkeypatch.setattr(Path, "write_text", fail_all_writes)
+    with pytest.raises(TechpackError) as request_error:
+        write_translation_request([candidate], request_path, job)
+    request_rendered = "".join(traceback.format_exception(request_error.value))
+    assert request_error.value.code == "translation_request_write_failed"
+    assert "WRITE-IO-SECRET" not in request_rendered
+    assert str(request_path) not in request_rendered
+
+    monkeypatch.undo()
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    original_write = Path.write_text
+
+    def fail_correction_write(self, *args, **kwargs):
+        if self.name == "correction-request.json":
+            raise OSError(f"CORRECTION-IO-SECRET {self}")
+        return original_write(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_correction_write)
+    with pytest.raises(TechpackError) as correction_error:
+        validate_translation_response(request_path, _bound_response([], request), _empty_glossary(), job)
+    correction_rendered = "".join(traceback.format_exception(correction_error.value))
+    assert correction_error.value.code == "translation_correction_write_failed"
+    assert "CORRECTION-IO-SECRET" not in correction_rendered
+    assert str(request_path) not in correction_rendered
 
 
 def _job(job_id, source_hash, glossary_hash):
