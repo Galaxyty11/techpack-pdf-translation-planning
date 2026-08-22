@@ -308,7 +308,7 @@ git commit -m "feat: select and protect TechPack translation candidates"
 def test_response_is_joined_by_item_id_not_array_position():
     request = make_request(["p001-i001", "p001-i002"])
     response = make_response(["p001-i002", "p001-i001"])
-    validated = validate_translation_response(request, response, empty_glossary())
+    validated = validate_translation_response(request, response, empty_glossary(), job)
     assert [item.item_id for item in validated] == ["p001-i001", "p001-i002"]
 ~~~
 
