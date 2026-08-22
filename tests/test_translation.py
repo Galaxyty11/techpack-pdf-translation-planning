@@ -138,6 +138,49 @@ def test_schema_failure_suppresses_pydantic_chain_with_raw_translation() -> None
     assert "DO-NOT-LEAK-FULL-TRANSLATION" not in rendered
 
 
+@pytest.mark.parametrize(
+    "untrusted_id",
+    ["customer measurement notes", f"p{'1' * 80}-i001"],
+)
+def test_request_item_id_is_rejected_by_pydantic_schema(untrusted_id) -> None:
+    request = _request((untrusted_id, "Shell 12 mm", "direct"))
+    response = [_response(untrusted_id, "大身 12 mm", "direct", ["12", "mm"])]
+
+    with pytest.raises(ValueError, match="translation request does not match its schema"):
+        validate_translation_response(request, response, _empty_glossary())
+
+
+@pytest.mark.parametrize(
+    "untrusted_id",
+    ["customer measurement notes", f"p{'1' * 80}-i001"],
+)
+def test_response_item_id_schema_failure_cannot_enter_mismatch_result(untrusted_id) -> None:
+    request = _request(("p001-i001", "Shell 12 mm", "direct"))
+    response = [_response(untrusted_id, "大身 12 mm", "direct", ["12", "mm"])]
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(request, response, _empty_glossary())
+
+    assert caught.value.error_codes == ("response_schema_invalid",)
+    assert caught.value.failed_item_ids == ("p001-i001",)
+    assert untrusted_id not in json.dumps(caught.value.result, ensure_ascii=False)
+
+
+def test_arbitrary_duplicate_response_ids_fail_schema_without_being_reported() -> None:
+    request = _request(("p001-i001", "Shell 12 mm", "direct"))
+    response = [
+        _response("private duplicate text", "大身 12 mm", "direct", ["12", "mm"]),
+        _response("private duplicate text", "大身 12 mm", "direct", ["12", "mm"]),
+    ]
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(request, response, _empty_glossary())
+
+    assert caught.value.error_codes == ("response_schema_invalid",)
+    assert caught.value.failed_item_ids == ("p001-i001",)
+    assert "private duplicate text" not in json.dumps(caught.value.result)
+
+
 def test_response_rejects_missing_and_unexpected_ids_without_index_guessing() -> None:
     request = _request(
         ("p001-i001", "Shell 12 mm", "direct"),
@@ -145,14 +188,14 @@ def test_response_rejects_missing_and_unexpected_ids_without_index_guessing() ->
     )
     response = [
         _response("p001-i001", "大身 12 mm", "direct", ["12", "mm"]),
-        _response("p001-i999", "里布 8 mm", "direct", ["8", "mm"]),
+        _response("p999-i999", "里布 8 mm", "direct", ["8", "mm"]),
     ]
 
     with pytest.raises(TranslationValidationError) as caught:
         validate_translation_response(request, response, _empty_glossary())
 
     assert caught.value.error_codes == ("item_id_set_mismatch",)
-    assert caught.value.failed_item_ids == ("p001-i002", "p001-i999")
+    assert caught.value.failed_item_ids == ("p001-i002", "p999-i999")
 
 
 def test_response_rejects_duplicate_ids() -> None:
@@ -269,6 +312,84 @@ def test_authoritative_glossary_match_resolves_alias(tmp_path) -> None:
     validated = validate_translation_response(request, response, glossary)
 
     assert validated[0].glossary_terms_used == ("topstitch",)
+
+
+def test_authoritative_glossary_prefers_global_canonical_hit_over_earlier_alias(tmp_path) -> None:
+    glossary = _loaded_glossary(
+        tmp_path,
+        [
+            {
+                "source_term": "alpha",
+                "target_term": "甲",
+                "aliases": "beta",
+                "priority": 2,
+            },
+            {
+                "source_term": "beta",
+                "target_term": "乙",
+                "aliases": "gamma",
+                "priority": 1,
+            },
+        ],
+    )
+    request = _request(("p001-i001", "BETA GAMMA 0.6 cm", "direct"))
+    request[0]["glossary_terms"] = [
+        {"source_term": "alpha", "target_term": "过期甲"},
+        {"source_term": "beta", "target_term": "过期乙"},
+    ]
+    response = [
+        _response(
+            "p001-i001",
+            "甲和乙 0.6 cm",
+            "direct",
+            ["0.6", "cm"],
+            glossary_terms_used=["alpha", "beta"],
+        )
+    ]
+
+    validated = validate_translation_response(request, response, glossary)
+
+    assert validated[0].translated_text == "甲和乙 0.6 cm"
+
+
+def test_authoritative_glossary_rejects_missing_later_canonical_target(tmp_path) -> None:
+    glossary = _loaded_glossary(
+        tmp_path,
+        [
+            {
+                "source_term": "alpha",
+                "target_term": "甲",
+                "aliases": "beta",
+                "priority": 2,
+            },
+            {
+                "source_term": "beta",
+                "target_term": "乙",
+                "aliases": "gamma",
+                "priority": 1,
+            },
+        ],
+    )
+    request = _request(("p001-i001", "BETA GAMMA 0.6 cm", "direct"))
+    request[0]["glossary_terms"] = [
+        {"source_term": "alpha", "target_term": "过期甲"},
+        {"source_term": "beta", "target_term": "过期乙"},
+    ]
+    response = [
+        _response(
+            "p001-i001",
+            "只有甲 0.6 cm",
+            "direct",
+            ["0.6", "cm"],
+            glossary_terms_used=["alpha", "beta"],
+        )
+    ]
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(request, response, glossary)
+
+    assert caught.value.error_codes == ("glossary_target_missing",)
+    assert caught.value.failed_item_ids == ("p001-i001",)
 
 
 def test_authoritative_glossary_match_uses_selected_priority(tmp_path) -> None:

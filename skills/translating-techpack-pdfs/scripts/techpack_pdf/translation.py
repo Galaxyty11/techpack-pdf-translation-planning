@@ -40,7 +40,7 @@ class _GlossaryTerm(_StrictModel):
 
 
 class _TranslationRequestItem(_StrictModel):
-    item_id: str = Field(min_length=1)
+    item_id: str = Field(pattern=_STABLE_ITEM_ID.pattern)
     source_text: str = Field(min_length=1)
     context: str
     locked_tokens: list[str]
@@ -72,7 +72,7 @@ class Translator(_StrictModel):
 
 
 class _TranslationResponseItem(_StrictModel):
-    item_id: str = Field(min_length=1)
+    item_id: str = Field(pattern=_STABLE_ITEM_ID.pattern)
     translated_text: str = Field(min_length=1)
     preserved_tokens: list[str]
     glossary_terms_used: list[str]
@@ -380,10 +380,10 @@ def _authoritative_target(
 ) -> str:
     normalized_source = normalize_term(term.source_term)
     for hit in authoritative_hits:
-        if normalized_source in {
-            normalize_term(hit.source_term),
-            normalize_term(hit.matched_text),
-        }:
+        if normalized_source == normalize_term(hit.source_term):
+            return hit.target_term
+    for hit in authoritative_hits:
+        if normalized_source == normalize_term(hit.matched_text):
             return hit.target_term
     return term.target_term
 
