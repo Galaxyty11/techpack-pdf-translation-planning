@@ -1,3 +1,6 @@
 interface:
-  display_name: "Translating Techpack Pdfs"
-  short_description: "Help with Translating Techpack Pdfs tasks"
+  display_name: "TechPack PDF 翻译批注"
+  short_description: "审核后生成红色可编辑中文 TechPack PDF 批注"
+  default_prompt: "Use $translating-techpack-pdfs to analyze this TechPack PDF, prepare reviewed Chinese annotations, and apply only approved items."
+policy:
+  allow_implicit_invocation: true
