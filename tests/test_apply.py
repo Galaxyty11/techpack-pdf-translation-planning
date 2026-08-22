@@ -504,11 +504,11 @@ def test_apply_review_reports_failed_exact_temp_cleanup_without_deleting_other_f
     result = apply_review(source, review_path, job, expected_output)
 
     assert result.success is False
-    assert result.problems[0]["code"] == "temp_cleanup_failed"
+    assert result.problems[0]["code"] == "combined_failure"
     assert unrelated.read_bytes() == b"unrelated"
     retained = list(tmp_path.glob(".cleanup.pdf.*.tmp.pdf"))
     assert len(retained) == 2
-    assert set(result.problems[0]["details"]["retained_paths"]) == {
+    assert {value["path"] for value in result.problems[0]["details"]["retained_resources"]} == {
         str(path) for path in retained
     }
 
@@ -1014,7 +1014,7 @@ def test_post_link_source_change_reports_observable_rollback_failure(
     assert problem["details"]["final_path"] == str(final)
     assert problem["details"]["temp_path"] == str(temp)
     assert problem["details"]["final_exists"] is True
-    assert problem["details"]["temp_exists"] is True
+    assert problem["details"]["temp_exists"] is False
 
 
 @pytest.mark.parametrize("suffix", ["page-1.png", "report.json"])
@@ -1245,3 +1245,237 @@ def test_final_verification_checks_exact_leader_geometry(tmp_path: Path) -> None
     )
     assert tampered.problem is not None
     assert tampered.problem["code"] == "verification_failed"
+
+
+def test_stable_source_check_rejects_a_change_during_hashing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "hash-race.pdf"
+    _make_source(source)
+    identity = apply_module._source_identity(source)
+    trusted = _sha256(source)
+
+    def hash_then_mutate(path):
+        digest = _sha256(Path(path))
+        with source.open("ab") as stream:
+            stream.write(b"\n% changed during hash")
+        return digest
+
+    monkeypatch.setattr(apply_module, "_sha256", hash_then_mutate)
+    assert apply_module._stable_source_matches(source, identity, trusted) is False
+
+
+def test_publish_final_linearization_check_runs_after_temp_cleanup(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "final-linearization.pdf"
+    _make_source(source)
+    temp = apply_module._unique_temp_path(source)
+    temp.write_bytes(source.read_bytes())
+    final = source.with_name(source.name + ".annotated.pdf")
+    identity = apply_module._source_identity(source)
+    trusted = _sha256(source)
+    real_remove = apply_module._remove_exact_temp
+
+    def cleanup_then_mutate(path, source_path):
+        removed = real_remove(path, source_path)
+        with source.open("ab") as stream:
+            stream.write(b"\n% changed at final point")
+        return removed
+
+    monkeypatch.setattr(apply_module, "_remove_exact_temp", cleanup_then_mutate)
+    problem = apply_module._publish_no_clobber(
+        temp,
+        final,
+        source,
+        expected_source_identity=identity,
+        expected_source_sha256=trusted,
+    )
+
+    assert problem is not None and problem["code"] == "source_mismatch"
+    assert not final.exists()
+
+
+def test_final_rollback_preserves_a_replaced_foreign_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "foreign-final.pdf"
+    _make_source(source)
+    temp = apply_module._unique_temp_path(source)
+    temp.write_bytes(source.read_bytes())
+    final = source.with_name(source.name + ".annotated.pdf")
+    real_unlink = Path.unlink
+
+    def replace_before_rollback(path, _source):
+        if final.exists():
+            real_unlink(final)
+            final.write_bytes(b"foreign replacement")
+        return False
+
+    monkeypatch.setattr(apply_module, "_remove_exact_temp", replace_before_rollback)
+    problem = apply_module._publish_no_clobber(temp, final, source)
+
+    assert problem is not None and problem["code"] == "publish_rollback_failed"
+    assert problem["details"]["ownership_mismatch"] is True
+    assert final.read_bytes() == b"foreign replacement"
+
+
+def test_artifact_rollback_preserves_a_replaced_foreign_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    final = tmp_path / ".source.pdf.unresolved.owner.page-1.png"
+    real_unlink = Path.unlink
+
+    def replace_on_part_cleanup(path, *args, **kwargs):
+        if path.name.endswith(".part") and final.exists():
+            real_unlink(final)
+            final.write_bytes(b"foreign artifact")
+            raise PermissionError("part locked")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", replace_on_part_cleanup)
+    with pytest.raises(apply_module._ArtifactWriteError) as captured:
+        apply_module._atomic_artifact_write(final, b"owned artifact")
+
+    assert final.read_bytes() == b"foreign artifact"
+    assert final in captured.value.ownership_mismatches
+
+
+def test_verification_and_cleanup_failures_are_both_reported_end_to_end(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "verify-cleanup.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    monkeypatch.setattr(
+        apply_module,
+        "_verify_temp",
+        lambda *_args, **_kwargs: apply_module._VerificationOutcome(
+            apply_module._problem("verification_failed", "injected verification")
+        ),
+    )
+    monkeypatch.setattr(apply_module, "_remove_exact_temp", lambda *_args: False)
+
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.problems[0]["code"] == "combined_failure"
+    assert {cause["code"] for cause in result.problems[0]["details"]["causes"]} == {
+        "verification_failed",
+        "temp_cleanup_failed",
+    }
+
+
+def test_outer_apply_and_cleanup_failures_are_both_reported(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "outer-cleanup.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    monkeypatch.setattr(
+        apply_module, "_layout_document", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("injected"))
+    )
+    monkeypatch.setattr(apply_module, "_remove_exact_temp", lambda *_args: False)
+
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.problems[0]["code"] == "combined_failure"
+    assert {cause["code"] for cause in result.problems[0]["details"]["causes"]} == {
+        "apply_failed",
+        "temp_cleanup_failed",
+    }
+
+
+@pytest.mark.parametrize("publish_error", [FileExistsError("exists"), OSError("failed")])
+def test_publish_primary_and_temp_cleanup_failures_are_combined(
+    tmp_path: Path, monkeypatch, publish_error: OSError
+) -> None:
+    source = tmp_path / "publish-combined.pdf"
+    _make_source(source)
+    temp = apply_module._unique_temp_path(source)
+    temp.write_bytes(source.read_bytes())
+    final = source.with_name(source.name + ".annotated.pdf")
+    monkeypatch.setattr(apply_module.os, "link", lambda *_args: (_ for _ in ()).throw(publish_error))
+    monkeypatch.setattr(apply_module, "_remove_exact_temp", lambda *_args: False)
+
+    problem = apply_module._publish_no_clobber(temp, final, source)
+
+    assert problem is not None and problem["code"] == "combined_failure"
+    expected = "output_exists" if isinstance(publish_error, FileExistsError) else "publish_failed"
+    assert {cause["code"] for cause in problem["details"]["causes"]} == {
+        expected,
+        "temp_cleanup_failed",
+    }
+
+
+@pytest.mark.parametrize("mutation", ["image_stream", "old_annotation_ap"])
+def test_original_indirect_visual_resources_are_hash_preserved(
+    tmp_path: Path, monkeypatch, mutation: str
+) -> None:
+    source = tmp_path / f"indirect-{mutation}.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    real_write = apply_module._write_annotations
+
+    def tamper(document, placements):
+        records = real_write(document, placements)
+        if mutation == "image_stream":
+            image_xref = document[0].get_images(full=True)[0][0]
+            document.update_stream(image_xref, document.xref_stream(image_xref) + b"\n")
+        else:
+            old = next(annotation for annotation in document[0].annots() if annotation.info.get("title") == "legacy-review")
+            ap_xref = int(document.xref_get_key(old.xref, "AP/N")[1].split()[0])
+            document.update_stream(ap_xref, document.xref_stream(ap_xref) + b"\n")
+        return records
+
+    monkeypatch.setattr(apply_module, "_write_annotations", tamper)
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is False
+    assert result.problems[0]["code"] == "verification_failed"
+
+
+def test_da_helvetica_tamper_fails_even_when_cjk_ap_remains_valid(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "da-helv.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    real_write = apply_module._write_annotations
+
+    def tamper(document, placements):
+        records = real_write(document, placements)
+        document.xref_set_key(
+            records[0].xref,
+            "DA",
+            f"(0.85 0.05 0.05 rg /Helv {records[0].font_size} Tf)",
+        )
+        return records
+
+    monkeypatch.setattr(apply_module, "_write_annotations", tamper)
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is False
+    assert result.problems[0]["code"] == "verification_failed"
+
+
+def test_cleanup_uses_final_state_after_two_failures_then_success(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "third-cleanup.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    real_remove = apply_module._remove_exact_temp
+    calls = 0
+
+    def fail_twice(path, source_path):
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            return False
+        return real_remove(path, source_path)
+
+    monkeypatch.setattr(apply_module, "_remove_exact_temp", fail_twice)
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is True
+    assert result.problems == ()

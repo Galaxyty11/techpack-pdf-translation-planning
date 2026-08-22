@@ -104,10 +104,22 @@ class _ArtifactOutcome:
     problem: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class _OwnedPath:
+    path: Path
+    identity: tuple[int, int, int, int]
+    sha256: str
+
+
 class _ArtifactWriteError(RuntimeError):
-    def __init__(self, retained: Sequence[Path] = ()) -> None:
+    def __init__(
+        self,
+        retained: Sequence[Path] = (),
+        ownership_mismatches: Sequence[Path] = (),
+    ) -> None:
         super().__init__("artifact write failed")
         self.retained = tuple(retained)
+        self.ownership_mismatches = tuple(ownership_mismatches)
 
 
 def apply_review(
@@ -332,7 +344,11 @@ def apply_review(
             if verification.problem is not None:
                 cleanup = _cleanup_many((temp_path, snapshot_path), source)
                 if cleanup is not None:
-                    return _failure(cleanup, layout_rounds=total_rounds, modified_pages=modified_pages)
+                    return _failure(
+                        _combine_problems(verification.problem, cleanup),
+                        layout_rounds=total_rounds,
+                        modified_pages=modified_pages,
+                    )
                 temp_path = None
                 snapshot_path = None
                 return _failure(
@@ -342,15 +358,15 @@ def apply_review(
                 )
             break
 
-        if not _source_unchanged(source, source_identity, review.source.sha256):
+        if not _stable_source_matches(source, source_identity, review.source.sha256):
             cleanup = _cleanup_many((temp_path, snapshot_path), source)
             temp_path = None if cleanup is None else temp_path
             snapshot_path = None if cleanup is None else snapshot_path
             return _failure(_combine_problems(_problem("source_mismatch", "Source PDF changed before publication"), cleanup))
         cleanup = _cleanup_problem(snapshot_path, source)
         if cleanup is not None:
-            combined = _cleanup_many((snapshot_path, temp_path), source)
-            return _failure(combined or cleanup)
+            output_cleanup = _cleanup_problem(temp_path, source)
+            return _failure(_combine_problems(cleanup, output_cleanup))
         snapshot_path = None
         publish_problem = _publish_no_clobber(
             temp_path,
@@ -373,10 +389,11 @@ def apply_review(
         )
     except Exception:
         cleanup = _cleanup_many((temp_path, snapshot_path), source)
-        if cleanup is not None:
-            return _failure(cleanup)
         return _failure(
-            _problem("apply_failed", "PDF annotations could not be applied safely")
+            _combine_problems(
+                _problem("apply_failed", "PDF annotations could not be applied safely"),
+                cleanup,
+            )
         )
 
 
@@ -486,8 +503,14 @@ def _layout_document(
             tuple(sorted((*result.collisions, *exhausted), key=lambda value: (value.page_index, value.item_id, value.kind))),
             result.rounds,
             result.stable,
+            result.attempted_placements,
         )
-    return result, candidates_by_id
+    attempted_by_id: dict[str, list[Placement]] = defaultdict(list)
+    for placement in result.attempted_placements:
+        attempted_by_id[placement.item_id].append(placement)
+    for item in items:
+        attempted_by_id.setdefault(item.item_id, [])
+    return result, dict(attempted_by_id)
 
 
 def _write_annotations(
@@ -519,6 +542,7 @@ def _write_annotations(
             subject=json.dumps(metadata, ensure_ascii=True, separators=(",", ":")),
         )
         annotation.update()
+        _bind_da_to_cjk_appearance(document, annotation, placement.font_size)
         written.append(
             _WrittenAnnotation(
                 placement.page_index,
@@ -747,6 +771,9 @@ def _snapshot_document(
                     annotation.opacity,
                     annotation.flags,
                     tuple(annotation.vertices or ()),
+                    _xref_dependency_hashes(
+                        document, _annotation_appearance_xrefs(document, annotation)
+                    ),
                 )
             )
         snapshots.append(
@@ -765,9 +792,18 @@ def _snapshot_document(
                 images=tuple(
                     (
                         image[0],
+                        image[1],
                         tuple(
                             tuple(float(value) for value in rect)
                             for rect in page.get_image_rects(image[0])
+                        ),
+                        _xref_dependency_hashes(
+                            document,
+                            tuple(
+                                xref
+                                for xref in (image[0], image[1])
+                                if isinstance(xref, int) and xref > 0
+                            ),
                         ),
                     )
                     for image in page.get_images(full=True)
@@ -780,6 +816,48 @@ def _snapshot_document(
             )
         )
     return tuple(snapshots)
+
+
+def _annotation_appearance_xrefs(
+    document: pymupdf.Document, annotation: pymupdf.Annot
+) -> tuple[int, ...]:
+    roots: list[int] = []
+    for key in ("AP/N", "AP/R", "AP/D"):
+        key_type, value = document.xref_get_key(annotation.xref, key)
+        if key_type == "xref":
+            roots.append(int(value.split()[0]))
+    return tuple(dict.fromkeys(roots))
+
+
+def _xref_dependency_hashes(
+    document: pymupdf.Document, roots: Sequence[int]
+) -> tuple[tuple[int, str, str | None], ...]:
+    pending = list(roots)
+    visited: set[int] = set()
+    values: list[tuple[int, str, str | None]] = []
+    while pending:
+        xref = pending.pop()
+        if xref <= 0 or xref in visited or xref >= document.xref_length():
+            continue
+        visited.add(xref)
+        object_text = document.xref_object(xref, compressed=False)
+        try:
+            stream = document.xref_stream(xref)
+        except RuntimeError:
+            stream = None
+        values.append(
+            (
+                xref,
+                hashlib.sha256(object_text.encode("utf-8")).hexdigest(),
+                hashlib.sha256(stream).hexdigest() if stream is not None else None,
+            )
+        )
+        pending.extend(
+            int(match)
+            for match in re.findall(r"(?<!\d)(\d+)\s+0\s+R", object_text)
+            if int(match) not in visited
+        )
+    return tuple(sorted(values))
 
 
 def _rect_close(
@@ -869,6 +947,8 @@ def _appearance_is_valid(
     return (
         all(abs(actual - expected) <= 0.005 for actual, expected in zip(color, TEXT_COLOR, strict=True))
         and bool(font_match.group(1))
+        and font_match.group(1) == resource_name
+        and resource_name != "Helv"
         and abs(float(font_match.group(2)) - expected_font_size) <= 0.01
         and all(
             abs(actual - expected) <= 0.01
@@ -876,6 +956,27 @@ def _appearance_is_valid(
         )
         and abs(float(ap_font_match.group(2)) - expected_font_size) <= 0.01
         and stable_cjk_font
+    )
+
+
+def _bind_da_to_cjk_appearance(
+    document: pymupdf.Document,
+    annotation: pymupdf.Annot,
+    font_size: float,
+) -> None:
+    appearance_type, appearance_value = document.xref_get_key(annotation.xref, "AP/N")
+    if appearance_type != "xref":
+        raise ValueError("annotation appearance is unavailable")
+    appearance_xref = int(appearance_value.split()[0])
+    appearance_stream = document.xref_stream(appearance_xref).decode("latin-1")
+    font_match = re.search(r"/([^\s]+)\s+[-+]?\d*\.?\d+\s+Tf", appearance_stream)
+    if font_match is None:
+        raise ValueError("annotation CJK appearance font is unavailable")
+    name = font_match.group(1)
+    document.xref_set_key(
+        annotation.xref,
+        "DA",
+        f"({TEXT_COLOR[0]} {TEXT_COLOR[1]} {TEXT_COLOR[2]} rg /{name} {font_size} Tf)",
     )
 
 
@@ -942,7 +1043,7 @@ def _write_unresolved_artifacts(
     artifact_id = uuid.uuid4().hex
     page_indexes = sorted({collision.page_index for collision in layout.collisions})
     render_paths: dict[int, Path] = {}
-    created: list[Path] = []
+    created: list[_OwnedPath] = []
     if annotated_temp is not None:
         rendered = pymupdf.open(annotated_temp)
     elif document is not None:
@@ -964,8 +1065,7 @@ def _write_unresolved_artifacts(
             data = rendered[page_index].get_pixmap(
                 dpi=300, alpha=False, colorspace=pymupdf.csRGB, annots=True
             ).tobytes("png")
-            _atomic_artifact_write(path, data)
-            created.append(path)
+            created.append(_atomic_artifact_write(path, data))
             render_paths[page_index] = path
         unresolved = _unresolved(layout, attempted, render_paths)
         report_path = source.with_name(f".{source.name}.unresolved.{artifact_id}.json")
@@ -979,31 +1079,46 @@ def _write_unresolved_artifacts(
             ensure_ascii=False,
             indent=2,
         ).encode("utf-8")
-        _atomic_artifact_write(report_path, report_data)
-        created.append(report_path)
+        created.append(_atomic_artifact_write(report_path, report_data))
         return _ArtifactOutcome(unresolved, report_path)
     except Exception as error:
-        retained = list(_cleanup_artifacts(created, source))
+        retained_values, cleanup_mismatches = _cleanup_artifacts(created, source)
+        retained = list(retained_values)
+        ownership_mismatches = list(cleanup_mismatches)
         if isinstance(error, _ArtifactWriteError):
             retained.extend(
                 path
                 for path in error.retained
                 if path.exists() and path not in retained
             )
+            retained.extend(
+                path
+                for path in error.ownership_mismatches
+                if path.exists() and path not in retained
+            )
+            ownership_mismatches.extend(
+                path
+                for path in error.ownership_mismatches
+                if path not in ownership_mismatches
+            )
         return _ArtifactOutcome(
             problem=_problem(
                 "artifact_cleanup_failed" if retained else "artifact_write_failed",
                 "Failure evidence could not be written transactionally",
                 retained_paths=[str(path) for path in retained],
+                ownership_mismatch_paths=(
+                    [str(path) for path in ownership_mismatches]
+                ),
             )
         )
     finally:
         rendered.close()
 
 
-def _atomic_artifact_write(final_path: Path, data: bytes) -> Path:
+def _atomic_artifact_write(final_path: Path, data: bytes) -> _OwnedPath:
     part = final_path.with_name(f".{final_path.name}.{uuid.uuid4().hex}.part")
     linked_by_this_call = False
+    owned_final: _OwnedPath | None = None
     try:
         with part.open("xb") as stream:
             stream.write(data)
@@ -1011,40 +1126,47 @@ def _atomic_artifact_write(final_path: Path, data: bytes) -> Path:
             os.fsync(stream.fileno())
         os.link(part, final_path)
         linked_by_this_call = True
+        owned_final = _capture_owned_path(final_path)
+        if owned_final is None:
+            raise OSError("linked artifact ownership could not be established")
         part.unlink()
     except Exception as error:
         retained: list[Path] = []
-        owned_paths = (part, final_path) if linked_by_this_call else (part,)
-        for path in owned_paths:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                retained.append(path)
-            else:
-                if path.exists():
-                    retained.append(path)
-        raise _ArtifactWriteError(retained) from error
-    return part
+        ownership_mismatches: list[Path] = []
+        try:
+            part.unlink(missing_ok=True)
+        except OSError:
+            retained.append(part)
+        if linked_by_this_call:
+            removed, mismatch = _rollback_owned_path(owned_final, final_path)
+            if mismatch:
+                ownership_mismatches.append(final_path)
+            elif not removed and final_path.exists():
+                retained.append(final_path)
+        raise _ArtifactWriteError(retained, ownership_mismatches) from error
+    return owned_final
 
 
-def _cleanup_artifacts(paths: Sequence[Path], source: Path) -> tuple[Path, ...]:
+def _cleanup_artifacts(
+    paths: Sequence[_OwnedPath], source: Path
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
     retained: list[Path] = []
+    ownership_mismatches: list[Path] = []
     expected_prefix = f".{source.name}.unresolved."
-    for path in dict.fromkeys(paths):
+    for owned in dict.fromkeys(paths):
+        path = owned.path
         if (
             path.parent.resolve(strict=False) != source.parent.resolve(strict=False)
             or expected_prefix not in path.name
         ):
-            retained.append(path)
+            ownership_mismatches.append(path)
             continue
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
+        removed, mismatch = _rollback_owned_path(owned, path)
+        if mismatch:
+            ownership_mismatches.append(path)
+        elif not removed and path.exists():
             retained.append(path)
-        else:
-            if path.exists():
-                retained.append(path)
-    return tuple(retained)
+    return tuple(retained), tuple(ownership_mismatches)
 
 
 def _unique_temp_path(source: Path) -> Path:
@@ -1099,7 +1221,7 @@ def _cleanup_many(
 
 
 def _remove_temp_with_retry(path: Path, source: Path) -> bool:
-    for _attempt in range(2):
+    for _attempt in range(3):
         if _remove_exact_temp(path, source) or not path.exists():
             return True
     return not path.exists()
@@ -1164,6 +1286,8 @@ def _resource_kind(path: Path) -> str:
     if name.endswith(".tmp.pdf"):
         return "temporary_pdf"
     return "path"
+
+
 def _publish_no_clobber(
     temp_path: Path,
     final_path: Path,
@@ -1175,22 +1299,57 @@ def _publish_no_clobber(
     try:
         os.link(temp_path, final_path)
     except FileExistsError:
-        code = "output_exists"
-        message = "Final output already exists"
+        primary = _problem(
+            "output_exists",
+            "Final output already exists",
+            final_path=str(final_path),
+            final_exists=final_path.exists(),
+            ownership="foreign_or_unknown",
+        )
     except OSError:
-        code = "publish_failed"
-        message = "Final output could not be published atomically"
+        primary = _problem(
+            "publish_failed",
+            "Final output could not be published atomically",
+            final_path=str(final_path),
+            final_exists=final_path.exists(),
+            ownership="foreign_or_unknown",
+        )
     else:
+        owned_final = _capture_owned_path(final_path)
+        if owned_final is None:
+            return _problem(
+                "publish_rollback_failed",
+                "Published output ownership could not be established",
+                temp_path=str(temp_path),
+                final_path=str(final_path),
+                temp_exists=temp_path.exists(),
+                final_exists=final_path.exists(),
+                ownership_mismatch=True,
+            )
+        cleanup = _cleanup_problem(temp_path, source)
+        if cleanup is not None:
+            removed, mismatch = _rollback_owned_path(owned_final, final_path)
+            if mismatch or not removed:
+                return _problem(
+                    "publish_rollback_failed",
+                    "Published output could not be safely rolled back",
+                    temp_path=str(temp_path),
+                    final_path=str(final_path),
+                    temp_exists=temp_path.exists(),
+                    final_exists=final_path.exists(),
+                    ownership_mismatch=mismatch,
+                    cleanup_problem=cleanup,
+                )
+            return cleanup
         if (
             expected_source_identity is not None
             and expected_source_sha256 is not None
-            and not _source_unchanged(
+            and not _stable_source_matches(
                 source, expected_source_identity, expected_source_sha256
             )
         ):
-            try:
-                final_path.unlink()
-            except OSError:
+            removed, mismatch = _rollback_owned_path(owned_final, final_path)
+            if mismatch or not removed:
                 return _problem(
                     "publish_rollback_failed",
                     "Source changed and published output could not be rolled back",
@@ -1198,46 +1357,20 @@ def _publish_no_clobber(
                     final_path=str(final_path),
                     temp_exists=temp_path.exists(),
                     final_exists=final_path.exists(),
+                    ownership_mismatch=mismatch,
+                    source_problem=_problem(
+                        "source_mismatch", "Source PDF changed at publication linearization point"
+                    ),
                 )
-            cleanup = _cleanup_problem(temp_path, source)
-            source_problem = _problem(
-                "source_mismatch", "Source PDF changed during publication"
-            )
-            return _combine_problems(source_problem, cleanup)
-        if _remove_exact_temp(temp_path, source):
-            return None
-        try:
-            final_path.unlink(missing_ok=True)
-        except OSError:
             return _problem(
-                "publish_rollback_failed",
-                "Published output and temporary output could not be rolled back",
-                temp_path=str(temp_path),
+                "source_mismatch",
+                "Source PDF changed at publication linearization point",
                 final_path=str(final_path),
-                temp_exists=temp_path.exists(),
-                final_exists=final_path.exists(),
+                final_exists=False,
             )
-        if final_path.exists():
-            return _problem(
-                "publish_rollback_failed",
-                "Published output and temporary output could not be rolled back",
-                temp_path=str(temp_path),
-                final_path=str(final_path),
-                temp_exists=temp_path.exists(),
-                final_exists=True,
-            )
-        return _problem(
-            "temp_cleanup_failed",
-            "Published output exists but temporary output could not be removed",
-            temp_path=str(temp_path),
-        )
-    if not _remove_exact_temp(temp_path, source):
-        return _problem(
-            "temp_cleanup_failed",
-            "Temporary output could not be removed",
-            temp_path=str(temp_path),
-        )
-    return _problem(code, message)
+        return None
+    cleanup = _cleanup_problem(temp_path, source)
+    return _combine_problems(primary, cleanup)
 
 
 def _sha256(path: Path) -> str:
@@ -1256,10 +1389,44 @@ def _source_identity(path: Path) -> tuple[int, int, int, int]:
 def _source_unchanged(
     path: Path, identity: tuple[int, int, int, int], expected_sha256: str
 ) -> bool:
+    return _stable_source_matches(path, identity, expected_sha256)
+
+
+def _stable_source_matches(
+    path: Path, identity: tuple[int, int, int, int], expected_sha256: str
+) -> bool:
     try:
-        return _source_identity(path) == identity and _sha256(path) == expected_sha256
+        before = _source_identity(path)
+        if before != identity:
+            return False
+        digest = _sha256(path)
+        after = _source_identity(path)
+        return before == after == identity and digest == expected_sha256
     except OSError:
         return False
+
+
+def _capture_owned_path(path: Path) -> _OwnedPath | None:
+    try:
+        before = _source_identity(path)
+        digest = _sha256(path)
+        after = _source_identity(path)
+    except OSError:
+        return None
+    if before != after:
+        return None
+    return _OwnedPath(path, after, digest)
+
+
+def _rollback_owned_path(owned: _OwnedPath | None, path: Path) -> tuple[bool, bool]:
+    """Return ``(removed, ownership_mismatch)`` without unlinking foreign paths."""
+    if owned is None or not _stable_source_matches(path, owned.identity, owned.sha256):
+        return False, True
+    try:
+        path.unlink()
+    except OSError:
+        return False, False
+    return not path.exists(), False
 
 
 def _problem(code: str, message: str, **details: Any) -> dict[str, Any]:

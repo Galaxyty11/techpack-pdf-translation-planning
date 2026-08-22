@@ -539,6 +539,7 @@ def test_optimize_layout_stops_after_two_unchanged_rounds_and_caps_at_ten() -> N
     assert stable.rounds == 2
     assert stable.stable is True
     assert stable.collisions == tuple(unresolved)
+    assert stable.attempted_placements == tuple(initial)
 
     def alternate(placement, _collisions):
         x0, y0, x1, y1 = placement.rect
@@ -563,6 +564,13 @@ def test_optimize_layout_stops_after_two_unchanged_rounds_and_caps_at_ten() -> N
     assert capped.rounds == 10
     assert capped.stable is False
     assert capped.collisions == tuple(render_unresolved)
+    assert capped.attempted_placements[0] == initial[0]
+    assert len(
+        {
+            (value.item_id, value.rect, value.strategy)
+            for value in capped.attempted_placements
+        }
+    ) == len(capped.attempted_placements)
 
 
 @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
@@ -621,3 +629,79 @@ def test_rotated_rectangular_crop_masks_align_and_attribute_source_text_collisio
     finally:
         after.close()
         before.close()
+
+
+@pytest.mark.parametrize(
+    ("edge", "expected_in_bounds"),
+    [(0.0, False), (0.5, False), (0.999, False), (1.0, True), (1.001, True)],
+)
+def test_review_target_requires_one_point_cropbox_clearance(
+    edge: float, expected_in_bounds: bool
+) -> None:
+    item = _item().model_copy(
+        update={"target_rect": [edge, 30.0, 80.0, 50.0], "font_size": 7.0}
+    )
+    candidate = next(
+        value
+        for value in rank_placements(item, (0.0, 0.0, 300.0, 180.0))
+        if value.strategy == "review_target"
+    )
+    assert candidate.in_bounds is expected_in_bounds
+
+
+def test_leader_segments_require_one_point_cropbox_clearance_on_rotated_rectangle(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "leader-boundary.pdf"
+    document = pymupdf.open()
+    page = document.new_page(width=340, height=220)
+    page.set_cropbox(pymupdf.Rect(20, 20, 320, 200))
+    page.set_rotation(90)
+    document.save(source)
+    document.close()
+    document = pymupdf.open(source)
+    try:
+        unsafe = _placement(
+            "margin",
+            rect=(200.0, 30.0, 285.0, 60.0),
+            leader=((0.5, 40.0), (190.0, 40.0), (200.0, 45.0)),
+        )
+        exact = replace(
+            unsafe,
+            leader_line=((1.0, 40.0), (190.0, 40.0), (200.0, 45.0)),
+        )
+        assert any(
+            value.kind == "leader_out_of_bounds"
+            for value in detect_collisions(document[0], (unsafe,), render_check=False)
+        )
+        assert not any(
+            value.kind == "leader_out_of_bounds"
+            for value in detect_collisions(document[0], (exact,), render_check=False)
+        )
+    finally:
+        document.close()
+
+
+def test_optimizer_reports_only_actually_evaluated_candidates_in_order() -> None:
+    initial = _placement("initial", rect=(10.0, 10.0, 50.0, 30.0))
+    first = replace(initial, strategy="first", rect=(60.0, 10.0, 100.0, 30.0))
+    second = replace(initial, strategy="second", rect=(110.0, 10.0, 150.0, 30.0))
+    never = replace(initial, strategy="never", rect=(160.0, 10.0, 200.0, 30.0))
+
+    def detector(placements):
+        value = placements[0]
+        if value.strategy == "second":
+            return []
+        return [Collision(0, value.item_id, "protected_text", "glyph")]
+
+    result = optimize_layout(
+        (initial,),
+        collision_detector=detector,
+        candidate_provider=lambda *_args: (first, second, never),
+    )
+
+    assert [value.strategy for value in result.attempted_placements] == [
+        "initial",
+        "first",
+        "second",
+    ]

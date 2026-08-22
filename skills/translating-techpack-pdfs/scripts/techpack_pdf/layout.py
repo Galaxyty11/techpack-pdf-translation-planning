@@ -64,6 +64,7 @@ class LayoutResult:
     collisions: tuple[Collision, ...]
     rounds: int
     stable: bool
+    attempted_placements: tuple[Placement, ...] = ()
 
 
 def rank_placements(
@@ -246,6 +247,7 @@ def detect_collisions(
 ) -> list[Collision]:
     """Detect geometry, clipping, new-new, leader and rendered glyph collisions."""
     page_rect = _canonical_page_rect(page)
+    safe_page_rect = _inset(page_rect, MIN_CLEARANCE_PT)
     obstacles = list(extract_protected_geometry(page))
     if protected is not None:
         obstacles.extend(protected)
@@ -253,9 +255,21 @@ def detect_collisions(
 
     for placement in placements:
         body = pymupdf.Rect(placement.rect)
-        if not page_rect.contains(body) or not _nonempty(body):
+        if not safe_page_rect.contains(body) or not _nonempty(body):
             collisions.append(
                 Collision(page.number, placement.item_id, "out_of_bounds", "crop_box")
+            )
+        if placement.leader_line and any(
+            not safe_page_rect.contains(pymupdf.Point(point))
+            for point in placement.leader_line
+        ):
+            collisions.append(
+                Collision(
+                    page.number,
+                    placement.item_id,
+                    "leader_out_of_bounds",
+                    "crop_box",
+                )
             )
         font = pymupdf.Font(fontname=TOOL_CJK_FONT)
         required_height = placement.font_size * 1.35 * max(
@@ -456,11 +470,22 @@ def optimize_layout(
     if max_rounds <= 0:
         raise ValueError("max_rounds must be positive")
     current = list(initial)
+    attempted: list[Placement] = []
+    attempted_signatures: set[tuple[object, ...]] = set()
+
+    def record(values: Sequence[Placement]) -> None:
+        for value in values:
+            signature = _placement_identity(value)
+            if signature not in attempted_signatures:
+                attempted_signatures.add(signature)
+                attempted.append(value)
+
+    record(current)
     previous_signature = _layout_signature(current)
     unchanged_rounds = 0
     final_collisions = list(collision_detector(current))
     if not final_collisions:
-        return LayoutResult(tuple(current), (), 0, False)
+        return LayoutResult(tuple(current), (), 0, False, tuple(attempted))
 
     for round_number in range(1, max_rounds + 1):
         colliding_ids = {collision.item_id for collision in final_collisions}
@@ -480,6 +505,7 @@ def optimize_layout(
                 for choice in choices:
                     trial = list(current)
                     trial[index] = choice
+                    record(trial)
                     trial_collisions = list(collision_detector(trial))
                     own_count = sum(
                         collision.item_id == choice.item_id
@@ -509,12 +535,24 @@ def optimize_layout(
         previous_signature = signature
         final_collisions = list(collision_detector(current))
         if not final_collisions:
-            return LayoutResult(tuple(current), (), round_number, False)
+            return LayoutResult(
+                tuple(current), (), round_number, False, tuple(attempted)
+            )
         if unchanged_rounds >= 2:
             return LayoutResult(
-                tuple(current), tuple(final_collisions), round_number, True
+                tuple(current),
+                tuple(final_collisions),
+                round_number,
+                True,
+                tuple(attempted),
             )
-    return LayoutResult(tuple(current), tuple(final_collisions), max_rounds, False)
+    return LayoutResult(
+        tuple(current),
+        tuple(final_collisions),
+        max_rounds,
+        False,
+        tuple(attempted),
+    )
 
 
 def _generate_candidates(
@@ -644,7 +682,11 @@ def _generate_candidates(
     placements: list[Placement] = []
     for strategy, rect, font_size, intended_same_region, leader in raw:
         lines = wrap_text(text, max(rect.width - 4.0, 1.0), font_size)
-        in_bounds = page_rect.contains(rect) and _nonempty(rect)
+        safe_page_rect = _inset(page_rect, MIN_CLEARANCE_PT)
+        leader_in_bounds = leader is None or all(
+            safe_page_rect.contains(pymupdf.Point(point)) for point in leader
+        )
+        in_bounds = safe_page_rect.contains(rect) and _nonempty(rect) and leader_in_bounds
         same_region = intended_same_region and semantic_region.contains(rect)
         collision_count = sum(
             _overlaps(rect, _expand(pymupdf.Rect(obstacle.rect), MIN_CLEARANCE_PT))
@@ -832,6 +874,16 @@ def _layout_signature(placements: Sequence[Placement]) -> tuple[object, ...]:
     )
 
 
+def _placement_identity(value: Placement) -> tuple[object, ...]:
+    return (
+        value.item_id,
+        tuple(round(number, 4) for number in value.rect),
+        value.font_size,
+        value.strategy,
+        value.leader_line,
+    )
+
+
 def _deduplicate_collisions(collisions: Iterable[Collision]) -> list[Collision]:
     unique: dict[tuple[object, ...], Collision] = {}
     for collision in collisions:
@@ -1003,6 +1055,15 @@ def _segments_intersect(a: PointTuple, b: PointTuple, c: PointTuple, d: PointTup
 
 def _expand(rect: pymupdf.Rect, amount: float) -> pymupdf.Rect:
     return pymupdf.Rect(rect.x0 - amount, rect.y0 - amount, rect.x1 + amount, rect.y1 + amount)
+
+
+def _inset(rect: pymupdf.Rect, amount: float) -> pymupdf.Rect:
+    return pymupdf.Rect(
+        rect.x0 + amount,
+        rect.y0 + amount,
+        rect.x1 - amount,
+        rect.y1 - amount,
+    )
 
 
 def _overlaps(first: pymupdf.Rect, second: pymupdf.Rect) -> bool:
