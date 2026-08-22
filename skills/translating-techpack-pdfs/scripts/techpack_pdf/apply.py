@@ -276,7 +276,15 @@ def apply_review(
                     )
                 cleanup = _cleanup_problem(temp_path, source)
                 if cleanup is not None:
-                    return _failure(cleanup, layout_rounds=total_rounds, modified_pages=modified_pages)
+                    cleanup = _cleanup_many((temp_path, snapshot_path), source)
+                    return _failure(
+                        _combine_problems(
+                            _render_collision_problem(verification.collisions),
+                            cleanup,
+                        ),
+                        layout_rounds=total_rounds,
+                        modified_pages=modified_pages,
+                    )
                 temp_path = None
                 collided_ids = {
                     collision.item_id for collision in verification.collisions
@@ -609,6 +617,26 @@ def _merge_attempted(
     return merged
 
 
+def _render_collision_problem(
+    collisions: Sequence[Collision],
+) -> dict[str, Any]:
+    return _problem(
+        "render_collision_retry_aborted",
+        "Rendered annotation collisions could not be retried safely",
+        collisions=[
+            {
+                "page_index": value.page_index,
+                "item_id": value.item_id,
+                "kind": value.kind,
+                "object_id": value.object_id,
+                "intersecting_pixels": value.intersecting_pixels,
+                "render_dpi": value.render_dpi,
+            }
+            for value in collisions
+        ],
+    )
+
+
 def _canonical_page_rect(page: pymupdf.Page) -> pymupdf.Rect:
     """Crop-relative, unrotated coordinates used by extraction and annotation APIs."""
     return pymupdf.Rect(0, 0, page.cropbox.width, page.cropbox.height)
@@ -733,6 +761,14 @@ def _verify_temp(
                 original[page_index], output[page_index], grouped[page_index]
             )
             if final_collisions:
+                if any(value.kind == "render_missing" for value in final_collisions):
+                    return _VerificationOutcome(
+                        _problem(
+                            "verification_failed",
+                            "New annotation glyph appearance is missing",
+                            page_index=page_index,
+                        )
+                    )
                 return _VerificationOutcome(
                     None, tuple(final_collisions)
                 )
@@ -775,6 +811,32 @@ def _snapshot_document(
                         document, _annotation_appearance_xrefs(document, annotation)
                     ),
                 )
+            )
+        seen_xrefs = {value[0] for value in annotations}
+        try:
+            widgets = tuple(page.widgets() or ())
+        except (AttributeError, RuntimeError, ValueError):
+            widgets = ()
+        for widget in widgets:
+            if widget.xref in seen_xrefs:
+                continue
+            seen_xrefs.add(widget.xref)
+            annotations.append(
+                _interactive_snapshot(
+                    document, "widget", widget.xref, widget.rect
+                )
+            )
+        try:
+            links = tuple(page.get_links() or ())
+        except (AttributeError, RuntimeError, ValueError):
+            links = ()
+        for link in links:
+            xref = int(link.get("xref") or 0)
+            if xref <= 0 or xref in seen_xrefs:
+                continue
+            seen_xrefs.add(xref)
+            annotations.append(
+                _interactive_snapshot(document, "link", xref, link.get("from"))
             )
         snapshots.append(
             _PageSnapshot(
@@ -819,14 +881,51 @@ def _snapshot_document(
 
 
 def _annotation_appearance_xrefs(
-    document: pymupdf.Document, annotation: pymupdf.Annot
+    document: pymupdf.Document, annotation: Any
 ) -> tuple[int, ...]:
     roots: list[int] = []
-    for key in ("AP/N", "AP/R", "AP/D"):
+    for key in ("AP", "AP/N", "AP/R", "AP/D"):
         key_type, value = document.xref_get_key(annotation.xref, key)
         if key_type == "xref":
             roots.append(int(value.split()[0]))
+        elif key_type == "dict":
+            roots.extend(_indirect_references(value))
     return tuple(dict.fromkeys(roots))
+
+
+def _interactive_snapshot(
+    document: pymupdf.Document,
+    kind: str,
+    xref: int,
+    rect: pymupdf.Rect | Sequence[float] | None,
+) -> tuple[Any, ...]:
+    object_text = document.xref_object(xref, compressed=False)
+    proxy = type("_XrefProxy", (), {"xref": xref})()
+    return (
+        xref,
+        (kind,),
+        tuple(float(value) for value in pymupdf.Rect(rect or ())),
+        (),
+        hashlib.sha256(object_text.encode("utf-8")).hexdigest(),
+        None,
+        (),
+        (),
+        None,
+        None,
+        (),
+        _xref_dependency_hashes(
+            document, _annotation_appearance_xrefs(document, proxy)
+        ),
+    )
+
+
+def _indirect_references(object_text: str) -> tuple[int, ...]:
+    return tuple(
+        dict.fromkeys(
+            int(match.group(1))
+            for match in re.finditer(r"(?<!\d)(\d+)\s+\d+\s+R", object_text)
+        )
+    )
 
 
 def _xref_dependency_hashes(
@@ -853,9 +952,7 @@ def _xref_dependency_hashes(
             )
         )
         pending.extend(
-            int(match)
-            for match in re.findall(r"(?<!\d)(\d+)\s+0\s+R", object_text)
-            if int(match) not in visited
+            xref for xref in _indirect_references(object_text) if xref not in visited
         )
     return tuple(sorted(values))
 
@@ -929,21 +1026,9 @@ def _appearance_is_valid(
         return False
     ap_color = tuple(float(ap_color_match.group(index)) for index in (1, 2, 3))
     resource_name = ap_font_match.group(1)
-    resource_match = re.search(
-        rf"/{re.escape(resource_name)}\s+(\d+)\s+0\s+R", appearance_object
-    )
-    if resource_match is None:
+    font_xref = _appearance_font_xref(document, appearance_xref, resource_name)
+    if font_xref is None or not _trusted_cjk_font(document, font_xref):
         return False
-    try:
-        font_object = document.xref_object(
-            int(resource_match.group(1)), compressed=False
-        )
-    except (RuntimeError, ValueError):
-        return False
-    stable_cjk_font = resource_name == "Song" or (
-        "/Subtype /Type0" in font_object
-        and "Droid#20Sans#20Fallback" in font_object
-    )
     return (
         all(abs(actual - expected) <= 0.005 for actual, expected in zip(color, TEXT_COLOR, strict=True))
         and bool(font_match.group(1))
@@ -955,7 +1040,64 @@ def _appearance_is_valid(
             for actual, expected in zip(ap_color, TEXT_COLOR, strict=True)
         )
         and abs(float(ap_font_match.group(2)) - expected_font_size) <= 0.01
-        and stable_cjk_font
+    )
+
+
+def _appearance_font_xref(
+    document: pymupdf.Document, appearance_xref: int, resource_name: str
+) -> int | None:
+    try:
+        key_type, value = document.xref_get_key(
+            appearance_xref, f"Resources/Font/{resource_name}"
+        )
+    except (RuntimeError, ValueError):
+        return None
+    if key_type != "xref":
+        return None
+    try:
+        return int(value.split()[0])
+    except (IndexError, ValueError):
+        return None
+
+
+def _trusted_cjk_font(document: pymupdf.Document, font_xref: int) -> bool:
+    try:
+        font_object = document.xref_object(font_xref, compressed=False)
+    except (RuntimeError, ValueError):
+        return False
+    if "/Subtype /Type0" not in font_object:
+        return False
+    descendants = re.search(
+        r"/DescendantFonts\s*\[\s*(\d+)\s+\d+\s+R", font_object
+    )
+    encoding = re.search(r"/Encoding\s*/([^\s/<>\[\]()]+)", font_object)
+    base_font = re.search(r"/BaseFont\s*/([^\s/<>\[\]()]+)", font_object)
+    if descendants is None or encoding is None or base_font is None:
+        return False
+    try:
+        descendant_object = document.xref_object(
+            int(descendants.group(1)), compressed=False
+        )
+    except (RuntimeError, ValueError):
+        return False
+    if not re.search(r"/Subtype\s*/CIDFontType[02]\b", descendant_object):
+        return False
+    if not re.search(r"/FontDescriptor\s+\d+\s+\d+\s+R", descendant_object):
+        return False
+    registry = re.search(r"/Registry\s*\(Adobe\)", descendant_object)
+    ordering = re.search(
+        r"/Ordering\s*\((GB1|CNS1|Japan1|Korea1|Identity)\)",
+        descendant_object,
+    )
+    if registry is None or ordering is None:
+        return False
+    encoding_name = encoding.group(1)
+    base_name = base_font.group(1)
+    if encoding_name.startswith("UniGB-") and ordering.group(1) == "GB1":
+        return True
+    return (
+        encoding_name in {"Identity-H", "Identity-V"}
+        and "Droid#20Sans#20Fallback" in base_name
     )
 
 
@@ -973,6 +1115,9 @@ def _bind_da_to_cjk_appearance(
     if font_match is None:
         raise ValueError("annotation CJK appearance font is unavailable")
     name = font_match.group(1)
+    font_xref = _appearance_font_xref(document, appearance_xref, name)
+    if font_xref is None or not _trusted_cjk_font(document, font_xref):
+        raise ValueError("annotation CJK appearance font is not trusted")
     document.xref_set_key(
         annotation.xref,
         "DA",
@@ -1052,7 +1197,12 @@ def _write_unresolved_artifacts(
             _write_annotations(rendered, layout.placements)
         except Exception:
             rendered.close()
-            rendered = pymupdf.open(stream=document.tobytes(), filetype="pdf")
+            return _ArtifactOutcome(
+                problem=_problem(
+                    "artifact_write_failed",
+                    "Annotated failure evidence could not be constructed",
+                )
+            )
     else:
         return _ArtifactOutcome(
             problem=_problem("artifact_write_failed", "Failure evidence source is unavailable")
@@ -1118,18 +1268,22 @@ def _write_unresolved_artifacts(
 def _atomic_artifact_write(final_path: Path, data: bytes) -> _OwnedPath:
     part = final_path.with_name(f".{final_path.name}.{uuid.uuid4().hex}.part")
     linked_by_this_call = False
-    owned_final: _OwnedPath | None = None
+    expected: _OwnedPath | None = None
     try:
         with part.open("xb") as stream:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
+        expected = _capture_owned_path(part)
+        if expected is None:
+            raise OSError("artifact part ownership could not be established")
         os.link(part, final_path)
         linked_by_this_call = True
-        owned_final = _capture_owned_path(final_path)
-        if owned_final is None:
-            raise OSError("linked artifact ownership could not be established")
+        if not _owned_path_matches(expected, final_path):
+            raise OSError("linked artifact ownership does not match the part")
         part.unlink()
+        if not _owned_path_matches(expected, final_path):
+            raise OSError("linked artifact changed before finalization")
     except Exception as error:
         retained: list[Path] = []
         ownership_mismatches: list[Path] = []
@@ -1138,13 +1292,13 @@ def _atomic_artifact_write(final_path: Path, data: bytes) -> _OwnedPath:
         except OSError:
             retained.append(part)
         if linked_by_this_call:
-            removed, mismatch = _rollback_owned_path(owned_final, final_path)
+            removed, mismatch = _rollback_owned_path(expected, final_path)
             if mismatch:
                 ownership_mismatches.append(final_path)
             elif not removed and final_path.exists():
                 retained.append(final_path)
         raise _ArtifactWriteError(retained, ownership_mismatches) from error
-    return owned_final
+    return _OwnedPath(final_path, expected.identity, expected.sha256)
 
 
 def _cleanup_artifacts(
@@ -1296,6 +1450,15 @@ def _publish_no_clobber(
     expected_source_identity: tuple[int, int, int, int] | None = None,
     expected_source_sha256: str | None = None,
 ) -> dict[str, Any] | None:
+    expected = _capture_owned_path(temp_path)
+    if expected is None:
+        primary = _problem(
+            "publish_failed",
+            "Temporary output ownership could not be established",
+            temp_path=str(temp_path),
+            temp_exists=temp_path.exists(),
+        )
+        return _combine_problems(primary, _cleanup_problem(temp_path, source))
     try:
         os.link(temp_path, final_path)
     except FileExistsError:
@@ -1315,20 +1478,20 @@ def _publish_no_clobber(
             ownership="foreign_or_unknown",
         )
     else:
-        owned_final = _capture_owned_path(final_path)
-        if owned_final is None:
-            return _problem(
+        if not _owned_path_matches(expected, final_path):
+            primary = _problem(
                 "publish_rollback_failed",
-                "Published output ownership could not be established",
+                "Published output does not match the owned temporary output",
                 temp_path=str(temp_path),
                 final_path=str(final_path),
                 temp_exists=temp_path.exists(),
                 final_exists=final_path.exists(),
                 ownership_mismatch=True,
             )
+            return _combine_problems(primary, _cleanup_problem(temp_path, source))
         cleanup = _cleanup_problem(temp_path, source)
         if cleanup is not None:
-            removed, mismatch = _rollback_owned_path(owned_final, final_path)
+            removed, mismatch = _rollback_owned_path(expected, final_path)
             if mismatch or not removed:
                 return _problem(
                     "publish_rollback_failed",
@@ -1348,7 +1511,7 @@ def _publish_no_clobber(
                 source, expected_source_identity, expected_source_sha256
             )
         ):
-            removed, mismatch = _rollback_owned_path(owned_final, final_path)
+            removed, mismatch = _rollback_owned_path(expected, final_path)
             if mismatch or not removed:
                 return _problem(
                     "publish_rollback_failed",
@@ -1367,6 +1530,16 @@ def _publish_no_clobber(
                 "Source PDF changed at publication linearization point",
                 final_path=str(final_path),
                 final_exists=False,
+            )
+        if not _owned_path_matches(expected, final_path):
+            return _problem(
+                "publish_rollback_failed",
+                "Published output ownership changed before finalization",
+                temp_path=str(temp_path),
+                final_path=str(final_path),
+                temp_exists=temp_path.exists(),
+                final_exists=final_path.exists(),
+                ownership_mismatch=True,
             )
         return None
     cleanup = _cleanup_problem(temp_path, source)
@@ -1418,9 +1591,15 @@ def _capture_owned_path(path: Path) -> _OwnedPath | None:
     return _OwnedPath(path, after, digest)
 
 
+def _owned_path_matches(owned: _OwnedPath | None, path: Path) -> bool:
+    return owned is not None and _stable_source_matches(
+        path, owned.identity, owned.sha256
+    )
+
+
 def _rollback_owned_path(owned: _OwnedPath | None, path: Path) -> tuple[bool, bool]:
     """Return ``(removed, ownership_mismatch)`` without unlinking foreign paths."""
-    if owned is None or not _stable_source_matches(path, owned.identity, owned.sha256):
+    if not _owned_path_matches(owned, path):
         return False, True
     try:
         path.unlink()

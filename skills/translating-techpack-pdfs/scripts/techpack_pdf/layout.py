@@ -151,6 +151,37 @@ def extract_protected_geometry(page: pymupdf.Page) -> tuple[ProtectedGeometry, .
                     "annotation", _tuple(bbox), f"annotation-{annotation.xref}"
                 )
             )
+    seen_xrefs = {annotation.xref for annotation in page.annots()}
+    try:
+        widgets = tuple(page.widgets() or ())
+    except (AttributeError, RuntimeError, ValueError):
+        widgets = ()
+    for widget in widgets:
+        if widget.xref in seen_xrefs:
+            continue
+        seen_xrefs.add(widget.xref)
+        bbox = pymupdf.Rect(widget.rect)
+        if _nonempty(bbox):
+            protected.append(
+                ProtectedGeometry("widget", _tuple(bbox), f"widget-{widget.xref}")
+            )
+    try:
+        links = tuple(page.get_links() or ())
+    except (AttributeError, RuntimeError, ValueError):
+        links = ()
+    for index, link in enumerate(links):
+        xref = int(link.get("xref") or 0)
+        if xref > 0 and xref in seen_xrefs:
+            continue
+        if xref > 0:
+            seen_xrefs.add(xref)
+        bbox = pymupdf.Rect(link.get("from") or ())
+        if _nonempty(bbox):
+            protected.append(
+                ProtectedGeometry(
+                    "link", _tuple(bbox), f"link-{xref if xref > 0 else index}"
+                )
+            )
     return tuple(protected)
 
 
@@ -387,13 +418,47 @@ def detect_rendered_collisions(
             for placement in placements
         ]
     collision_200 = _render_diff_mask(before_page, after_page, 200)
-    if int(np.count_nonzero(collision_200)) <= 4:
+    newly_red_200 = _new_red_mask(before_page, after_page, 200)
+    missing_at_200 = {
+        index
+        for index, placement in enumerate(placements)
+        if int(
+            np.count_nonzero(
+                newly_red_200
+                & _placement_mask(before_page, placement, 200, include_leader=False)
+            )
+        )
+        <= 4
+    }
+    collision_at_200 = int(np.count_nonzero(collision_200)) > 4
+    if not collision_at_200 and not missing_at_200:
         return []
     collision_300 = _render_diff_mask(before_page, after_page, 300)
-    if int(np.count_nonzero(collision_300)) <= 4:
-        return []
+    newly_red_300 = _new_red_mask(before_page, after_page, 300)
 
     collisions: list[Collision] = []
+    for index in sorted(missing_at_200):
+        visible_pixels = int(
+            np.count_nonzero(
+                newly_red_300
+                & _placement_mask(
+                    before_page, placements[index], 300, include_leader=False
+                )
+            )
+        )
+        if visible_pixels <= 4:
+            collisions.append(
+                Collision(
+                    before_page.number,
+                    placements[index].item_id,
+                    "render_missing",
+                    "annotation_appearance",
+                    visible_pixels,
+                    300,
+                )
+            )
+    if int(np.count_nonzero(collision_300)) <= 4:
+        return _deduplicate_collisions(collisions)
     for placement in placements:
         expected = _placement_mask(before_page, placement, 300)
         pixels = int(np.count_nonzero(collision_300 & expected))
@@ -800,8 +865,20 @@ def _render_diff_mask(
     return newly_red & protected
 
 
+def _new_red_mask(
+    before_page: pymupdf.Page, after_page: pymupdf.Page, dpi: int
+) -> np.ndarray:
+    before_pixels = _page_array(before_page, dpi)
+    after_pixels = _page_array(after_page, dpi)
+    return _red_mask(after_pixels) & ~_red_mask(before_pixels)
+
+
 def _placement_mask(
-    page: pymupdf.Page, placement: Placement, dpi: int
+    page: pymupdf.Page,
+    placement: Placement,
+    dpi: int,
+    *,
+    include_leader: bool = True,
 ) -> np.ndarray:
     document = pymupdf.open()
     try:
@@ -816,7 +893,7 @@ def _placement_mask(
             "border_color": None,
             "border_width": 0,
         }
-        if placement.leader_line is not None:
+        if include_leader and placement.leader_line is not None:
             options["callout"] = placement.leader_line
         annotation = blank.add_freetext_annot(
             placement.rect, placement.text, **options

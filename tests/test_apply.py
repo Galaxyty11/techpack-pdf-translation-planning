@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1479,3 +1480,403 @@ def test_cleanup_uses_final_state_after_two_failures_then_success(
 
     assert result.success is True
     assert result.problems == ()
+
+
+def test_publish_rejects_foreign_replacement_immediately_after_link(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "link-capture-race.pdf"
+    _make_source(source)
+    temp = apply_module._unique_temp_path(source)
+    temp.write_bytes(source.read_bytes())
+    final = source.with_name(source.name + ".annotated.pdf")
+    real_link = apply_module.os.link
+
+    def replace_after_link(source_path, target_path):
+        real_link(source_path, target_path)
+        Path(target_path).unlink()
+        Path(target_path).write_bytes(b"foreign-after-link")
+
+    monkeypatch.setattr(apply_module.os, "link", replace_after_link)
+    problem = apply_module._publish_no_clobber(temp, final, source)
+
+    assert problem is not None
+    assert problem["details"]["ownership_mismatch"] is True
+    assert final.read_bytes() == b"foreign-after-link"
+
+
+def test_publish_rechecks_owned_final_after_temp_cleanup(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "final-after-cleanup-race.pdf"
+    _make_source(source)
+    temp = apply_module._unique_temp_path(source)
+    temp.write_bytes(source.read_bytes())
+    final = source.with_name(source.name + ".annotated.pdf")
+    real_cleanup = apply_module._cleanup_problem
+
+    def cleanup_then_replace(path, source_path):
+        problem = real_cleanup(path, source_path)
+        if problem is None and final.exists():
+            final.unlink()
+            final.write_bytes(b"foreign-before-success")
+        return problem
+
+    monkeypatch.setattr(apply_module, "_cleanup_problem", cleanup_then_replace)
+    problem = apply_module._publish_no_clobber(temp, final, source)
+
+    assert problem is not None
+    assert problem["details"]["ownership_mismatch"] is True
+    assert final.read_bytes() == b"foreign-before-success"
+
+
+@pytest.mark.parametrize("when", ["after_link", "after_part_cleanup"])
+@pytest.mark.parametrize("suffix", ["page-1.png", "report.json"])
+def test_artifact_success_path_rejects_foreign_replacement(
+    tmp_path: Path, monkeypatch, when: str, suffix: str
+) -> None:
+    final = tmp_path / f".source.pdf.unresolved.{when}.{suffix}"
+    real_link = apply_module.os.link
+    real_unlink = Path.unlink
+
+    if when == "after_link":
+        def replace_after_link(source_path, target_path):
+            real_link(source_path, target_path)
+            real_unlink(Path(target_path))
+            Path(target_path).write_bytes(b"foreign-artifact")
+
+        monkeypatch.setattr(apply_module.os, "link", replace_after_link)
+    else:
+        def replace_after_cleanup(path, *args, **kwargs):
+            result = real_unlink(path, *args, **kwargs)
+            if path.name.endswith(".part") and final.exists():
+                real_unlink(final)
+                final.write_bytes(b"foreign-artifact")
+            return result
+
+        monkeypatch.setattr(Path, "unlink", replace_after_cleanup)
+
+    with pytest.raises(apply_module._ArtifactWriteError) as captured:
+        apply_module._atomic_artifact_write(final, b"owned-artifact")
+
+    assert final.read_bytes() == b"foreign-artifact"
+    assert final in captured.value.ownership_mismatches
+
+
+def test_publish_rechecks_owned_final_at_the_last_success_point(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "last-success-point.pdf"
+    _make_source(source)
+    temp = apply_module._unique_temp_path(source)
+    temp.write_bytes(source.read_bytes())
+    final = source.with_name(source.name + ".annotated.pdf")
+    real_matches = apply_module._owned_path_matches
+    final_checks = 0
+
+    def replace_at_last_check(owned, path):
+        nonlocal final_checks
+        if Path(path) == final:
+            final_checks += 1
+            if final_checks == 2:
+                final.unlink()
+                final.write_bytes(b"foreign-at-final-point")
+        return real_matches(owned, path)
+
+    monkeypatch.setattr(apply_module, "_owned_path_matches", replace_at_last_check)
+    problem = apply_module._publish_no_clobber(temp, final, source)
+
+    assert final_checks == 2
+    assert problem is not None
+    assert problem["details"]["ownership_mismatch"] is True
+    assert final.read_bytes() == b"foreign-at-final-point"
+
+
+def test_render_collision_retry_abort_combines_collision_and_all_cleanup_state(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "render-retry-cleanup.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    collision = apply_module.Collision(
+        0, "p001-i001", "render_overlap", "original_render", 9, 300
+    )
+    monkeypatch.setattr(
+        apply_module,
+        "_verify_temp",
+        lambda *_args, **_kwargs: apply_module._VerificationOutcome(
+            None, (collision,)
+        ),
+    )
+    monkeypatch.setattr(apply_module, "_remove_exact_temp", lambda *_args: False)
+
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is False
+    assert result.problems[0]["code"] == "combined_failure"
+    causes = result.problems[0]["details"]["causes"]
+    assert {value["code"] for value in causes} == {
+        "render_collision_retry_aborted",
+        "temp_cleanup_failed",
+    }
+    render_problem = next(
+        value for value in causes if value["code"] == "render_collision_retry_aborted"
+    )
+    assert render_problem["details"]["collisions"] == [
+        {
+            "page_index": 0,
+            "item_id": "p001-i001",
+            "kind": "render_overlap",
+            "object_id": "original_render",
+            "intersecting_pixels": 9,
+            "render_dpi": 300,
+        }
+    ]
+    resources = result.problems[0]["details"]["retained_resources"]
+    assert len([value for value in resources if value["kind"] == "temporary_pdf"]) == 2
+    serialized = json.dumps(result.to_dict(), ensure_ascii=False)
+    assert "大身面料" not in serialized
+    assert "领宽" not in serialized
+
+
+@pytest.mark.parametrize("interactive", ["widget", "link"])
+def test_original_widget_and_link_objects_are_preserved(
+    tmp_path: Path, monkeypatch, interactive: str
+) -> None:
+    source = tmp_path / f"original-{interactive}.pdf"
+    _make_source(source)
+    document = pymupdf.open(source)
+    page = document[0]
+    widget = pymupdf.Widget()
+    widget.field_name = "approval"
+    widget.field_type = pymupdf.PDF_WIDGET_TYPE_CHECKBOX
+    widget.rect = pymupdf.Rect(70, 225, 92, 247)
+    page.add_widget(widget)
+    page = document.reload_page(page)
+    page.insert_link(
+        {
+            "kind": pymupdf.LINK_URI,
+            "from": pymupdf.Rect(215, 225, 285, 247),
+            "uri": "https://example.invalid",
+        }
+    )
+    document.saveIncr()
+    document.close()
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    real_write = apply_module._write_annotations
+
+    def tamper(document, placements):
+        records = real_write(document, placements)
+        page = document[0]
+        if interactive == "widget":
+            xref = next(page.widgets()).xref
+        else:
+            xref = page.get_links()[0]["xref"]
+        document.xref_set_key(xref, "F", "0")
+        return records
+
+    monkeypatch.setattr(apply_module, "_write_annotations", tamper)
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is False
+    assert result.problems[0]["code"] == "verification_failed"
+
+
+def test_stateful_widget_appearance_roots_and_nonzero_generation_references_are_closed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state-widget.pdf"
+    document = pymupdf.open()
+    page = document.new_page(width=200, height=120)
+    widget = pymupdf.Widget()
+    widget.field_name = "approval"
+    widget.field_type = pymupdf.PDF_WIDGET_TYPE_CHECKBOX
+    widget.rect = pymupdf.Rect(20, 20, 42, 42)
+    page.add_widget(widget)
+    document.save(path)
+    document.close()
+    document = pymupdf.open(path)
+    try:
+        widget = next(document[0].widgets())
+        roots = apply_module._annotation_appearance_xrefs(document, widget)
+    finally:
+        document.close()
+    assert len(roots) == 2
+
+    class NonzeroGenerationDocument:
+        def xref_length(self):
+            return 20
+
+        def xref_object(self, xref, compressed=False):
+            return "<< /Next 12 7 R >>" if xref == 1 else "<< /Type /Leaf >>"
+
+        def xref_stream(self, _xref):
+            raise RuntimeError("not a stream")
+
+    closure = apply_module._xref_dependency_hashes(
+        NonzeroGenerationDocument(), (1,)
+    )
+    assert [value[0] for value in closure] == [1, 12]
+
+
+def test_stateful_widget_appearance_stream_is_preserved_end_to_end(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "widget-state-ap.pdf"
+    _make_source(source)
+    document = pymupdf.open(source)
+    page = document[0]
+    widget = pymupdf.Widget()
+    widget.field_name = "approval"
+    widget.field_type = pymupdf.PDF_WIDGET_TYPE_CHECKBOX
+    widget.rect = pymupdf.Rect(70, 225, 92, 247)
+    page.add_widget(widget)
+    document.saveIncr()
+    document.close()
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    real_write = apply_module._write_annotations
+
+    def tamper_state(document, placements):
+        records = real_write(document, placements)
+        widget = next(document[0].widgets())
+        roots = apply_module._annotation_appearance_xrefs(document, widget)
+        assert len(roots) == 2
+        document.update_stream(roots[0], document.xref_stream(roots[0]) + b"\n")
+        return records
+
+    monkeypatch.setattr(apply_module, "_write_annotations", tamper_state)
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is False
+    assert result.problems[0]["code"] == "verification_failed"
+
+
+@pytest.mark.parametrize("tamper", ["remove_text", "fake_song", "missing_font_scope"])
+def test_new_freetext_requires_visible_cjk_glyphs_and_a_real_scoped_cjk_font(
+    tmp_path: Path, monkeypatch, tamper: str
+) -> None:
+    source = tmp_path / f"cjk-{tamper}.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    real_write = apply_module._write_annotations
+
+    def alter(document, placements):
+        records = real_write(document, placements)
+        record = records[0]
+        ap_xref = int(document.xref_get_key(record.xref, "AP/N")[1].split()[0])
+        ap_object = document.xref_object(ap_xref, compressed=False)
+        stream = document.xref_stream(ap_xref)
+        resource = re.search(r"/Song\s+(\d+)\s+0\s+R", ap_object)
+        assert resource is not None
+        font_xref = int(resource.group(1))
+        if tamper == "remove_text":
+            textless = re.sub(rb"<[^>]*>\s*Tj", b"<> Tj", stream)
+            document.update_stream(ap_xref, textless)
+        elif tamper == "fake_song":
+            document.update_object(
+                font_xref,
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            )
+        else:
+            changed = re.sub(
+                rf"/Resources\s*<<\s*/Font\s*<<\s*/Song\s+{font_xref}\s+0\s+R\s*>>\s*>>",
+                f"/Resources << >> /Bogus << /Song {font_xref} 0 R >>",
+                ap_object,
+                flags=re.DOTALL,
+            )
+            assert changed != ap_object
+            document.update_object(ap_xref, changed)
+            document.update_stream(ap_xref, stream)
+        return records
+
+    monkeypatch.setattr(apply_module, "_write_annotations", alter)
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is False
+    assert result.problems[0]["code"] == "verification_failed"
+
+
+@pytest.mark.parametrize("text", ["中", "中文可编辑长文本中文可编辑长文本"])
+def test_final_render_accepts_visible_short_and_long_cjk_text(
+    tmp_path: Path, text: str
+) -> None:
+    source = tmp_path / f"visible-{len(text)}.pdf"
+    document = pymupdf.open()
+    document.new_page(width=300, height=120)
+    document.save(source)
+    baseline = apply_module._snapshot_document(document)
+    document.close()
+    placement = apply_module.Placement(
+        item_id="visible-cjk",
+        page_index=0,
+        text=text,
+        rect=(20.0, 20.0, 280.0, 60.0),
+        font_size=7.0,
+        strategy="review_target",
+        wrapped_lines=(text,),
+        same_semantic_region=True,
+        leader_line=None,
+        collision_count=0,
+        in_bounds=True,
+        source_distance=0.0,
+        movement_distance=0.0,
+        candidate_index=0,
+    )
+    temp = apply_module._unique_temp_path(source)
+    temp.write_bytes(source.read_bytes())
+    output = pymupdf.open(temp)
+    written = apply_module._write_annotations(output, (placement,))
+    output.saveIncr()
+    output.close()
+
+    outcome = apply_module._verify_temp(
+        source, temp, baseline, (placement,), (0,), written=written
+    )
+    assert outcome.problem is None
+    assert outcome.collisions == ()
+
+
+def test_unresolved_artifacts_fail_if_annotated_evidence_cannot_be_built(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "artifact-annotation-failure.pdf"
+    _make_source(source)
+    document = pymupdf.open(source)
+    placement = apply_module.Placement(
+        item_id="p001-i001",
+        page_index=0,
+        text="机密译文",
+        rect=(175.0, 20.0, 285.0, 48.0),
+        font_size=7.0,
+        strategy="review_target",
+        wrapped_lines=("机密译文",),
+        same_semantic_region=True,
+        leader_line=None,
+        collision_count=1,
+        in_bounds=True,
+        source_distance=1.0,
+        movement_distance=1.0,
+        candidate_index=0,
+    )
+    layout = apply_module.LayoutResult(
+        (placement,),
+        (apply_module.Collision(0, placement.item_id, "protected_text", "glyph-0"),),
+        2,
+        True,
+    )
+    monkeypatch.setattr(
+        apply_module,
+        "_write_annotations",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("injected")),
+    )
+
+    outcome = apply_module._write_unresolved_artifacts(
+        source, layout, {placement.item_id: (placement,)}, document=document
+    )
+    document.close()
+
+    assert outcome.problem is not None
+    assert outcome.problem["code"] == "artifact_write_failed"
+    assert outcome.report_path is None
+    assert outcome.unresolved == ()
+    assert not list(tmp_path.glob(".artifact-annotation-failure.pdf.unresolved.*"))

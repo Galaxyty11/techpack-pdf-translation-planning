@@ -705,3 +705,46 @@ def test_optimizer_reports_only_actually_evaluated_candidates_in_order() -> None
         "first",
         "second",
     ]
+
+
+def test_protected_geometry_includes_widgets_and_links(tmp_path: Path) -> None:
+    path = tmp_path / "interactive-geometry.pdf"
+    document = pymupdf.open()
+    page = document.new_page(width=300, height=180)
+    widget = pymupdf.Widget()
+    widget.field_name = "approval"
+    widget.field_type = pymupdf.PDF_WIDGET_TYPE_CHECKBOX
+    widget.rect = pymupdf.Rect(20, 20, 42, 42)
+    page.add_widget(widget)
+    page = document.reload_page(page)
+    page.insert_link(
+        {
+            "kind": pymupdf.LINK_URI,
+            "from": pymupdf.Rect(60, 20, 125, 42),
+            "uri": "https://example.invalid",
+        }
+    )
+    document.save(path)
+    document.close()
+
+    document = pymupdf.open(path)
+    try:
+        page = document[0]
+        widget_xref = next(page.widgets()).xref
+        link_xref = page.get_links()[0]["xref"]
+        protected = extract_protected_geometry(page)
+    finally:
+        document.close()
+
+    assert any(
+        value.kind == "widget"
+        and value.object_id == f"widget-{widget_xref}"
+        and pymupdf.Rect(value.rect) == pymupdf.Rect(20, 20, 42, 42)
+        for value in protected
+    )
+    assert any(
+        value.kind == "link"
+        and value.object_id == f"link-{link_xref}"
+        and pymupdf.Rect(value.rect) == pymupdf.Rect(60, 20, 125, 42)
+        for value in protected
+    )
