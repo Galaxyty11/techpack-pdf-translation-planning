@@ -20,6 +20,23 @@ def test_review_document_requires_explicit_schema_version():
         ReviewDocument.model_validate({})
 
 
+@pytest.mark.parametrize("field", ["items", "blocking_issues", "review_completed_at"])
+def test_review_document_requires_structural_review_fields(field):
+    payload = _valid_review_document_payload()
+    payload.pop(field)
+
+    with pytest.raises(ValidationError, match=field):
+        ReviewDocument.model_validate(payload)
+
+
+def test_review_document_accepts_explicit_empty_items_issues_and_null_completion():
+    document = ReviewDocument.model_validate(_valid_review_document_payload())
+
+    assert document.items == []
+    assert document.blocking_issues == []
+    assert document.review_completed_at is None
+
+
 def test_translator_info_rejects_empty_model_but_accepts_unknown():
     with pytest.raises(ValidationError, match="model"):
         TranslatorInfo(
@@ -149,3 +166,30 @@ def test_error_serialization_rejects_substring_matched_payload_keys():
     )
 
     assert error.to_dict()["details"] == {"item_id": "item-001"}
+
+
+def _valid_review_document_payload() -> dict:
+    return {
+        "schema_version": "1.1",
+        "job_id": "abc123def456-20260822T000000Z",
+        "source": {
+            "filename": "techpack.pdf",
+            "sha256": "a" * 64,
+            "page_count": 1,
+        },
+        "glossary": {
+            "filename": "glossary.csv",
+            "sha256": "b" * 64,
+        },
+        "pipeline": {
+            "parser": "pymupdf+mineru",
+            "translation_executor": "host_agent",
+            "host": "codex",
+            "execution_mode": "subagent",
+            "model": "unknown",
+            "prompt_version": "1.0",
+        },
+        "items": [],
+        "blocking_issues": [],
+        "review_completed_at": None,
+    }

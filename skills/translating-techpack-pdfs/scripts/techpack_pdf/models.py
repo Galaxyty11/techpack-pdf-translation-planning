@@ -145,9 +145,9 @@ class ReviewDocument(StrictModel):
     source: FileArtifact
     glossary: FileArtifact
     pipeline: PipelineInfo
-    items: list[ReviewItem] = Field(default_factory=list)
-    blocking_issues: list[dict[str, Any]] = Field(default_factory=list)
-    review_completed_at: datetime | None = None
+    items: list[ReviewItem]
+    blocking_issues: list[dict[str, Any]]
+    review_completed_at: datetime | None
 
 
 class JobManifest(StrictModel):
