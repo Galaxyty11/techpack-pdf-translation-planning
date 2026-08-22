@@ -277,36 +277,49 @@ def lock_tokens(text: str) -> LockedText:
 def validate_locked_tokens(source: LockedText, translated_text: str) -> bool:
     """Compare the exact case-sensitive multiset of source and returned protected values."""
     expected = Counter(token.value for token in source.tokens)
-    contextual = _contextual_token_occurrences(source, translated_text)
+    source_occurrences = _source_token_occurrences(source, translated_text)
     detected = [
         token
         for token in lock_tokens(translated_text).tokens
-        if not any(_overlaps(token.start, token.end, item.start, item.end) for item in contextual)
+        if not any(
+            _overlaps(token.start, token.end, item.start, item.end)
+            for item in source_occurrences
+        )
     ]
-    actual = Counter(token.value for token in (*contextual, *detected))
+    actual = Counter(token.value for token in (*source_occurrences, *detected))
     return actual == expected
 
 
-def _contextual_token_occurrences(source: LockedText, text: str) -> tuple[LockedToken, ...]:
-    contextual: list[LockedToken] = []
-    values = {
-        (token.value, token.kind)
-        for token in source.tokens
-        if token.kind in {"glossary", "person"}
-    }
+def _source_token_occurrences(source: LockedText, text: str) -> tuple[LockedToken, ...]:
+    occurrences: list[LockedToken] = []
+    values = {(token.value, token.kind) for token in source.tokens}
     for value, kind in sorted(values, key=lambda item: (-len(item[0]), item[0], item[1])):
-        normalized_value = normalize_term(value)
-        left_boundary = r"(?<!\w)" if normalized_value[0].isalnum() or normalized_value[0] == "_" else ""
-        right_boundary = r"(?!\w)" if normalized_value[-1].isalnum() or normalized_value[-1] == "_" else ""
-        pattern = re.compile(f"{left_boundary}{re.escape(value)}{right_boundary}")
+        pattern = re.compile(re.escape(value))
         for match in pattern.finditer(text):
-            if not any(
+            if _is_exact_token_occurrence(text, match.start(), match.end(), value) and not any(
                 _overlaps(match.start(), match.end(), token.start, token.end)
-                for token in contextual
+                for token in occurrences
             ):
-                contextual.append(LockedToken(value, match.start(), match.end(), kind))
-    contextual.sort(key=lambda token: (token.start, token.end))
-    return tuple(contextual)
+                occurrences.append(LockedToken(value, match.start(), match.end(), kind))
+    occurrences.sort(key=lambda token: (token.start, token.end))
+    return tuple(occurrences)
+
+
+def _is_exact_token_occurrence(text: str, start: int, end: int, value: str) -> bool:
+    normalized_value = normalize_term(value)
+    if _is_latin_identifier_char(normalized_value[0]):
+        if start > 0 and _is_latin_identifier_char(text[start - 1]):
+            return False
+    if _is_latin_identifier_char(normalized_value[-1]):
+        if end < len(text) and _is_latin_identifier_char(text[end]):
+            return False
+    return True
+
+
+def _is_latin_identifier_char(character: str) -> bool:
+    if character == "_" or character.isdecimal():
+        return True
+    return character.isalpha() and "LATIN" in unicodedata.name(character, "")
 
 
 def _title_classifications(title: str) -> tuple[list[tuple[PageType, str]], float]:
@@ -526,7 +539,7 @@ _TOKEN_PATTERNS: tuple[tuple[str, re.Pattern[str], str | None], ...] = (
     ),
     ("percentage", re.compile(r"(?<!\w)[+-]?\d+(?:\.\d+)?%(?!\w)"), None),
     ("unit", re.compile(r"(?<!\w)(?:mm|cm|inch|gsm|oz)(?!\w)", re.IGNORECASE), None),
-    ("number", re.compile(r"(?<!\w)[+-]?\d+(?:\.\d+)?(?!\w)"), None),
+    ("number", re.compile(r"(?<![A-Za-z0-9_])[+-]?\d+(?:\.\d+)?(?![A-Za-z0-9_])"), None),
 )
 
 

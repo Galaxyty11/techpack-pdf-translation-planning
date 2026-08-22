@@ -435,6 +435,34 @@ def test_locked_token_validation_does_not_count_tokens_inside_longer_tokens() ->
     assert validate_locked_tokens(source, "1 12") is False
 
 
+def test_locked_numeric_occurrences_allow_cjk_adjacency_without_identifier_substrings() -> None:
+    source = lock_tokens("12 12")
+
+    assert validate_locked_tokens(source, "数量12件和12件") is True
+    assert validate_locked_tokens(source, "数量12件") is False
+    assert validate_locked_tokens(source, "数量12件和13件") is False
+    assert validate_locked_tokens(source, "数量A12B件和12件") is False
+    assert validate_locked_tokens(source, "数量112件和12件") is False
+
+
+def test_dnt_occurrences_allow_cjk_adjacency_but_remain_case_and_identifier_exact(tmp_path) -> None:
+    glossary_path = tmp_path / "glossary.csv"
+    glossary_path.write_text(
+        "source_term,target_term,do_not_translate\nAcmeTex,,true\n",
+        encoding="utf-8",
+    )
+    candidate = select_candidates(
+        _page(PageType.BOM, [_page_node("Use AcmeTex fabric", "material")]),
+        load_glossary(glossary_path),
+    )[0]
+
+    assert validate_locked_tokens(candidate.locked_text, "使用AcmeTex面料") is True
+    assert validate_locked_tokens(candidate.locked_text, "使用acmetex面料") is False
+    assert validate_locked_tokens(candidate.locked_text, "使用XAcmeTexY面料") is False
+    assert validate_locked_tokens(candidate.locked_text, "使用AcmeTexPlus面料") is False
+    assert validate_locked_tokens(candidate.locked_text, "使用AcmeTex面料和AcmeTex里料") is False
+
+
 def test_do_not_translate_glossary_span_supersedes_overlapping_numeric_locks(tmp_path) -> None:
     glossary_path = tmp_path / "glossary.csv"
     glossary_path.write_text(
