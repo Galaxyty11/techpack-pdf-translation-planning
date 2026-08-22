@@ -277,13 +277,13 @@ leader_line, warnings
 approved | approved_edited | skipped
 ```
 
-加载接口固定为 `load_review(path, job, expected_items) -> ReviewDocument`。`job` 必须是带 source/glossary 路径的 `JobManifest`；`expected_items` 是生成审核页时的可信项目快照。
+加载接口固定为 `load_review(path, job, expected_output) -> ReviewDocument`。`job` 必须是带 source/glossary 路径的 `JobManifest`；`expected_output` 必须是生成 `review.html` 时使用的同一份可信输出快照，不能从用户提交的 `review.json` 反推。
 
-加载时必须重新计算当前 source/glossary SHA-256 和 PDF 页数，并要求 `job_id`、source/glossary 文件名与哈希、页数全部与 `JobManifest` 精确一致。review items 必须与 `expected_items` 数量和 ID 集合完全一致；除 `review_status` 和 `reviewed_translation` 外，每个 `ReviewItem` 字段都必须完全一致。缺失、额外、替换或重复项目立即失败。
+加载时必须重新计算当前 source/glossary SHA-256 和 PDF 页数，并要求 `job_id`、source/glossary 文件名与哈希、页数全部与 `JobManifest` 精确一致。实现必须用与生成审核页相同的确定性规则，从 `expected_output` 派生清空审核状态后的可信 items、由全部逐项 provenance 汇总且包含 parser/executor 的完整 pipeline，以及可信 `blocking_issues`。review items 必须与可信 items 数量和 ID 集合完全一致；除 `review_status` 和 `reviewed_translation` 外，每个 `ReviewItem` 字段都必须完全一致。缺失、额外、替换或重复项目立即失败。
 
-任务级 pipeline 必须与全部 item 的 `translation_host`、`translation_execution_mode`、`translation_model`、`translation_prompt_version` 确定性汇总完全一致。`review_completed_at` 只接受带时区的 ISO-8601 字符串。
+提交的完整 pipeline 和 `blocking_issues` 必须分别与上述可信派生值精确一致；可信阻断项非空时，即使提交 JSON 删除阻断项也仍必须阻止加载。任务级 pipeline 还必须与全部 item 的 `translation_host`、`translation_execution_mode`、`translation_model`、`translation_prompt_version` 确定性汇总完全一致。`schema_version` 是必填字段；`review_completed_at` 只接受带时区的 ISO-8601 字符串。
 
-批准项以 `suggested_translation` 为最终译文，修改后批准项以 `reviewed_translation` 为最终译文；加载时必须重新验证锁定 token 的精确多重集/边界、普通术语的权威目标译法，以及 do-not-translate 命中的原文保留。
+批准项以 `suggested_translation` 为最终译文，修改后批准项以 `reviewed_translation` 为最终译文；加载时必须重新验证锁定 token 的精确多重集/边界、普通术语的权威目标译法，以及 do-not-translate 命中的原文保留。DNT 校验独立于 `locked_tokens`：必须按可信 hit 的规范化区间/命中文本投影回源文精确子串，并要求最终译文保留完全相同的源文拼写和精确出现次数。
 
 `source.sha256`、`glossary.sha256`、页数、`schema_version`、JobManifest/候选集合绑定或上述确定性约束不匹配时，apply 阶段立即失败，不能提供“忽略并继续”选项。
 

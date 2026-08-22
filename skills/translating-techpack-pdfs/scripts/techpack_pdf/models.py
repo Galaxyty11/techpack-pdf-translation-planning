@@ -140,7 +140,7 @@ class ReviewItem(StrictModel):
 
 
 class ReviewDocument(StrictModel):
-    schema_version: Literal["1.1"] = "1.1"
+    schema_version: Literal["1.1"]
     job_id: str = Field(min_length=1)
     source: FileArtifact
     glossary: FileArtifact

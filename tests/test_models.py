@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from techpack_pdf.models import PipelineInfo, ReviewStatus, TranslatorInfo
+from techpack_pdf.models import PipelineInfo, ReviewDocument, ReviewStatus, TranslatorInfo
 from techpack_pdf.errors import TechpackError
 
 
@@ -13,6 +13,11 @@ def test_review_status_accepts_only_the_three_contract_values(value):
 def test_review_status_rejects_values_outside_the_contract():
     with pytest.raises(ValueError):
         ReviewStatus("pending")
+
+
+def test_review_document_requires_explicit_schema_version():
+    with pytest.raises(ValidationError, match="schema_version"):
+        ReviewDocument.model_validate({})
 
 
 def test_translator_info_rejects_empty_model_but_accepts_unknown():

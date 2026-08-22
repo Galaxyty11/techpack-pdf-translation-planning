@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
@@ -36,9 +37,7 @@ def build_review_html(job: JobManifest, output: Any) -> str:
         items = _items(raw_output)
         pipeline = _pipeline(raw_output, items)
         page_count = _manifest_page_count(manifest, pages)
-        blocking_issues = _json_value(raw_output.get("blocking_issues", []))
-        if not isinstance(blocking_issues, list):
-            raise ValueError("blocking_issues must be a list")
+        blocking_issues = _blocking_issues(raw_output)
         payload = {
             "schema_version": "1.1",
             "job_id": manifest.job_id,
@@ -76,9 +75,9 @@ def build_review_html(job: JobManifest, output: Any) -> str:
 def load_review(
     path: str | Path,
     job: JobManifest,
-    expected_items: Sequence[ReviewItem | Mapping[str, Any]],
+    expected_output: Any,
 ) -> ReviewDocument:
-    """Load a completed review only when it still matches the current inputs."""
+    """Load a completed review bound to the job and trusted generated output."""
     review_path = Path(path)
     try:
         manifest = JobManifest.model_validate(job)
@@ -86,7 +85,13 @@ def load_review(
             raise ValueError("job input paths are required")
         source_path = Path(manifest.source.path)
         glossary_path = Path(manifest.glossary.path)
-        trusted_items = [ReviewItem.model_validate(item) for item in expected_items]
+        raw_expected_output = _mapping(expected_output)
+        trusted_item_values = _items(raw_expected_output)
+        trusted_items = [ReviewItem.model_validate(item) for item in trusted_item_values]
+        trusted_pipeline = PipelineInfo.model_validate(
+            _pipeline(raw_expected_output, trusted_item_values)
+        )
+        trusted_blocking_issues = _blocking_issues(raw_expected_output)
     except (TypeError, ValueError, ValidationError):
         _fail("review_job_invalid", "Review job binding is invalid")
     try:
@@ -119,8 +124,10 @@ def load_review(
     if review.glossary.sha256 != manifest.glossary.sha256 or review.glossary.sha256 != glossary_hash:
         _fail("review_glossary_hash_mismatch", "Review glossary hash does not match")
     _validate_item_binding(review.items, trusted_items)
-    _validate_pipeline(review)
-    if review.blocking_issues:
+    _validate_pipeline(review, trusted_pipeline)
+    if review.blocking_issues != trusted_blocking_issues:
+        _fail("review_blocking_mismatch", "Review blocking issues do not match the job")
+    if trusted_blocking_issues:
         _fail("review_blocked", "Review contains unresolved blocking issues")
     if review.review_completed_at is None:
         _fail("review_incomplete", "Review completion time is missing")
@@ -185,6 +192,13 @@ def _json_value(value: Any) -> Any:
         return str(value)
     if hasattr(value, "value") and isinstance(value.value, str):
         return value.value
+    return value
+
+
+def _blocking_issues(output: Mapping[str, Any]) -> list[dict[str, Any]]:
+    value = _json_value(output.get("blocking_issues", []))
+    if not isinstance(value, list) or not all(isinstance(issue, dict) for issue in value):
+        raise ValueError("blocking_issues must be a list of mappings")
     return value
 
 
@@ -416,7 +430,7 @@ def _validate_review_timestamp(payload: Any) -> None:
         _fail("review_timestamp_invalid", "Review completion time needs a timezone")
 
 
-def _validate_pipeline(review: ReviewDocument) -> None:
+def _validate_pipeline(review: ReviewDocument, trusted_pipeline: PipelineInfo) -> None:
     try:
         aggregate = _aggregate_item_provenance(
             [item.model_dump(mode="json") for item in review.items]
@@ -426,9 +440,9 @@ def _validate_pipeline(review: ReviewDocument) -> None:
             "review_provenance_incomplete",
             "Review item translation provenance is incomplete",
         )
-    if any(
-        getattr(review.pipeline, field) != value
-        for field, value in aggregate.items()
+    if (
+        any(getattr(review.pipeline, field) != value for field, value in aggregate.items())
+        or review.pipeline != trusted_pipeline
     ):
         _fail("review_pipeline_mismatch", "Review pipeline contradicts item provenance")
 
@@ -442,29 +456,28 @@ def _validate_final_translation(item: ReviewItem) -> None:
     if not _nonblank(final_translation):
         _fail("review_translation_missing", "Approved item has no final translation")
 
+    exact_dnt_values: set[str] = set()
     for hit in item.glossary_hits:
         if not isinstance(hit, Mapping):
             _fail("review_glossary_invalid", "Review glossary hit is invalid")
         if bool(hit.get("do_not_translate")):
-            normalized_values = {
-                normalize_term(value)
-                for value in (hit.get("matched_text"), hit.get("source_term"))
-                if value
-            }
-            exact_values = [
-                token
-                for token in item.locked_tokens
-                if normalize_term(token) in normalized_values
-            ]
-            if not exact_values or any(
-                item.source_text.count(value) <= 0
-                or final_translation.count(value) != item.source_text.count(value)
-                for value in exact_values
-            ):
+            exact_value = _project_do_not_translate_value(item.source_text, hit)
+            if exact_value is None:
                 _fail(
                     "review_glossary_dnt_mismatch",
                     "Final translation changed a do-not-translate term",
                 )
+            exact_dnt_values.add(exact_value)
+
+    if any(
+        item.source_text.count(value) <= 0
+        or final_translation.count(value) != item.source_text.count(value)
+        for value in exact_dnt_values
+    ):
+        _fail(
+            "review_glossary_dnt_mismatch",
+            "Final translation changed a do-not-translate term",
+        )
 
     tokens: list[LockedToken] = []
     cursor = 0
@@ -489,6 +502,64 @@ def _validate_final_translation(item: ReviewItem) -> None:
                 "review_glossary_target_missing",
                 "Final translation omitted an authoritative glossary target",
             )
+
+
+def _project_do_not_translate_value(
+    source_text: str, hit: Mapping[str, Any]
+) -> str | None:
+    start = hit.get("start")
+    end = hit.get("end")
+    if not isinstance(start, int) or isinstance(start, bool):
+        return None
+    if not isinstance(end, int) or isinstance(end, bool):
+        return None
+    projected = _project_normalized_span(source_text, start, end)
+    if projected is None:
+        return None
+    source_start, source_end = projected
+    exact_value = source_text[source_start:source_end]
+    references = {
+        normalize_term(str(value))
+        for value in (hit.get("matched_text"), hit.get("source_term"))
+        if isinstance(value, str) and value
+    }
+    if not exact_value or normalize_term(exact_value) not in references:
+        return None
+    return exact_value
+
+
+def _project_normalized_span(
+    source_text: str, start: int, end: int
+) -> tuple[int, int] | None:
+    normalized_length = len(normalize_term(source_text))
+    if start < 0 or end <= start or end > normalized_length:
+        return None
+    prefix_lengths = [
+        len(normalize_term(source_text[:index]))
+        for index in range(len(source_text) + 1)
+    ]
+    source_start = next(
+        (index - 1 for index, length in enumerate(prefix_lengths) if length > start),
+        None,
+    )
+    source_end = next(
+        (index for index, length in enumerate(prefix_lengths) if length >= end),
+        None,
+    )
+    while (
+        source_end is not None
+        and source_end < len(source_text)
+        and unicodedata.combining(source_text[source_end])
+    ):
+        source_end += 1
+    if (
+        source_start is None
+        or source_end is None
+        or source_start < 0
+        or source_end <= source_start
+    ):
+        return None
+    return source_start, source_end
 
 
 def _nonblank(value: str | None) -> bool:
