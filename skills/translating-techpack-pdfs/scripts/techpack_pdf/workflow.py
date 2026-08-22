@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import stat
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
@@ -25,6 +28,7 @@ from .models import (
     FileArtifact,
     JobManifest,
     PageType,
+    ReviewItem,
 )
 from .pdf_analysis import PdfManifest, inspect_pdf
 from .review import build_review_html, load_review
@@ -34,6 +38,7 @@ from .translation import TranslationValidationError, validate_translation_respon
 
 _SCHEMA_VERSION = "1.1"
 _MAX_JSON_BYTES = 8 * 1024 * 1024
+_TRUSTED_REVIEW_NAME = "trusted-review.json"
 _STATES = (
     "initialized",
     "parsed",
@@ -46,6 +51,15 @@ _STATES = (
     "failed",
 )
 _TECHPACK_TYPES = frozenset(PageType) - {PageType.UNKNOWN}
+_TRANSITIONS = {
+    None: {"initialized"}, "initialized": {"parsed", "failed"},
+    "parsed": {"translation_requested", "failed"},
+    "translation_requested": {"translation_requested", "translation_validated", "failed"},
+    "translation_validated": {"review_ready", "failed"},
+    "review_ready": {"review_completed", "failed"},
+    "review_completed": {"applying", "failed"}, "applying": {"applying", "succeeded", "failed"},
+    "succeeded": set(), "failed": set(),
+}
 
 
 class WorkflowState(StrEnum):
@@ -73,6 +87,16 @@ class _StateSnapshot(_StrictModel):
     revision: int = Field(ge=0)
     expected_attempt: Literal[0, 1]
     wait_reason: Literal["host_translation", "host_correction", "agent_failure", "human_review_required", "human_review"] | None
+    artifacts: "_ArtifactDigests"
+
+
+class _ArtifactDigests(_StrictModel):
+    analysis: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    request: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    response: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    expected_output: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    review: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    apply_result: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class _AnalysisNode(_StrictModel):
@@ -121,18 +145,96 @@ class _AnalysisSnapshot(_StrictModel):
     candidates: list[_CandidateSnapshot]
 
 
+class _ExpectedPage(_StrictModel):
+    page_index: int = Field(ge=0)
+    width: float = Field(gt=0)
+    height: float = Field(gt=0)
+    thumbnail: str = Field(min_length=1)
+
+
+class _TrustedExpectedOutput(_StrictModel):
+    schema_version: Literal["1.1"]
+    job_id: str = Field(min_length=1)
+    parser: str = Field(min_length=1)
+    translation_executor: Literal["host_agent"]
+    pages: list[_ExpectedPage] = Field(min_length=1)
+    items: list[ReviewItem]
+    blocking_issues: list[dict[str, Any]] = Field(max_length=0)
+
+
 class _ExpectedOutputSnapshot(_StrictModel):
     schema_version: Literal["1.1"]
     job_id: str = Field(min_length=1)
     source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     glossary_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    output: dict[str, Any]
+    output: _TrustedExpectedOutput
 
 
 class _AgentFailure(_StrictModel):
     schema_version: Literal["1.1"]
+    job_id: str = Field(min_length=1)
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    glossary_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     status: Literal["interrupted", "context_exhausted", "credit_exhausted", "subagent_failed"]
-    error_code: str = Field(min_length=1)
+    error_code: Literal[
+        "agent_interrupted", "agent_context_exhausted", "agent_credit_exhausted", "agent_subagent_failed"
+    ]
+
+
+class _ApplyResultSnapshot(_StrictModel):
+    schema_version: Literal["1.1"]
+    job_id: str = Field(min_length=1)
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    glossary_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_output_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    status: Literal["succeeded", "failed"]
+    output_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    final_output_retained: bool = False
+    problems: list["_SafeApplyProblem"]
+    unresolved: list["_SafeApplyProblem"]
+    unresolved_overlap_count: int = Field(ge=0)
+
+
+class _SafeApplyProblem(_StrictModel):
+    code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    status: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    ownership: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    resource_kind: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    exists: bool | None = None
+    rollback: bool | None = None
+    nested: list["_SafeApplyProblem"] = Field(default_factory=list)
+
+
+@contextmanager
+def _job_lock(directory: Path):
+    """Real OS advisory lock, kept open for a single job operation."""
+    path = directory / ".workflow.lock"
+    stream = path.open("a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            stream.seek(0)
+            if stream.tell() == 0 and path.stat().st_size == 0:
+                stream.write(b"0")
+                stream.flush()
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        finally:
+            stream.close()
 
 
 @dataclass(frozen=True)
@@ -141,13 +243,19 @@ class WorkflowResult:
     state: str
     job_dir: Path | None = None
     jobs: tuple["WorkflowResult", ...] = ()
+    input_index: int | None = None
+    batch_status: Literal["completed"] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {"exit_code": self.exit_code, "state": self.state}
         if self.job_dir is not None:
             result["job_id"] = self.job_dir.name
+        if self.input_index is not None:
+            result["input_index"] = self.input_index
         if self.jobs:
             result["jobs"] = [job.to_dict() for job in self.jobs]
+        if self.batch_status is not None:
+            result["batch_status"] = self.batch_status
         return result
 
 
@@ -160,44 +268,66 @@ def analyze(
     mineru_client: MinerUClient | None = None,
 ) -> WorkflowResult:
     """Generate one isolated host-translation request per input PDF."""
-    source_path = Path(source)
-    pdfs = enumerate_pdfs(source_path)
+    try:
+        source_path = _absolute_user_path(source, must_exist=True, regular=False)
+        glossary_absolute = _absolute_user_path(glossary_path, must_exist=True, regular=True)
+        root_absolute = _absolute_user_path(job_root, must_exist=False, regular=False)
+        pdfs = enumerate_pdfs(source_path)
+    except TechpackError as error:
+        return WorkflowResult(_exit_for(error), "failed", input_index=0)
+    except Exception:
+        return WorkflowResult(2, "failed", input_index=0)
     clock = now or datetime.now(timezone.utc)
     results: list[WorkflowResult] = []
     for offset, pdf in enumerate(pdfs):
         try:
-            results.append(
-                _analyze_one(
+            one = _analyze_one(
                     pdf,
-                    Path(glossary_path),
-                    Path(job_root),
+                    glossary_absolute,
+                    root_absolute,
                     clock + timedelta(seconds=offset),
                     mineru_client or MinerUClient(),
                 )
-            )
+            results.append(WorkflowResult(one.exit_code, one.state, one.job_dir, one.jobs, offset))
         except TechpackError as error:
-            results.append(WorkflowResult(_exit_for(error), "failed"))
-        except (OSError, ValueError, ValidationError):
-            results.append(WorkflowResult(2, "failed"))
+            results.append(WorkflowResult(_exit_for(error), "failed", input_index=offset))
+        except Exception:
+            results.append(WorkflowResult(2, "failed", input_index=offset))
     if len(results) == 1:
         return results[0]
-    return WorkflowResult(max(result.exit_code for result in results), "completed", jobs=tuple(results))
+    return WorkflowResult(_batch_exit_code(results), "batch_status", jobs=tuple(results), batch_status="completed")
 
 
 def prepare_review(job_dir: str | Path) -> WorkflowResult:
+    directory = _job_directory(job_dir)
+    try:
+        with _job_lock(directory):
+            return _prepare_review_locked(directory)
+    except TechpackError:
+        raise
+    except Exception:
+        _mark_job_failed(directory)
+        raise _workflow_error("workflow_internal_error", "Workflow operation failed") from None
+
+
+def _prepare_review_locked(job_dir: str | Path) -> WorkflowResult:
     """Validate host output and emit the offline review page, never a review JSON."""
     directory = _job_directory(job_dir)
     _load_state_payload(directory)
     job = _load_job(directory)
     state = _load_state(directory, job)
-    _verify_bound_inputs(job)
+    _verify_bound_inputs(directory, job)
     if state.state not in {WorkflowState.TRANSLATION_REQUESTED, WorkflowState.TRANSLATION_VALIDATED, WorkflowState.REVIEW_READY}:
         raise _workflow_error("workflow_state_conflict", "Job cannot prepare review from its current state")
     if state.state is WorkflowState.REVIEW_READY:
         return WorkflowResult(4, state.state, directory)
 
     if _artifact_exists(directory, "agent-failure.json"):
-        _load_model(directory, "agent-failure.json", _AgentFailure)
+        failure = _load_model(directory, "agent-failure.json", _AgentFailure)
+        request = _read_json(directory, "translation-request.json")
+        _assert_agent_failure_binding(failure, job, request)
+        if state.state is not WorkflowState.TRANSLATION_REQUESTED:
+            raise _workflow_error("workflow_state_conflict", "Agent failure cannot regress validated translation")
         if state.wait_reason != "agent_failure":
             _write_state(directory, job, WorkflowState.TRANSLATION_REQUESTED, state.revision + 1, state.expected_attempt, "agent_failure")
         return WorkflowResult(4, WorkflowState.TRANSLATION_REQUESTED, directory)
@@ -208,7 +338,7 @@ def prepare_review(job_dir: str | Path) -> WorkflowResult:
     _assert_snapshot_binding(analysis, job)
     request = _read_json(directory, "translation-request.json")
     response = _response_input(directory)
-    glossary = load_glossary(Path(job.glossary.path))
+    glossary = load_glossary(_snapshot_glossary_path(directory, job))
     try:
         translations = validate_translation_response(request, response, glossary, job, expected_attempt=state.expected_attempt)
     except TranslationValidationError as error:
@@ -218,6 +348,12 @@ def prepare_review(job_dir: str | Path) -> WorkflowResult:
             return WorkflowResult(4, WorkflowState.TRANSLATION_REQUESTED, directory)
         _write_state(directory, job, WorkflowState.TRANSLATION_REQUESTED, state.revision + 1, 1, "human_review_required")
         return WorkflowResult(4, WorkflowState.TRANSLATION_REQUESTED, directory)
+
+    try:
+        _ensure_translation_provenance(translations)
+    except TechpackError:
+        _write_state(directory, job, WorkflowState.FAILED, state.revision + 1, state.expected_attempt, None)
+        raise
 
     if state.state is WorkflowState.TRANSLATION_REQUESTED:
         _write_state(directory, job, WorkflowState.TRANSLATION_VALIDATED, state.revision + 1, state.expected_attempt, None)
@@ -242,44 +378,98 @@ def apply(
     review: str | Path,
     output: str | Path,
 ) -> WorkflowResult:
-    """Apply a completed review only from its bound job directory."""
-    source_path = Path(source).resolve(strict=False)
-    review_path = Path(review).resolve(strict=False)
-    output_path = Path(output).resolve(strict=False)
+    review_path = _absolute_user_path(review, must_exist=True, regular=True)
+    directory = _job_directory(review_path.parent)
+    source_path = _absolute_user_path(source, must_exist=True, regular=True)
+    output_path = _absolute_user_path(output, must_exist=False, regular=False)
     expected_path = source_path.with_name(source_path.name + ".annotated.pdf")
-    if output_path != expected_path or output_path.exists():
+    if output_path != expected_path or (output_path.exists() and not (directory / "state.json").is_file()):
+        raise _workflow_error("output_invalid", "Output path is not available for this job")
+    try:
+        with _job_lock(directory):
+            return _apply_locked(source, review_path, output)
+    except TechpackError:
+        raise
+    except Exception:
+        _mark_job_failed(directory)
+        raise _workflow_error("workflow_internal_error", "Workflow operation failed") from None
+
+
+def _apply_locked(
+    source: str | Path,
+    review: str | Path,
+    output: str | Path,
+) -> WorkflowResult:
+    """Apply a completed review only from its bound job directory."""
+    source_path = _absolute_user_path(source, must_exist=True, regular=True)
+    review_path = _absolute_user_path(review, must_exist=True, regular=True)
+    output_path = _absolute_user_path(output, must_exist=False, regular=False)
+    expected_path = source_path.with_name(source_path.name + ".annotated.pdf")
+    if output_path != expected_path:
         raise _workflow_error("output_invalid", "Output path is not available for this job")
     directory = _job_directory(review_path.parent)
     if review_path.parent != directory or review_path.name != "review.json":
         raise _workflow_error("review_path_invalid", "Review must be the job review.json")
     job = _load_job(directory)
     state = _load_state(directory, job)
-    _verify_bound_inputs(job)
-    if source_path != Path(job.source.path).resolve(strict=False):
+    _verify_bound_inputs(directory, job)
+    if source_path != _absolute_user_path(job.source.path, must_exist=True, regular=True):
         raise _workflow_error("source_job_mismatch", "Source does not match the job")
-    if state.state not in {WorkflowState.REVIEW_READY, WorkflowState.REVIEW_COMPLETED}:
+    resuming_apply = state.state is WorkflowState.APPLYING
+    if resuming_apply:
+        if _artifact_exists(directory, "apply-result.json") and expected_path.exists():
+            report = _load_model(directory, "apply-result.json", _ApplyResultSnapshot)
+            expected_digest = _sha256_artifact(directory, "expected-output.json")
+            if (report.job_id == job.job_id and report.source_sha256 == job.source.sha256
+                    and report.glossary_sha256 == job.glossary.sha256 and report.status == "succeeded"
+                    and report.expected_output_sha256 == expected_digest and report.output_sha256 == sha256_file(expected_path)):
+                _write_state(directory, job, WorkflowState.SUCCEEDED, state.revision + 1, state.expected_attempt, None)
+                return WorkflowResult(0, WorkflowState.SUCCEEDED, directory)
+        if expected_path.exists():
+            return WorkflowResult(5, WorkflowState.APPLYING, directory)
+    if not resuming_apply and output_path.exists():
+        raise _workflow_error("output_invalid", "Output path is not available for this job")
+    if state.state not in {WorkflowState.REVIEW_READY, WorkflowState.REVIEW_COMPLETED, WorkflowState.APPLYING}:
         raise _workflow_error("workflow_state_conflict", "Job is not ready to apply")
     expected = _load_model(directory, "expected-output.json", _ExpectedOutputSnapshot)
     _assert_snapshot_binding(expected, job)
+    trusted_review = _inside(directory, _TRUSTED_REVIEW_NAME)
+    trusted_review_digest: str | None = None
+    if not resuming_apply:
+        review_bytes = _bounded_binary_read(review_path)
+        _atomic_binary_write(trusted_review, review_bytes)
+        trusted_review_digest = _sha256_bytes(review_bytes)
 
     # This is the same authoritative validation that apply_review repeats internally.
     try:
-        load_review(review_path, job, expected.output)
+        load_review(trusted_review, job, expected.output)
     except TechpackError:
+        _atomic_json_write(directory / "apply-result.json", _apply_result_snapshot(
+            directory, job, "failed", problems=({"code": "review_validation_failed"},),
+        ).model_dump(mode="json"))
         _write_state(directory, job, WorkflowState.FAILED, state.revision + 1, state.expected_attempt, None)
         return WorkflowResult(5, WorkflowState.FAILED, directory)
     if state.state is WorkflowState.REVIEW_READY:
+        if trusted_review_digest is None or _sha256_artifact(directory, _TRUSTED_REVIEW_NAME) != trusted_review_digest:
+            raise _workflow_error("workflow_artifact_invalid", "Trusted review changed during validation")
         _write_state(directory, job, WorkflowState.REVIEW_COMPLETED, state.revision + 1, state.expected_attempt, None)
         state = _load_state(directory, job)
-    _write_state(directory, job, WorkflowState.APPLYING, state.revision + 1, state.expected_attempt, None)
-    result = apply_review(source_path, review_path, job, expected.output)
+    if state.state is WorkflowState.REVIEW_COMPLETED:
+        _write_state(directory, job, WorkflowState.APPLYING, state.revision + 1, state.expected_attempt, None)
+    result = apply_review(source_path, trusted_review, job, expected.output)
     if _apply_succeeded(result, expected_path):
+        _atomic_json_write(directory / "apply-result.json", _apply_result_snapshot(
+            directory, job, "succeeded", output_sha256=sha256_file(expected_path),
+        ).model_dump(mode="json"))
         applying = _load_state(directory, job)
         _write_state(directory, job, WorkflowState.SUCCEEDED, applying.revision + 1, applying.expected_attempt, None)
         return WorkflowResult(0, WorkflowState.SUCCEEDED, directory)
     applying = _load_state(directory, job)
+    _atomic_json_write(directory / "apply-result.json", _apply_result_snapshot(
+        directory, job, "failed", problems=result.problems, unresolved=result.unresolved_overlaps,
+        final_output_retained=expected_path.exists(),
+    ).model_dump(mode="json"))
     _write_state(directory, job, WorkflowState.FAILED, applying.revision + 1, applying.expected_attempt, None)
-    _atomic_json_write(directory / "apply-result.json", _safe_apply_result(result))
     return WorkflowResult(5, WorkflowState.FAILED, directory)
 
 
@@ -290,33 +480,45 @@ def _analyze_one(
     now: datetime,
     mineru_client: MinerUClient,
 ) -> WorkflowResult:
-    if source.is_symlink() or glossary_path.is_symlink():
-        raise _workflow_error("input_path_invalid", "Input paths must not be symlinks")
-    glossary = load_glossary(glossary_path)
-    job = create_job(source.resolve(strict=True), glossary_path.resolve(strict=True), job_root, now)
+    source = _absolute_user_path(source, must_exist=True, regular=True)
+    glossary_path = _absolute_user_path(glossary_path, must_exist=True, regular=True)
+    job_root = _absolute_user_path(job_root, must_exist=False, regular=False)
+    job = create_job(source, glossary_path, job_root, now)
     directory = _job_directory(job.job_dir)
     _atomic_json_write(directory / "manifest.json", job.model_dump(mode="json"))
     _write_state(directory, job, WorkflowState.INITIALIZED, 0, 0, None)
     try:
-        pdf = inspect_pdf(source, directory)
+        identities = _input_identities(source, glossary_path)
+        snapshot_source, snapshot_glossary = _snapshot_inputs(directory, job, identities)
+        glossary = load_glossary(snapshot_glossary)
+        pdf = inspect_pdf(snapshot_source, directory)
+        if pdf.sha256 != job.source.sha256:
+            raise _workflow_error("workflow_input_changed", "Input snapshot does not match manifest")
         job = job.model_copy(
             update={
                 "source": job.source.model_copy(update={"page_count": pdf.page_count}),
             }
         )
         _atomic_json_write(directory / "manifest.json", job.model_dump(mode="json"))
-        parsed = mineru_client.parse_or_degrade(source, pdf)
+        parsed = mineru_client.parse_or_degrade(snapshot_source, pdf)
         analysis = _analysis_snapshot(directory, job, pdf, parsed, glossary)
         _ensure_techpack_gate(analysis)
+        _verify_original_inputs(job, identities)
         _atomic_json_write(directory / "analysis.json", analysis.model_dump(mode="json"))
         _write_state(directory, job, WorkflowState.PARSED, 1, 0, None)
         _atomic_translation_request(directory, _candidates_from_analysis(analysis), job)
         _write_state(directory, job, WorkflowState.TRANSLATION_REQUESTED, 2, 0, "host_translation")
         return WorkflowResult(4, WorkflowState.TRANSLATION_REQUESTED, directory)
-    except TechpackError:
-        current = _load_state(directory, job)
-        _write_state(directory, job, WorkflowState.FAILED, current.revision + 1, current.expected_attempt, None)
-        raise
+    except Exception as error:
+        try:
+            current = _load_state(directory, job)
+            if current.state is not WorkflowState.SUCCEEDED:
+                _write_state(directory, job, WorkflowState.FAILED, current.revision + 1, current.expected_attempt, None)
+        except Exception:
+            pass
+        if isinstance(error, TechpackError):
+            raise
+        raise _workflow_error("workflow_analysis_failed", "Analysis failed") from None
 
 
 def _analysis_snapshot(
@@ -392,7 +594,8 @@ def _raw_pages(parsed: dict[str, Any] | NativeOnlyDegradation, pdf: PdfManifest)
     if isinstance(parsed, NativeOnlyDegradation):
         return {
             page.page_index: {
-                "title": "",
+                "title": _native_title(page),
+                "table_headers": _native_table_headers(page),
                 "nodes": [{"text": span.text, "bbox": list(span.bbox), "field_role": "body"} for span in page.native_spans],
             }
             for page in pdf.pages
@@ -492,15 +695,32 @@ def _candidates_from_analysis(analysis: _AnalysisSnapshot) -> list[Any]:
 
 def _atomic_translation_request(directory: Path, candidates: Sequence[Any], job: JobManifest) -> None:
     temp = directory / f".translation-request.{uuid.uuid4().hex}.tmp"
+    owned_identity: tuple[int, int, int, int] | None = None
+    primary_failed = False
+    cleanup_failed = False
     try:
         write_translation_request(candidates, temp, job)
         with temp.open("rb+") as stream:
             stream.flush()
             os.fsync(stream.fileno())
+        owned_identity = _file_stat_identity(temp.lstat())
         os.replace(temp, directory / "translation-request.json")
+        _fsync_parent(directory)
+    except (OSError, TechpackError):
+        primary_failed = True
     finally:
-        if temp.exists():
-            temp.unlink(missing_ok=True)
+        try:
+            if temp.exists() and owned_identity is not None and _file_stat_identity(temp.lstat()) == owned_identity:
+                temp.unlink()
+            elif temp.exists():
+                cleanup_failed = True
+        except OSError:
+            cleanup_failed = True
+    if primary_failed:
+        code = "workflow_atomic_write_cleanup_failed" if cleanup_failed else "workflow_atomic_write_failed"
+        raise _workflow_error(code, "Workflow artifact could not be committed")
+    if cleanup_failed:
+        raise _workflow_error("workflow_atomic_cleanup_failed", "Workflow temporary artifact could not be cleaned")
 
 
 def _trusted_output(
@@ -508,7 +728,7 @@ def _trusted_output(
     job: JobManifest,
     analysis: _AnalysisSnapshot,
     translations: Sequence[Any],
-) -> dict[str, Any]:
+) -> _TrustedExpectedOutput:
     translated = {translation.item_id: translation for translation in translations}
     items: list[dict[str, Any]] = []
     for candidate in analysis.candidates:
@@ -517,6 +737,7 @@ def _trusted_output(
         translation = translated.get(candidate.item_id)
         if translation is None or candidate.source_bbox is None:
             raise _workflow_error("trusted_output_invalid", "Trusted candidate output is incomplete")
+        warnings = _quality_warnings(candidate, analysis.parser, translation)
         items.append(
             {
                 "item_id": candidate.item_id,
@@ -533,7 +754,7 @@ def _trusted_output(
                 "suggested_translation": translation.translated_text,
                 "reviewed_translation": None,
                 "review_status": None,
-                "risk_level": "low" if candidate.auto_approvable else "high",
+                "risk_level": "high" if warnings or not candidate.auto_approvable else "low",
                 "translation_host": translation.translator.host,
                 "translation_execution_mode": translation.translator.execution_mode,
                 "translation_model": translation.translator.model,
@@ -543,7 +764,7 @@ def _trusted_output(
                 "target_rect": None,
                 "font_size": None,
                 "leader_line": None,
-                "warnings": list(translation.warnings),
+                "warnings": warnings,
             }
         )
     pages = [
@@ -555,7 +776,7 @@ def _trusted_output(
         }
         for page in analysis.pages
     ]
-    return {
+    return _TrustedExpectedOutput.model_validate({
         "schema_version": _SCHEMA_VERSION,
         "job_id": job.job_id,
         "parser": analysis.parser,
@@ -563,11 +784,138 @@ def _trusted_output(
         "pages": pages,
         "items": items,
         "blocking_issues": [],
-    }
+    })
+
+
+def _ensure_translation_provenance(translations: Sequence[Any]) -> None:
+    for translation in translations:
+        role = getattr(translation.translator, "agent_role", None)
+        if not isinstance(role, str) or not role.strip():
+            raise _workflow_error("workflow_quality_provenance", "Translation provenance is incomplete")
+
+
+def _quality_warnings(candidate: _CandidateSnapshot, parser: str, translation: Any) -> list[str]:
+    warnings: list[str] = []
+    if parser == "native_only":
+        warnings.append("native_only_degradation")
+    if candidate.coordinate_confidence is not CoordinateConfidence.HIGH:
+        warnings.append("coordinate_confidence")
+    if translation.translator.model == "unknown":
+        warnings.append("unknown_model")
+    for warning in translation.warnings:
+        if isinstance(warning, str) and warning.strip():
+            warnings.append(warning)
+    return list(dict.fromkeys(warnings))
+
+
+def _apply_result_snapshot(
+    directory: Path,
+    job: JobManifest,
+    status: Literal["succeeded", "failed"],
+    *,
+    output_sha256: str | None = None,
+    final_output_retained: bool = False,
+    problems: Sequence[Any] = (),
+    unresolved: Sequence[Any] = (),
+) -> _ApplyResultSnapshot:
+    return _ApplyResultSnapshot(
+        schema_version=_SCHEMA_VERSION,
+        job_id=job.job_id,
+        source_sha256=job.source.sha256,
+        glossary_sha256=job.glossary.sha256,
+        expected_output_sha256=sha256_file(_inside(directory, "expected-output.json")),
+        status=status,
+        output_sha256=output_sha256,
+        final_output_retained=final_output_retained,
+        problems=[_safe_problem_tree(problem) for problem in problems],
+        unresolved=[_safe_problem_tree(problem) for problem in unresolved],
+        unresolved_overlap_count=len(unresolved),
+    )
+
+
+_SAFE_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_SAFE_RESOURCE_KINDS = {
+    "output", "final_output", "temporary", "snapshot", "failure_report", "annotation", "resource",
+}
+_SAFE_OWNERSHIP = {"owned", "foreign_or_unknown", "unknown"}
+
+
+def _safe_problem_tree(value: Any) -> _SafeApplyProblem:
+    """Project Task 8 diagnostics to a structural, non-content report tree."""
+    source = value if isinstance(value, Mapping) else {}
+    details = source.get("details") if isinstance(source.get("details"), Mapping) else {}
+    code = _safe_identifier(source.get("code"), "apply_failed")
+    status = _safe_identifier(source.get("status") or details.get("status"), None)
+    ownership_value = source.get("ownership") or details.get("ownership")
+    if details.get("ownership_mismatch") is True:
+        ownership_value = "foreign_or_unknown"
+    ownership = _safe_identifier(ownership_value, None)
+    if ownership not in _SAFE_OWNERSHIP:
+        ownership = None
+    kind = _safe_identifier(source.get("resource_kind") or details.get("resource_kind"), None)
+    if kind not in _SAFE_RESOURCE_KINDS:
+        kind = _kind_for_code(code)
+    exists = _bool_or_none(source.get("exists") if "exists" in source else details.get("exists"))
+    rollback = _bool_or_none(source.get("rollback") if "rollback" in source else details.get("rollback"))
+    children: list[_SafeApplyProblem] = []
+    for child in _nested_problem_values(details):
+        children.append(_safe_problem_tree(child))
+    for key, child_exists in details.items():
+        if key.endswith("_exists") and isinstance(child_exists, bool):
+            child_kind = _kind_for_exists_key(key)
+            children.append(_SafeApplyProblem(
+                code=code, resource_kind=child_kind, exists=child_exists,
+                ownership=ownership, rollback=rollback,
+            ))
+    return _SafeApplyProblem(
+        code=code, status=status, ownership=ownership, resource_kind=kind,
+        exists=exists, rollback=rollback, nested=children,
+    )
+
+
+def _nested_problem_values(details: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    nested: list[Mapping[str, Any]] = []
+    for value in details.values():
+        if isinstance(value, Mapping):
+            nested.append(value)
+        elif isinstance(value, list):
+            nested.extend(item for item in value if isinstance(item, Mapping))
+    return nested
+
+
+def _safe_identifier(value: Any, fallback: str | None) -> str | None:
+    return value if isinstance(value, str) and _SAFE_IDENTIFIER.fullmatch(value) else fallback
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _kind_for_code(code: str) -> str | None:
+    if code.startswith("publish_"):
+        return "final_output"
+    if code.startswith("cleanup_") or code.startswith("temp_"):
+        return "temporary"
+    if code.startswith("unresolved_"):
+        return "annotation"
+    return None
+
+
+def _kind_for_exists_key(key: str) -> str:
+    if key.startswith("final_") or key.startswith("output_"):
+        return "final_output"
+    if key.startswith("temp_"):
+        return "temporary"
+    if key.startswith("snapshot_"):
+        return "snapshot"
+    if key.startswith("report_"):
+        return "failure_report"
+    return "resource"
 
 
 def _with_absolute_thumbnails(directory: Path, output: Mapping[str, Any]) -> dict[str, Any]:
-    converted = json.loads(json.dumps(output))
+    material = output.model_dump(mode="json") if isinstance(output, BaseModel) else output
+    converted = json.loads(json.dumps(material))
     for page in converted["pages"]:
         page["thumbnail"] = str(_inside(directory, page["thumbnail"]))
     return converted
@@ -575,7 +923,7 @@ def _with_absolute_thumbnails(directory: Path, output: Mapping[str, Any]) -> dic
 
 def _load_job(directory: Path) -> JobManifest:
     job = _load_model(directory, "manifest.json", JobManifest)
-    if job.job_dir.resolve(strict=False) != directory:
+    if _absolute_user_path(job.job_dir, must_exist=True, regular=False) != directory:
         raise _workflow_error("workflow_job_invalid", "Manifest job directory does not match")
     if job.source.path is None or job.glossary.path is None:
         raise _workflow_error("workflow_job_invalid", "Manifest input paths are missing")
@@ -587,17 +935,107 @@ def _load_state(directory: Path, job: JobManifest) -> _StateSnapshot:
     _assert_snapshot_binding(state, job)
     if state.state.value not in _STATES:
         raise _workflow_error("workflow_state_invalid", "Workflow state is unknown")
+    _verify_state_artifacts(directory, state)
     return state
+
+
+def _verify_state_artifacts(directory: Path, state: _StateSnapshot) -> None:
+    names = {"analysis": "analysis.json", "request": "translation-request.json", "response": "translation-response.json", "expected_output": "expected-output.json", "review": _TRUSTED_REVIEW_NAME, "apply_result": "apply-result.json"}
+    for field, name in names.items():
+        digest = getattr(state.artifacts, field)
+        if digest is None:
+            continue
+        try:
+            if _sha256_artifact(directory, name) != digest:
+                raise OSError
+        except OSError:
+            raise _workflow_error("workflow_artifact_invalid", "Workflow artifact digest does not match state") from None
+    required = {
+        WorkflowState.TRANSLATION_REQUESTED: ("analysis", "request"),
+        WorkflowState.TRANSLATION_VALIDATED: ("analysis", "request", "response"),
+        WorkflowState.REVIEW_READY: ("analysis", "request", "response", "expected_output"),
+    }
+    if any(getattr(state.artifacts, field) is None for field in required.get(state.state, ())):
+        raise _workflow_error("workflow_state_invalid", "Workflow state lacks required artifacts")
+
+
+def _verify_state_invariants(state: _StateSnapshot) -> None:
+    required = {
+        WorkflowState.INITIALIZED: (),
+        WorkflowState.PARSED: ("analysis",),
+        WorkflowState.TRANSLATION_REQUESTED: ("analysis", "request"),
+        WorkflowState.TRANSLATION_VALIDATED: ("analysis", "request", "response"),
+        WorkflowState.REVIEW_READY: ("analysis", "request", "response", "expected_output"),
+        WorkflowState.REVIEW_COMPLETED: ("analysis", "request", "response", "expected_output", "review"),
+        WorkflowState.APPLYING: ("analysis", "request", "response", "expected_output", "review"),
+        WorkflowState.SUCCEEDED: ("analysis", "request", "response", "expected_output", "review", "apply_result"),
+        WorkflowState.FAILED: (),
+    }
+    if any(getattr(state.artifacts, field) is None for field in required[state.state]):
+        raise _workflow_error("workflow_state_invalid", "Workflow state lacks required artifacts")
+    allowed = {
+        WorkflowState.INITIALIZED: set(),
+        WorkflowState.PARSED: {"analysis"},
+        WorkflowState.TRANSLATION_REQUESTED: {"analysis", "request"},
+        WorkflowState.TRANSLATION_VALIDATED: {"analysis", "request", "response"},
+        WorkflowState.REVIEW_READY: {"analysis", "request", "response", "expected_output"},
+        WorkflowState.REVIEW_COMPLETED: {"analysis", "request", "response", "expected_output", "review"},
+        WorkflowState.APPLYING: {"analysis", "request", "response", "expected_output", "review", "apply_result"},
+        WorkflowState.SUCCEEDED: {"analysis", "request", "response", "expected_output", "review", "apply_result"},
+        WorkflowState.FAILED: {"analysis", "request", "response", "expected_output", "review", "apply_result"},
+    }
+    if state.state is not WorkflowState.FAILED and any(
+        getattr(state.artifacts, field) is not None and field not in allowed[state.state]
+        for field in _ArtifactDigests.model_fields
+    ):
+        raise _workflow_error("workflow_state_invalid", "Workflow state contains future artifacts")
+    valid_waits = {
+        WorkflowState.INITIALIZED: {None},
+        WorkflowState.PARSED: {None},
+        WorkflowState.TRANSLATION_REQUESTED: {"host_translation", "host_correction", "agent_failure", "human_review_required"},
+        WorkflowState.TRANSLATION_VALIDATED: {None},
+        WorkflowState.REVIEW_READY: {"human_review"},
+        WorkflowState.REVIEW_COMPLETED: {None},
+        WorkflowState.APPLYING: {None},
+        WorkflowState.SUCCEEDED: {None},
+        WorkflowState.FAILED: {None},
+    }
+    if state.wait_reason not in valid_waits[state.state]:
+        raise _workflow_error("workflow_state_invalid", "Workflow wait reason is contradictory")
+    if state.state in {WorkflowState.INITIALIZED, WorkflowState.PARSED} and state.expected_attempt != 0:
+        raise _workflow_error("workflow_state_invalid", "Workflow attempt is contradictory")
+    if state.state is WorkflowState.INITIALIZED and state.revision != 0:
+        raise _workflow_error("workflow_state_invalid", "Workflow revision is contradictory")
+    if state.state is WorkflowState.PARSED and state.revision < 1:
+        raise _workflow_error("workflow_state_invalid", "Workflow revision is contradictory")
+    if state.state is WorkflowState.TRANSLATION_REQUESTED:
+        if state.wait_reason == "host_translation" and state.expected_attempt != 0:
+            raise _workflow_error("workflow_state_invalid", "Workflow attempt is contradictory")
+        if state.wait_reason in {"host_correction", "human_review_required"} and state.expected_attempt != 1:
+            raise _workflow_error("workflow_state_invalid", "Workflow attempt is contradictory")
 
 
 def _load_state_payload(directory: Path) -> _StateSnapshot:
     try:
-        return _StateSnapshot.model_validate(_read_json(directory, "state.json"))
+        state = _StateSnapshot.model_validate(_read_json(directory, "state.json"))
     except (ValidationError, TechpackError):
         raise _workflow_error("workflow_state_invalid", "Workflow state does not match its schema") from None
+    _verify_state_invariants(state)
+    return state
 
 
 def _write_state(directory: Path, job: JobManifest, state: WorkflowState, revision: int, expected_attempt: Literal[0, 1], wait_reason: Literal["host_translation", "host_correction", "agent_failure", "human_review_required", "human_review"] | None) -> None:
+    path = directory / "state.json"
+    previous: _StateSnapshot | None = None
+    if path.exists():
+        previous = _load_state_payload(directory)
+        if previous.revision + 1 != revision or state.value not in _TRANSITIONS[previous.state.value]:
+            raise _workflow_error("workflow_state_conflict", "Workflow transition is not legal")
+    elif revision != 0 or state is not WorkflowState.INITIALIZED:
+        raise _workflow_error("workflow_state_conflict", "Workflow state has no valid predecessor")
+    artifacts = _artifact_digests(directory)
+    if state is WorkflowState.TRANSLATION_REQUESTED:
+        artifacts = artifacts.model_copy(update={"response": None})
     snapshot = _StateSnapshot(
         schema_version=_SCHEMA_VERSION,
         job_id=job.job_id,
@@ -607,20 +1045,166 @@ def _write_state(directory: Path, job: JobManifest, state: WorkflowState, revisi
         revision=revision,
         expected_attempt=expected_attempt,
         wait_reason=wait_reason,
+        artifacts=artifacts,
     )
-    _atomic_json_write(directory / "state.json", snapshot.model_dump(mode="json"))
+    _verify_state_invariants(snapshot)
+    _atomic_json_write(path, snapshot.model_dump(mode="json"))
 
 
-def _verify_bound_inputs(job: JobManifest) -> None:
+def _mark_job_failed(directory: Path) -> None:
+    """Best-effort terminalization for an unexpected in-scope workflow exception."""
+    try:
+        job = _load_job(directory)
+        state = _load_state(directory, job)
+        if state.state not in {WorkflowState.SUCCEEDED, WorkflowState.FAILED}:
+            _write_state(directory, job, WorkflowState.FAILED, state.revision + 1, state.expected_attempt, None)
+    except Exception:
+        return
+
+
+def _artifact_digests(directory: Path) -> _ArtifactDigests:
+    names = {
+        "analysis": "analysis.json", "request": "translation-request.json",
+        "response": "translation-response.json", "expected_output": "expected-output.json",
+        "review": _TRUSTED_REVIEW_NAME, "apply_result": "apply-result.json",
+    }
+    values: dict[str, str | None] = {}
+    for field, name in names.items():
+        path = _inside(directory, name)
+        try:
+            values[field] = _sha256_artifact(directory, name) if path.is_file() else None
+        except (OSError, TechpackError):
+            values[field] = None
+    return _ArtifactDigests.model_validate(values)
+
+
+def _snapshot_source_path(directory: Path) -> Path:
+    return _inside(directory, "input-source.pdf")
+
+
+def _snapshot_glossary_path(directory: Path, job: JobManifest) -> Path:
+    suffix = Path(job.glossary.filename).suffix.casefold()
+    if suffix not in {".csv", ".xlsx"}:
+        raise _workflow_error("workflow_input_invalid", "Job glossary suffix is invalid")
+    return _inside(directory, f"input-glossary{suffix}")
+
+
+def _input_identities(source: Path, glossary: Path) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+    return (_file_identity(source), _file_identity(glossary))
+
+
+def _file_identity(path: Path) -> tuple[int, int, int, int]:
+    try:
+        stat = path.stat()
+    except OSError:
+        raise _workflow_error("workflow_input_unavailable", "Job input is unavailable") from None
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
+def _snapshot_inputs(
+    directory: Path,
+    job: JobManifest,
+    identities: tuple[tuple[int, int, int, int], tuple[int, int, int, int]],
+) -> tuple[Path, Path]:
     source = Path(job.source.path)
     glossary = Path(job.glossary.path)
-    if source.is_symlink() or glossary.is_symlink():
-        raise _workflow_error("workflow_input_invalid", "Job input paths must not be symlinks")
+    source_snapshot = _snapshot_source_path(directory)
+    glossary_snapshot = _snapshot_glossary_path(directory, job)
+    _stable_copy(source, source_snapshot, job.source.sha256, identities[0])
+    _stable_copy(glossary, glossary_snapshot, job.glossary.sha256, identities[1])
+    return source_snapshot, glossary_snapshot
+
+
+def _stable_copy(source: Path, target: Path, expected_sha256: str, identity: tuple[int, int, int, int]) -> None:
+    if source.is_symlink() or not source.is_file():
+        raise _workflow_error("workflow_input_invalid", "Job input is invalid")
+    if _file_identity(source) != identity:
+        raise _workflow_error("workflow_input_changed", "Job input changed while being snapshotted")
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with source.open("rb") as reader, temporary.open("xb") as writer:
+            while chunk := reader.read(1024 * 1024):
+                writer.write(chunk)
+            writer.flush()
+            os.fsync(writer.fileno())
+        if _file_identity(source) != identity or sha256_file(temporary) != expected_sha256:
+            raise _workflow_error("workflow_input_changed", "Job input changed while being snapshotted")
+        os.replace(temporary, target)
+    except TechpackError:
+        raise
+    except OSError:
+        raise _workflow_error("workflow_input_unavailable", "Job input snapshot is unavailable") from None
+    finally:
+        if temporary.exists():
+            temporary.unlink(missing_ok=True)
+
+
+def _verify_original_inputs(job: JobManifest, identities: tuple[tuple[int, int, int, int]]) -> None:
+    source = Path(job.source.path)
+    glossary = Path(job.glossary.path)
+    if (
+        _file_identity(source) != identities[0]
+        or _file_identity(glossary) != identities[1]
+        or sha256_file(source) != job.source.sha256
+        or sha256_file(glossary) != job.glossary.sha256
+    ):
+        raise _workflow_error("workflow_input_changed", "Job inputs no longer match their manifest")
+
+
+def _verify_bound_inputs(directory: Path, job: JobManifest) -> None:
+    source = _absolute_user_path(job.source.path, must_exist=True, regular=True)
+    glossary = _absolute_user_path(job.glossary.path, must_exist=True, regular=True)
     try:
         if sha256_file(source) != job.source.sha256 or sha256_file(glossary) != job.glossary.sha256:
             raise _workflow_error("workflow_input_changed", "Job inputs no longer match their manifest")
+        if (
+            sha256_file(_snapshot_source_path(directory)) != job.source.sha256
+            or sha256_file(_snapshot_glossary_path(directory, job)) != job.glossary.sha256
+        ):
+            raise _workflow_error("workflow_input_changed", "Job input snapshots no longer match their manifest")
     except OSError:
         raise _workflow_error("workflow_input_unavailable", "Job input is unavailable") from None
+
+
+def _assert_agent_failure_binding(failure: _AgentFailure, job: JobManifest, request: Any) -> None:
+    try:
+        request_hash = request["request_sha256"]
+    except (KeyError, TypeError):
+        raise _workflow_error("workflow_artifact_invalid", "Translation request is invalid") from None
+    if (
+        failure.job_id != job.job_id
+        or failure.source_sha256 != job.source.sha256
+        or failure.glossary_sha256 != job.glossary.sha256
+        or failure.request_sha256 != request_hash
+    ):
+        raise _workflow_error("workflow_binding_mismatch", "Agent failure does not match the job")
+
+
+def _native_title(page: Any) -> str:
+    spans = [span for span in page.native_spans if span.text.strip()]
+    if not spans:
+        return ""
+    upper = [span for span in spans if span.bbox[1] <= page.crop_box[3] * 0.30]
+    pool = upper or spans
+    selected = sorted(pool, key=lambda span: (-span.font_size, span.bbox[1], span.bbox[0], span.text))[0]
+    return selected.text
+
+
+def _native_table_headers(page: Any) -> list[str]:
+    headers = {"pom", "description", "tolerance", "material", "composition", "weight", "supplier", "component"}
+    found: list[str] = []
+    for span in page.native_spans:
+        for token in span.text.casefold().replace("/", " ").replace(",", " ").split():
+            if token in headers and token not in found:
+                found.append(token)
+    return found
+
+
+def _batch_exit_code(results: Sequence[WorkflowResult]) -> int:
+    for code in (3, 2, 5, 4, 0):
+        if any(result.exit_code == code for result in results):
+            return code
+    return 2
 
 
 def _assert_snapshot_binding(snapshot: Any, job: JobManifest) -> None:
@@ -633,10 +1217,55 @@ def _assert_snapshot_binding(snapshot: Any, job: JobManifest) -> None:
 
 
 def _job_directory(path: str | Path) -> Path:
-    directory = Path(path)
-    if directory.is_symlink() or not directory.is_dir():
+    directory = _absolute_user_path(path, must_exist=True, regular=False)
+    if not directory.is_dir():
         raise _workflow_error("workflow_job_invalid", "Job directory is invalid")
-    return directory.resolve(strict=True)
+    return directory
+
+
+def _absolute_user_path(value: str | Path, *, must_exist: bool, regular: bool) -> Path:
+    try:
+        raw = Path(value)
+        path = Path(os.path.abspath(raw if raw.is_absolute() else Path.cwd() / raw))
+    except (OSError, TypeError, ValueError):
+        raise _workflow_error("workflow_path_invalid", "Path is invalid") from None
+    _assert_no_reparse_components(path)
+    try:
+        details = path.lstat()
+    except FileNotFoundError:
+        if must_exist:
+            raise _workflow_error("workflow_path_invalid", "Path is unavailable") from None
+        return path
+    except OSError:
+        raise _workflow_error("workflow_path_invalid", "Path is unavailable") from None
+    if _is_reparse_or_link(details):
+        raise _workflow_error("workflow_path_invalid", "Path is invalid")
+    if regular and not stat.S_ISREG(details.st_mode):
+        raise _workflow_error("workflow_path_invalid", "Path is invalid")
+    return path
+
+
+def _assert_no_reparse_components(path: Path) -> None:
+    current = path
+    while True:
+        try:
+            details = current.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            raise _workflow_error("workflow_path_invalid", "Path is unavailable") from None
+        else:
+            if _is_reparse_or_link(details):
+                raise _workflow_error("workflow_path_invalid", "Path is invalid")
+        if current == current.parent:
+            return
+        current = current.parent
+
+
+def _is_reparse_or_link(details: Any) -> bool:
+    attributes = getattr(details, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    return stat.S_ISLNK(details.st_mode) or bool(attributes & reparse)
 
 
 def _inside(directory: Path, name: str) -> Path:
@@ -649,8 +1278,10 @@ def _inside(directory: Path, name: str) -> Path:
         resolved_parent.relative_to(directory)
     except ValueError:
         raise _workflow_error("workflow_artifact_invalid", "Artifact path escapes the job")
-    if path.is_symlink() or any(parent.is_symlink() for parent in path.parents if parent != directory):
-        raise _workflow_error("workflow_artifact_invalid", "Artifact path is invalid")
+    try:
+        _assert_no_reparse_components(path)
+    except TechpackError:
+        raise _workflow_error("workflow_artifact_invalid", "Artifact path is invalid") from None
     return path
 
 
@@ -659,12 +1290,59 @@ def _artifact_exists(directory: Path, name: str) -> bool:
     return path.exists()
 
 
+def _bounded_binary_read(path: Path) -> bytes:
+    """Read a regular file from one stable descriptor, bounded and race checked."""
+    try:
+        before = path.lstat()
+        if _is_reparse_or_link(before) or not stat.S_ISREG(before.st_mode):
+            raise OSError
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if _file_stat_identity(before) != _file_stat_identity(opened) or opened.st_size > _MAX_JSON_BYTES:
+                raise OSError
+            parts: list[bytes] = []
+            remaining = _MAX_JSON_BYTES + 1
+            while remaining:
+                chunk = os.read(descriptor, min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                parts.append(chunk)
+                remaining -= len(chunk)
+            value = b"".join(parts)
+            after = os.fstat(descriptor)
+            if (
+                len(value) > _MAX_JSON_BYTES
+                or _file_stat_identity(opened) != _file_stat_identity(after)
+                or len(value) != after.st_size
+            ):
+                raise OSError
+            return value
+        finally:
+            os.close(descriptor)
+    except OSError:
+        raise _workflow_error("workflow_artifact_invalid", "Workflow JSON artifact is invalid") from None
+
+
+def _file_stat_identity(details: Any) -> tuple[int, int, int, int]:
+    return (details.st_dev, details.st_ino, details.st_size, details.st_mtime_ns)
+
+
+def _sha256_bytes(value: bytes) -> str:
+    import hashlib
+
+    return hashlib.sha256(value).hexdigest()
+
+
+def _sha256_artifact(directory: Path, name: str) -> str:
+    return _sha256_bytes(_bounded_binary_read(_inside(directory, name)))
+
+
 def _read_json(directory: Path, name: str) -> Any:
     path = _inside(directory, name)
     try:
-        if not path.is_file() or path.stat().st_size > _MAX_JSON_BYTES:
-            raise OSError
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(_bounded_binary_read(path).decode("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         raise _workflow_error("workflow_artifact_invalid", "Workflow JSON artifact is invalid") from None
 
@@ -673,9 +1351,8 @@ def _response_input(directory: Path) -> Path | object:
     """Keep bounded path safety while letting Task 6 own malformed-response policy."""
     path = _inside(directory, "translation-response.json")
     try:
-        if not path.is_file() or path.stat().st_size > _MAX_JSON_BYTES:
-            return object()
-    except OSError:
+        return _bounded_binary_read(path).decode("utf-8")
+    except (OSError, UnicodeError, TechpackError):
         return object()
     return path
 
@@ -693,22 +1370,60 @@ def _atomic_json_write(path: Path, value: Any) -> None:
 
 
 def _atomic_text_write(path: Path, text: str) -> None:
+    _atomic_binary_write(path, text.encode("utf-8"))
+
+
+def _atomic_binary_write(path: Path, value: bytes) -> None:
     directory = path.parent
     temp = directory / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    owned_identity: tuple[int, int, int, int] | None = None
+    primary_failed = False
+    cleanup_failed = False
     try:
-        with temp.open("x", encoding="utf-8", newline="\n") as stream:
-            stream.write(text)
+        with temp.open("xb") as stream:
+            stream.write(value)
             stream.flush()
             os.fsync(stream.fileno())
+        owned_identity = _file_stat_identity(temp.lstat())
         os.replace(temp, path)
+        _fsync_parent(directory)
+    except OSError:
+        primary_failed = True
     finally:
-        if temp.exists():
-            temp.unlink(missing_ok=True)
+        try:
+            if temp.exists():
+                details = temp.lstat()
+                if owned_identity is not None and _file_stat_identity(details) != owned_identity:
+                    cleanup_failed = True
+                elif owned_identity is not None:
+                    temp.unlink()
+                else:
+                    cleanup_failed = True
+        except OSError:
+            cleanup_failed = True
+    if primary_failed:
+        code = "workflow_atomic_write_cleanup_failed" if cleanup_failed else "workflow_atomic_write_failed"
+        raise _workflow_error(code, "Workflow artifact could not be committed")
+    if cleanup_failed:
+        raise _workflow_error("workflow_atomic_cleanup_failed", "Workflow temporary artifact could not be cleaned")
+
+
+def _fsync_parent(directory: Path) -> None:
+    if os.name == "nt":
+        return
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except (AttributeError, OSError):
+        return
 
 
 def _relative_artifact(directory: Path, path: Path) -> str:
     try:
-        return str(path.resolve(strict=True).relative_to(directory))
+        return str(Path(os.path.abspath(path)).relative_to(directory))
     except ValueError:
         raise _workflow_error("workflow_artifact_invalid", "Artifact is outside the job") from None
 

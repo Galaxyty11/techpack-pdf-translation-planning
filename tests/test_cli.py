@@ -35,3 +35,15 @@ def test_cli_maps_safe_error_categories_without_traceback(capsys, monkeypatch, c
     rendered = capsys.readouterr().err
     assert "SECRET-DO-NOT-LEAK" not in rendered
     assert json.loads(rendered)["code"] == code
+
+
+def test_cli_catches_unexpected_exception_as_one_safe_json_result(capsys, monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise RuntimeError(r"C:\\SECRET\\path and traceback must not leak")
+
+    monkeypatch.setattr(techpack_pdf_cli, "analyze", fail)
+    assert main(["analyze", "input.pdf", "--glossary", "terms.csv", "--job-dir", "jobs"]) == 2
+    rendered = capsys.readouterr().err
+    assert json.loads(rendered) == {"code": "internal_error", "status": "failed"}
+    assert "SECRET" not in rendered
+    assert "Traceback" not in rendered

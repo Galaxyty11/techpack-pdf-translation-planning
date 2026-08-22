@@ -50,6 +50,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, ValueError, argparse.ArgumentError, SystemExit):
         print(json.dumps({"code": "input_error", "status": "failed"}), file=sys.stderr)
         return 2
+    except Exception:
+        print(json.dumps({"code": "internal_error", "status": "failed"}), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
