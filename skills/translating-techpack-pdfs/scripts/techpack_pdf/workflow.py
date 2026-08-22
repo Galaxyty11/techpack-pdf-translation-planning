@@ -41,6 +41,7 @@ from .translation import TranslationValidationError, validate_translation_respon
 _SCHEMA_VERSION = "1.1"
 _MAX_JSON_BYTES = 8 * 1024 * 1024
 _TRUSTED_REVIEW_NAME = "trusted-review.json"
+_PENDING_REVIEW_NAME = re.compile(r"^\.trusted-review\.[0-9a-f]{32}\.pending$")
 _THREAD_LOCK_GUARD = threading.Lock()
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
 _ACTIVE_JOB_GUARDS: dict[tuple[int, str], str] = {}
@@ -309,7 +310,7 @@ class WorkflowResult:
     input_index: int | None = None
     batch_status: Literal["completed"] | None = None
     status: Literal["workflow_busy", "recovery_required"] | None = None
-    wait_reason: Literal["concurrent_operation", "apply_recovery"] | None = None
+    wait_reason: Literal["concurrent_operation", "apply_recovery", "review_recovery"] | None = None
 
     def __post_init__(self) -> None:
         if self.state is not None:
@@ -570,47 +571,87 @@ def _apply_locked(
     trusted_review = _inside(directory, _TRUSTED_REVIEW_NAME)
     trusted_review_digest = state.artifacts.review
     if state.state is WorkflowState.REVIEW_READY:
-        review_path = _absolute_user_path(review_path, must_exist=True, regular=True)
-        review_bytes = _bounded_binary_read(review_path)
-        pending_review = _inside(directory, f".trusted-review.{uuid.uuid4().hex}.pending")
-        pending_owner = _atomic_binary_write(pending_review, review_bytes)
-        trusted_review_digest = _sha256_bytes(review_bytes)
         try:
+            trusted_review.lstat()
+            published_after_crash = True
+        except FileNotFoundError:
+            published_after_crash = False
+        except OSError:
+            published_after_crash = True
+        if published_after_crash:
             try:
-                load_review(pending_review, job, expected.output)
+                before_recovery = _sha256_artifact(directory, _TRUSTED_REVIEW_NAME)
+                load_review(trusted_review, job, expected.output)
+                after_recovery = _sha256_artifact(directory, _TRUSTED_REVIEW_NAME)
             except TechpackError:
-                _atomic_json_write(directory / "apply-result.json", _apply_result_snapshot(
+                return WorkflowResult(
+                    5,
+                    WorkflowState.REVIEW_READY,
                     directory,
-                    job,
-                    "failed",
-                    review_sha256_override=trusted_review_digest,
-                    problems=({"code": "review_validation_failed"},),
-                ).model_dump(mode="json"))
-                _write_state(directory, job, WorkflowState.FAILED, state.revision + 1, state.expected_attempt, None)
-                return WorkflowResult(5, WorkflowState.FAILED, directory)
-            if (
-                _owner_identity(pending_review.lstat()) != pending_owner
-                or _sha256_artifact(directory, pending_review.name) != trusted_review_digest
-            ):
-                raise _workflow_error("workflow_artifact_invalid", "Review candidate changed during validation")
-            _publish_review_no_clobber(pending_review, trusted_review, pending_owner, trusted_review_digest)
-            try:
-                _write_state(
-                    directory,
-                    job,
-                    WorkflowState.REVIEW_COMPLETED,
-                    state.revision + 1,
-                    state.expected_attempt,
-                    None,
+                    status="recovery_required",
+                    wait_reason="review_recovery",
                 )
-            except BaseException:
-                if not _unlink_owned(trusted_review, pending_owner):
-                    raise _workflow_error("workflow_atomic_cleanup_failed", "Validated review rollback failed") from None
-                raise
+            if before_recovery != after_recovery:
+                return WorkflowResult(
+                    5,
+                    WorkflowState.REVIEW_READY,
+                    directory,
+                    status="recovery_required",
+                    wait_reason="review_recovery",
+                )
+            trusted_review_digest = after_recovery
+            _write_state(
+                directory,
+                job,
+                WorkflowState.REVIEW_COMPLETED,
+                state.revision + 1,
+                state.expected_attempt,
+                None,
+            )
             state = _load_state(directory, job)
-        finally:
-            if pending_review.exists() and not _unlink_owned(pending_review, pending_owner):
-                raise _workflow_error("workflow_atomic_cleanup_failed", "Review candidate cleanup failed") from None
+            _cleanup_linked_review_pending(directory, _owner_identity(trusted_review.lstat()))
+        else:
+            review_path = _absolute_user_path(review_path, must_exist=True, regular=True)
+            review_bytes = _bounded_binary_read(review_path)
+            pending_review = _inside(directory, f".trusted-review.{uuid.uuid4().hex}.pending")
+            pending_owner = _atomic_binary_write(pending_review, review_bytes)
+            trusted_review_digest = _sha256_bytes(review_bytes)
+            try:
+                try:
+                    load_review(pending_review, job, expected.output)
+                except TechpackError:
+                    _atomic_json_write(directory / "apply-result.json", _apply_result_snapshot(
+                        directory,
+                        job,
+                        "failed",
+                        review_sha256_override=trusted_review_digest,
+                        problems=({"code": "review_validation_failed"},),
+                    ).model_dump(mode="json"))
+                    _write_state(directory, job, WorkflowState.FAILED, state.revision + 1, state.expected_attempt, None)
+                    return WorkflowResult(5, WorkflowState.FAILED, directory)
+                if (
+                    _owner_identity(pending_review.lstat()) != pending_owner
+                    or _sha256_artifact(directory, pending_review.name) != trusted_review_digest
+                ):
+                    raise _workflow_error("workflow_artifact_invalid", "Review candidate changed during validation")
+                _publish_review_no_clobber(pending_review, trusted_review, pending_owner, trusted_review_digest)
+                try:
+                    _write_state(
+                        directory,
+                        job,
+                        WorkflowState.REVIEW_COMPLETED,
+                        state.revision + 1,
+                        state.expected_attempt,
+                        None,
+                    )
+                except BaseException:
+                    if not _unlink_owned(trusted_review, pending_owner):
+                        raise _workflow_error("workflow_atomic_cleanup_failed", "Validated review rollback failed") from None
+                    raise
+                state = _load_state(directory, job)
+            finally:
+                if pending_review.exists() and not _unlink_owned(pending_review, pending_owner):
+                    raise _workflow_error("workflow_atomic_cleanup_failed", "Review candidate cleanup failed") from None
     else:
         # Resume validates the one already-bound review snapshot; external review.json is irrelevant.
         load_review(trusted_review, job, expected.output)
@@ -1769,6 +1810,29 @@ def _publish_review_no_clobber(
         if isinstance(error, (OSError, TechpackError)):
             raise _workflow_error("workflow_artifact_invalid", "Validated review could not be published") from None
         raise
+
+
+def _cleanup_linked_review_pending(directory: Path, trusted_owner: tuple[int, int]) -> None:
+    """Remove only crash-left pending names that are hard links to the validated review."""
+    try:
+        entries = tuple(directory.iterdir())
+    except OSError:
+        raise _workflow_error("workflow_atomic_cleanup_failed", "Review recovery cleanup failed") from None
+    for candidate in entries:
+        if not _PENDING_REVIEW_NAME.fullmatch(candidate.name):
+            continue
+        try:
+            details = candidate.lstat()
+        except OSError:
+            continue
+        if (
+            _is_reparse_or_link(details)
+            or not stat.S_ISREG(details.st_mode)
+            or _owner_identity(details) != trusted_owner
+        ):
+            continue
+        if not _unlink_owned(candidate, trusted_owner):
+            raise _workflow_error("workflow_atomic_cleanup_failed", "Review recovery cleanup failed") from None
 
 
 def _sha256_bytes(value: bytes) -> str:

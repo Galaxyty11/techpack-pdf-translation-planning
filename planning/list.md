@@ -384,6 +384,7 @@ apply 写入接口固定为 `apply_review(source_pdf, review_path, job, expected
 | 翻译响应漏项、无效 JSON 或 token 被改 | 校验失败；一次定向纠偏后转人工 |
 | sub-agent 尝试修改 PDF、审核状态或任务文件 | 丢弃越权变更，只接受符合契约的 JSON 响应 |
 | review.json 与输入不匹配 | apply 阶段阻断 |
+| `review_ready` 下存在未绑定的 `trusted-review.json` | 仅在 Task 7 严格复验并确认 job/expected-output 全绑定后以 CAS 补全 `review_completed`；无效或不匹配文件保持原样并返回 `recovery_required`，不得覆盖、删除或终止任务 |
 | `<原文件完整文件名>.annotated.pdf` 已存在 | 返回 `output_exists`，绝不覆盖 |
 | 同一任务已有工作流操作正在执行 | 不等待、不排队且不修改 state；返回 `status=workflow_busy`、退出码 4 |
 | FreeText 无法消除重叠 | `unresolved_overlap`，阻止交付 |
@@ -416,6 +417,7 @@ apply 写入接口固定为 `apply_review(source_pdf, review_path, job, expected
 - 覆盖宿主支持/不支持 sub-agent、主 Agent 回退、sub-agent 失败、上下文不足、额度耗尽、模型未知或切换、无效 JSON、任务中断恢复、过期审核文件和输出重名。
 - 覆盖 `initialized` 与 `parsed` 硬中断后从同一任务目录的最后完整状态恢复；bootstrap 写入失败仍返回已创建任务的安全 job_id、绝对 job_dir 和输入索引。
 - 覆盖 review 候选先以所有权受控 pending 文件验证，验证成功后才 no-clobber 发布并转换为 `review_completed`；无效或中断的 pending 文件不得成为可信审核快照。
+- 覆盖 no-clobber 发布后、`review_completed` 转换前硬崩溃的精确磁盘状态：合法快照可严格复验并绑定恢复，无效或跨任务快照保持不变且进入人工恢复等待。
 - 覆盖轻量完整性边界：意外损坏、缺失、跨任务串用和过期工件必须阻断；同一用户协调重写全部任务文件明确不在防御范围内。
 - 覆盖同一任务并发调用立即返回 `workflow_busy` 且不修改状态；不同任务仍可独立执行。
 - 在 Codex、千问办公和腾讯 WorkBuddy 可用环境中使用同一候选集与术语表验证契约一致性；宿主不提供 sub-agent 时验证主 Agent 回退路径。

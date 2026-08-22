@@ -615,6 +615,75 @@ def test_review_completed_transition_failure_rolls_back_published_snapshot(tmp_p
     assert not list(job.job_dir.glob(".trusted-review.*.pending"))
 
 
+def test_review_ready_recovers_valid_published_snapshot_after_hard_crash(tmp_path, monkeypatch):
+    source, glossary = tmp_path / "published-crash.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    request = json.loads((job.job_dir / "translation-request.json").read_text(encoding="utf-8"))
+    (job.job_dir / "translation-response.json").write_text(json.dumps(_response_for(request)), encoding="utf-8")
+    assert prepare_review(job.job_dir).state == "review_ready"
+    review = _write_approved_review(job.job_dir)
+    pending = job.job_dir / ".trusted-review.0123456789abcdef0123456789abcdef.pending"
+    pending.write_bytes(review.read_bytes())
+    trusted = job.job_dir / "trusted-review.json"
+    os.link(pending, trusted)
+    review.unlink()
+    state_before = json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))
+    assert state_before["state"] == "review_ready" and state_before["artifacts"]["review"] is None
+    output = source.with_name(source.name + ".annotated.pdf")
+    original_load = workflow.load_review
+    validated = []
+
+    def strict_load(path, *args):
+        validated.append(Path(path).name)
+        return original_load(path, *args)
+
+    def succeed(*_args):
+        output.write_bytes(source.read_bytes())
+        return workflow.ApplyResult(True, output)
+
+    monkeypatch.setattr(workflow, "load_review", strict_load)
+    monkeypatch.setattr(workflow, "apply_review", succeed)
+    result = apply(source, review, output)
+
+    assert (result.exit_code, result.state) == (0, "succeeded")
+    assert validated == ["trusted-review.json"]
+    final_state = json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))
+    assert final_state["artifacts"]["review"] == hashlib.sha256(trusted.read_bytes()).hexdigest()
+    assert not pending.exists()
+
+
+@pytest.mark.parametrize("existing_kind", ["invalid", "mismatched"])
+def test_review_ready_preserves_unbound_existing_snapshot_and_waits_for_recovery(tmp_path, existing_kind):
+    source, glossary = tmp_path / f"{existing_kind}.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    request = json.loads((job.job_dir / "translation-request.json").read_text(encoding="utf-8"))
+    (job.job_dir / "translation-response.json").write_text(json.dumps(_response_for(request)), encoding="utf-8")
+    assert prepare_review(job.job_dir).state == "review_ready"
+    review = _write_approved_review(job.job_dir)
+    trusted = job.job_dir / "trusted-review.json"
+    if existing_kind == "invalid":
+        trusted.write_bytes(b"{}")
+    else:
+        payload = json.loads(review.read_text(encoding="utf-8"))
+        payload["job_id"] = "foreign-job"
+        trusted.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    review.unlink()
+    trusted_before = trusted.read_bytes()
+    state_before = (job.job_dir / "state.json").read_bytes()
+
+    result = apply(source, review, source.with_name(source.name + ".annotated.pdf"))
+
+    assert (result.exit_code, result.state, result.status, result.wait_reason) == (
+        5, "review_ready", "recovery_required", "review_recovery",
+    )
+    assert trusted.read_bytes() == trusted_before
+    assert (job.job_dir / "state.json").read_bytes() == state_before
+
+
 def test_apply_rejects_review_symlink_before_resolution(tmp_path):
     source, glossary = tmp_path / "techpack.pdf", tmp_path / "terms.csv"
     _techpack_pdf(source)
