@@ -266,6 +266,8 @@ def lock_tokens(text: str) -> LockedText:
     for kind, pattern, group_name in _TOKEN_PATTERNS:
         for match in pattern.finditer(text):
             start, end = match.span(group_name) if group_name else match.span()
+            if not _is_exact_token_occurrence(text, start, end, text[start:end]):
+                continue
             if any(start < used_end and end > used_start for used_start, used_end in occupied):
                 continue
             found.append(LockedToken(text[start:end], start, end, kind))
@@ -278,16 +280,34 @@ def validate_locked_tokens(source: LockedText, translated_text: str) -> bool:
     """Compare the exact case-sensitive multiset of source and returned protected values."""
     expected = Counter(token.value for token in source.tokens)
     source_occurrences = _source_token_occurrences(source, translated_text)
-    detected = [
-        token
-        for token in lock_tokens(translated_text).tokens
-        if not any(
-            _overlaps(token.start, token.end, item.start, item.end)
-            for item in source_occurrences
-        )
-    ]
-    actual = Counter(token.value for token in (*source_occurrences, *detected))
+    detected = lock_tokens(translated_text).tokens
+    actual_tokens = _merge_validation_occurrences(source_occurrences, detected)
+    actual = Counter(token.value for token in actual_tokens)
     return actual == expected
+
+
+def _merge_validation_occurrences(
+    source_occurrences: tuple[LockedToken, ...],
+    detected: tuple[LockedToken, ...],
+) -> tuple[LockedToken, ...]:
+    ranked = [(token, True) for token in source_occurrences]
+    ranked.extend((token, False) for token in detected)
+    ranked.sort(
+        key=lambda item: (
+            -(item[0].end - item[0].start),
+            -int(item[1]),
+            item[0].start,
+            item[0].end,
+            item[0].value,
+            item[0].kind,
+        )
+    )
+    selected: list[LockedToken] = []
+    for token, _from_source in ranked:
+        if not any(_overlaps(token.start, token.end, item.start, item.end) for item in selected):
+            selected.append(token)
+    selected.sort(key=lambda token: (token.start, token.end))
+    return tuple(selected)
 
 
 def _source_token_occurrences(source: LockedText, text: str) -> tuple[LockedToken, ...]:
@@ -491,54 +511,54 @@ _TOKEN_PATTERNS: tuple[tuple[str, re.Pattern[str], str | None], ...] = (
     (
         "style_code",
         re.compile(
-            r"\bSTYLE(?:\s*(?:NO\.?|NUMBER|#))?\s*[:#-]?\s*(?P<token>[A-Z0-9]*[A-Z][A-Z0-9._/-]*\d[A-Z0-9._/-]*)",
+            r"(?<![A-Za-z0-9_])STYLE(?:\s*(?:NO\.?|NUMBER|#))?\s*[:#-]?\s*(?P<token>[A-Z0-9]*[A-Z][A-Z0-9._/-]*\d[A-Z0-9._/-]*)",
             re.IGNORECASE,
         ),
         "token",
     ),
     (
         "pom_code",
-        re.compile(r"\bPOM\s*(?:(?:NO\.?|CODE)\s*[:#]?\s*)?[A-Z][A-Z0-9._/-]*\d[A-Z0-9._/-]*\b", re.IGNORECASE),
+        re.compile(r"(?<![A-Za-z0-9_])POM\s*(?:(?:NO\.?|CODE)\s*[:#]?\s*)?[A-Z][A-Z0-9._/-]*\d[A-Z0-9._/-]*(?![A-Za-z0-9_])", re.IGNORECASE),
         None,
     ),
     (
         "material_code",
         re.compile(
-            r"\b(?:MATERIAL|ARTICLE|SUPPLIER)(?:\s*(?:NO\.?|NUMBER|#))?\s*[:#-]?\s*(?P<token>[A-Z0-9]*[A-Z][A-Z0-9._/-]*\d[A-Z0-9._/-]*)",
+            r"(?<![A-Za-z0-9_])(?:MATERIAL|ARTICLE|SUPPLIER)(?:\s*(?:NO\.?|NUMBER|#))?\s*[:#-]?\s*(?P<token>[A-Z0-9]*[A-Z][A-Z0-9._/-]*\d[A-Z0-9._/-]*)",
             re.IGNORECASE,
         ),
         "token",
     ),
     (
         "date",
-        re.compile(r"(?<!\w)(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})(?!\w)"),
+        re.compile(r"(?<![A-Za-z0-9_])(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})(?![A-Za-z0-9_])"),
         None,
     ),
     (
         "person",
         re.compile(
-            r"\b(?:DESIGNER|REVIEWER|CUSTOMER|NAME)\s*:\s*(?P<token>[A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+){1,3})",
+            r"(?<![A-Za-z0-9_])(?:DESIGNER|REVIEWER|CUSTOMER|NAME)\s*:\s*(?P<token>[A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+){1,3})",
         ),
         "token",
     ),
-    ("color_code", re.compile(r"(?<!\w)\d{2}-\d{4}\s+TCX\b", re.IGNORECASE), None),
+    ("color_code", re.compile(r"(?<![A-Za-z0-9_])\d{2}-\d{4}\s+TCX(?![A-Za-z0-9_])", re.IGNORECASE), None),
     (
         "color_code",
-        re.compile(r"\bPANTONE(?:\s+[A-Z])?\s+\d{2}-\d{4}(?:\s+TCX)?\b", re.IGNORECASE),
+        re.compile(r"(?<![A-Za-z0-9_])PANTONE(?:\s+[A-Z])?\s+\d{2}-\d{4}(?:\s+TCX)?(?![A-Za-z0-9_])", re.IGNORECASE),
         None,
     ),
     (
         "generic_code",
-        re.compile(r"(?<!\w)(?=[A-Z0-9._/-]*[A-Z])(?=[A-Z0-9._/-]*\d)[A-Z0-9]+(?:[-_/][A-Z0-9.]+)*(?!\w)"),
+        re.compile(r"(?<![A-Za-z0-9_])(?=[A-Z0-9._/-]*[A-Z])(?=[A-Z0-9._/-]*\d)[A-Z0-9]+(?:[-_/][A-Z0-9.]+)*(?![A-Za-z0-9_])"),
         None,
     ),
     (
         "tolerance",
-        re.compile(r"(?<!\w)(?:±\s*\d+(?:\.\d+)?|[+-]\d+(?:\.\d+)?\s*/\s*[+-]\d+(?:\.\d+)?)(?!\w)"),
+        re.compile(r"(?<![A-Za-z0-9_])(?:±\s*\d+(?:\.\d+)?|[+-]\d+(?:\.\d+)?\s*/\s*[+-]\d+(?:\.\d+)?)(?![A-Za-z0-9_])"),
         None,
     ),
-    ("percentage", re.compile(r"(?<!\w)[+-]?\d+(?:\.\d+)?%(?!\w)"), None),
-    ("unit", re.compile(r"(?<!\w)(?:mm|cm|inch|gsm|oz)(?!\w)", re.IGNORECASE), None),
+    ("percentage", re.compile(r"(?<![A-Za-z0-9_])[+-]?\d+(?:\.\d+)?%(?![A-Za-z0-9_])"), None),
+    ("unit", re.compile(r"(?<![A-Za-z0-9_])(?:mm|cm|inch|gsm|oz)(?![A-Za-z0-9_])", re.IGNORECASE), None),
     ("number", re.compile(r"(?<![A-Za-z0-9_])[+-]?\d+(?:\.\d+)?(?![A-Za-z0-9_])"), None),
 )
 

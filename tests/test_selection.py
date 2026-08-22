@@ -463,6 +463,56 @@ def test_dnt_occurrences_allow_cjk_adjacency_but_remain_case_and_identifier_exac
     assert validate_locked_tokens(candidate.locked_text, "使用AcmeTex面料和AcmeTex里料") is False
 
 
+@pytest.mark.parametrize(
+    ("text", "expected_value", "expected_kind"),
+    [
+        ("款式STYLE ST-2048面料", "ST-2048", "style_code"),
+        ("测量POM A12说明", "POM A12", "pom_code"),
+        ("物料MATERIAL MAT-7788说明", "MAT-7788", "material_code"),
+        ("日期2026-08-22确认", "2026-08-22", "date"),
+        ("人员DESIGNER: Jane Doe确认", "Jane Doe", "person"),
+        ("颜色19-4052 TCX确认", "19-4052 TCX", "color_code"),
+        ("使用ABC123面料", "ABC123", "generic_code"),
+        ("公差±0.5范围", "±0.5", "tolerance"),
+        ("增长50%幅度", "50%", "percentage"),
+        ("长度cm宽度", "cm", "unit"),
+        ("数量12件", "12", "number"),
+    ],
+)
+def test_all_lexical_protection_patterns_allow_cjk_adjacency(
+    text: str,
+    expected_value: str,
+    expected_kind: str,
+) -> None:
+    locked = lock_tokens(text)
+
+    assert [(token.value, token.kind) for token in locked.tokens] == [
+        (expected_value, expected_kind),
+    ]
+    assert text[locked.tokens[0].start : locked.tokens[0].end] == expected_value
+
+
+def test_lexical_patterns_do_not_extract_inside_latin_digit_identifiers() -> None:
+    locked = lock_tokens("prefixcmSuffix XABC123Y A50%B écm中文 éABC123中文")
+    values = [token.value for token in locked.tokens]
+
+    assert "cm" not in values
+    assert "ABC123" not in values
+    assert "50%" not in values
+
+
+def test_marked_person_exact_value_allows_cjk_adjacency_during_validation() -> None:
+    source = lock_tokens("DESIGNER: Jane Doe")
+
+    assert validate_locked_tokens(source, "审核人Jane Doe确认") is True
+
+
+def test_longer_detected_percentage_overrides_shorter_source_number_occurrence() -> None:
+    source = lock_tokens("50")
+
+    assert validate_locked_tokens(source, "增长50%幅度") is False
+
+
 def test_do_not_translate_glossary_span_supersedes_overlapping_numeric_locks(tmp_path) -> None:
     glossary_path = tmp_path / "glossary.csv"
     glossary_path.write_text(
