@@ -51,6 +51,7 @@ def test_error_serialization_keeps_operational_details_and_redacts_credentials()
         {
             "item_id": "item-001",
             "page_index": 4,
+            "row_number": 7,
             "error_code": "pdf_invalid",
             "api_token": "do-not-leak",
             "description": "full source text is not an operational detail",
@@ -63,6 +64,7 @@ def test_error_serialization_keeps_operational_details_and_redacts_credentials()
         "details": {
             "item_id": "item-001",
             "page_index": 4,
+            "row_number": 7,
             "error_code": "pdf_invalid",
         },
     }

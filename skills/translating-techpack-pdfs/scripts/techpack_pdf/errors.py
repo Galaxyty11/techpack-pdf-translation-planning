@@ -16,6 +16,7 @@ _OPERATIONAL_DETAIL_KEYS = frozenset(
         "job_path",
         "page_index",
         "page_number",
+        "row_number",
         "status",
         "error_code",
     }
