@@ -66,3 +66,17 @@ def test_error_serialization_keeps_operational_details_and_redacts_credentials()
             "error_code": "pdf_invalid",
         },
     }
+
+
+def test_error_serialization_rejects_substring_matched_payload_keys():
+    error = TechpackError(
+        "pdf_invalid",
+        "Cannot open PDF",
+        {
+            "page_source_text": "confidential full text",
+            "path_payload": "confidential path payload",
+            "item_id": "item-001",
+        },
+    )
+
+    assert error.to_dict()["details"] == {"item_id": "item-001"}

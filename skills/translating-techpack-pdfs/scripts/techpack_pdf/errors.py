@@ -5,7 +5,21 @@ from typing import Any
 
 
 _SENSITIVE = ("key", "token", "secret", "credential")
-_OPERATIONAL = ("id", "path", "page", "status", "code")
+_OPERATIONAL_DETAIL_KEYS = frozenset(
+    {
+        "item_id",
+        "job_id",
+        "source_id",
+        "glossary_id",
+        "source_path",
+        "glossary_path",
+        "job_path",
+        "page_index",
+        "page_number",
+        "status",
+        "error_code",
+    }
+)
 
 
 class TechpackError(Exception):
@@ -30,5 +44,4 @@ class TechpackError(Exception):
 
     @staticmethod
     def _is_operational(key: object) -> bool:
-        normalized = str(key).casefold()
-        return any(marker in normalized for marker in _OPERATIONAL)
+        return str(key).casefold() in _OPERATIONAL_DETAIL_KEYS
