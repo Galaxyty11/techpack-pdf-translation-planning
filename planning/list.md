@@ -41,7 +41,7 @@ analyze <pdf-or-directory> --glossary <xlsx-or-csv> --job-dir <output-directory>
 概念调用：
 
 ```text
-apply <source.pdf> --review <review.json> --output <source.annotated.pdf>
+apply <source.pdf> --review <review.json> --job <job-manifest> --expected-output <trusted-output-snapshot>
 ```
 
 行为：
@@ -50,7 +50,7 @@ apply <source.pdf> --review <review.json> --output <source.annotated.pdf>
 2. 只载入 `approved` 或 `approved_edited` 项目。
 3. 计算最终放置位置并写入红色 FreeText。
 4. 执行几何、渲染和重叠闭环校验。
-5. 所有质量门通过后才把临时文件原子重命名为最终输出；失败时保留问题报告，不留下貌似成功的最终 PDF。
+5. 所有质量门通过后才以同目录原子 no-clobber 发布为 `<原文件完整文件名>.annotated.pdf`；失败时保留问题报告，不留下貌似成功的最终 PDF，已存在或竞态出现的同名输出绝不覆盖。
 
 ## 3. 输入约定
 
@@ -286,6 +286,8 @@ approved | approved_edited | skipped
 批准项以 `suggested_translation` 为最终译文，修改后批准项以 `reviewed_translation` 为最终译文；加载时必须重新验证锁定 token 的精确多重集/边界、普通术语的权威目标译法，以及 do-not-translate 命中的原文保留。DNT 校验独立于 `locked_tokens`：必须按可信 hit 的规范化区间/命中文本投影回源文精确子串，并要求最终译文保留完全相同的源文拼写和精确出现次数。
 
 `source.sha256`、`glossary.sha256`、页数、`schema_version`、JobManifest/候选集合绑定或上述确定性约束不匹配时，apply 阶段立即失败，不能提供“忽略并继续”选项。
+
+apply 写入接口固定为 `apply_review(source_pdf, review_path, job, expected_output) -> ApplyResult`。它必须在函数内部调用上述 `load_review(review_path, job, expected_output)`；调用方直接构造或传入普通 `ReviewDocument` 不能作为已经可信验证的证明。`source_pdf` 的解析绝对路径必须与 `job.source.path` 一致。全 skipped 的有效审核仍应发布经完整门禁验证、零新增批注的忠实副本。
 
 ## 7. FreeText 写入规范
 

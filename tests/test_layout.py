@@ -10,8 +10,11 @@ from techpack_pdf.layout import (
     Placement,
     ProtectedGeometry,
     detect_collisions,
+    detect_candidate_collisions,
     detect_rendered_collisions,
     find_same_row_blank_cells,
+    infer_semantic_region,
+    extract_protected_geometry,
     optimize_layout,
     rank_placements,
 )
@@ -162,7 +165,185 @@ def test_find_same_row_blank_cells_identifies_an_empty_placement_column(
     finally:
         document.close()
 
-    assert cells == [(121.0, 51.0, 229.0, 89.0)]
+    assert cells == [(122.0, 52.0, 228.0, 88.0)]
+
+
+def test_compound_table_grid_protects_strokes_without_consuming_cell_interiors(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "compound-grid.pdf"
+    document = pymupdf.open()
+    page = document.new_page(width=260, height=150)
+    shape = page.new_shape()
+    for x in (20, 120, 230):
+        shape.draw_line((x, 20), (x, 90))
+    for y in (20, 50, 90):
+        shape.draw_line((20, y), (230, y))
+    shape.finish(color=(0, 0, 0), width=0.8)
+    shape.commit()
+    page.insert_text((25, 40), "DESCRIPTION", fontsize=7)
+    page.insert_text((125, 40), "PLACEMENT", fontsize=7)
+    page.insert_text((25, 70), "NECK WIDTH", fontsize=7)
+    document.save(path)
+    document.close()
+
+    document = pymupdf.open(path)
+    try:
+        page = document[0]
+        source = page.search_for("NECK WIDTH")[0]
+        protected = extract_protected_geometry(page)
+        cells = find_same_row_blank_cells(page, source)
+        ranked = rank_placements(
+            _item(),
+            page.rect,
+            protected=protected,
+            same_row_cells=cells,
+            semantic_region=(20.0, 20.0, 230.0, 90.0),
+        )
+    finally:
+        document.close()
+
+    cell = next(value for value in ranked if value.strategy == "same_row_cell")
+    assert cell.collision_count == 0
+
+
+def test_bezier_drawing_protects_sampled_stroke_not_the_curve_bounding_box(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "curve.pdf"
+    document = pymupdf.open()
+    page = document.new_page(width=140, height=110)
+    shape = page.new_shape()
+    shape.draw_bezier((20, 80), (20, 20), (100, 20), (100, 80))
+    shape.finish(color=(0, 0, 0), width=0.8)
+    shape.commit()
+    document.save(path)
+    document.close()
+
+    document = pymupdf.open(path)
+    try:
+        protected = extract_protected_geometry(document[0])
+    finally:
+        document.close()
+
+    blank_inside_bbox = pymupdf.Rect(50, 65, 70, 75)
+    assert not any(
+        value.kind == "drawing"
+        and pymupdf.Rect(value.rect).intersects(blank_inside_bbox)
+        for value in protected
+    )
+
+
+def test_rank_placements_scans_past_near_obstacles_and_offers_multiple_margin_slots() -> None:
+    protected = [
+        ProtectedGeometry("text", (102.0, 48.0, 180.0, 90.0), "near-right"),
+        ProtectedGeometry("drawing", (35.0, 64.0, 130.0, 100.0), "near-below"),
+    ]
+
+    ranked = rank_placements(
+        _item(text="短译文"),
+        (0.0, 0.0, 320.0, 220.0),
+        protected=protected,
+        semantic_region=(20.0, 20.0, 260.0, 180.0),
+    )
+
+    assert any(
+        value.strategy == "same_region_right"
+        and value.collision_count == 0
+        and value.rect[0] > 180.0
+        for value in ranked
+    )
+    assert len([value for value in ranked if value.strategy == "margin_track"]) >= 3
+
+
+def test_infer_semantic_region_uses_the_containing_table_not_an_unrelated_region(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "two-regions.pdf"
+    document = pymupdf.open()
+    page = document.new_page(width=360, height=180)
+    for x0, x1 in ((20, 160), (200, 340)):
+        page.draw_rect(pymupdf.Rect(x0, 20, x1, 140), width=0.8)
+        page.draw_line((x0, 60), (x1, 60), width=0.8)
+    page.insert_text((30, 45), "LEFT TABLE", fontsize=8)
+    page.insert_text((30, 90), "NECK WIDTH", fontsize=8)
+    page.insert_text((210, 45), "UNRELATED", fontsize=8)
+    document.save(path)
+    document.close()
+
+    document = pymupdf.open(path)
+    try:
+        page = document[0]
+        region = infer_semantic_region(page, page.search_for("NECK WIDTH")[0])
+    finally:
+        document.close()
+
+    assert pymupdf.Rect(region).x1 < 190
+
+
+def test_new_annotation_clearance_rejects_half_point_and_accepts_exactly_one_point(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "new-clearance.pdf"
+    document = pymupdf.open()
+    document.new_page(width=240, height=180)
+    document.save(path)
+    document.close()
+    first = _placement("first", rect=(20.0, 20.0, 70.0, 40.0))
+    half = replace(first, item_id="p001-i002", rect=(70.5, 20.0, 120.5, 40.0))
+    exact = replace(first, item_id="p001-i003", rect=(71.0, 60.0, 121.0, 80.0))
+    exact_base = replace(first, item_id="p001-i004", rect=(20.0, 60.0, 70.0, 80.0))
+
+    document = pymupdf.open(path)
+    try:
+        collisions = detect_collisions(
+            document[0], [first, half, exact_base, exact], render_check=False
+        )
+    finally:
+        document.close()
+
+    assert any(
+        value.kind == "new_annotation_clearance" and value.item_id == half.item_id
+        for value in collisions
+    )
+    assert not any(
+        value.kind == "new_annotation_clearance"
+        and value.item_id in {exact.item_id, exact_base.item_id}
+        for value in collisions
+    )
+
+
+def test_margin_leader_starts_outside_source_clearance_and_distant_collinear_line_is_safe(
+    tmp_path: Path,
+) -> None:
+    margin = next(
+        value
+        for value in rank_placements(_item(), (0.0, 0.0, 300.0, 220.0))
+        if value.strategy == "margin_track"
+    )
+    assert margin.leader_line is not None
+    assert margin.leader_line[0][0] > _item().source_bbox[2] + 1.0
+
+    path = tmp_path / "leader.pdf"
+    document = pymupdf.open()
+    document.new_page(width=260, height=160)
+    document.save(path)
+    document.close()
+    distant = replace(
+        _placement("leader", rect=(180.0, 40.0, 230.0, 65.0)),
+        leader_line=((100.0, 10.0), (200.0, 10.0)),
+    )
+    protected = [ProtectedGeometry("drawing", (10.0, 9.5, 20.0, 10.5), "distant")]
+
+    document = pymupdf.open(path)
+    try:
+        collisions = detect_collisions(
+            document[0], [distant], protected=protected, render_check=False
+        )
+    finally:
+        document.close()
+
+    assert not any(value.kind == "leader_through_content" for value in collisions)
 
 
 def test_detect_collisions_protects_glyphs_drawings_and_rechecks_at_300_dpi(
@@ -313,6 +494,34 @@ def test_detect_rendered_collisions_diffs_the_real_before_and_after_pages_at_300
     )
 
 
+def test_candidate_collision_gate_renders_current_freetext_on_an_in_memory_copy(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "candidate-render.pdf"
+    document = pymupdf.open()
+    page = document.new_page(width=240, height=180)
+    page.insert_text((40, 60), "SOURCE TEXT", fontsize=10)
+    document.save(path)
+    document.close()
+    placement = _placement(
+        "actual-over-source",
+        rect=(35.0, 48.0, 115.0, 68.0),
+        source_distance=0.0,
+        movement_distance=0.0,
+    )
+
+    document = pymupdf.open(path)
+    try:
+        collisions = detect_candidate_collisions(document[0], [placement])
+    finally:
+        document.close()
+
+    assert any(
+        value.kind == "render_overlap" and value.render_dpi == 300
+        for value in collisions
+    )
+
+
 def test_optimize_layout_stops_after_two_unchanged_rounds_and_caps_at_ten() -> None:
     initial = [_placement("a")]
     unresolved = [Collision(0, "p001-i001", "protected_text", "glyph-1")]
@@ -331,11 +540,21 @@ def test_optimize_layout_stops_after_two_unchanged_rounds_and_caps_at_ten() -> N
         shift = 1.0 if x0 == 110.0 else -1.0
         return [replace(placement, rect=(x0 + shift, y0, x1 + shift, y1))]
 
+    render_unresolved = [
+        Collision(
+            0,
+            "p001-i001",
+            "render_overlap",
+            "original_render",
+            intersecting_pixels=9,
+            render_dpi=300,
+        )
+    ]
     capped = optimize_layout(
         initial,
-        collision_detector=lambda _placements: unresolved,
+        collision_detector=lambda _placements: render_unresolved,
         candidate_provider=alternate,
     )
     assert capped.rounds == 10
     assert capped.stable is False
-    assert capped.collisions == tuple(unresolved)
+    assert capped.collisions == tuple(render_unresolved)

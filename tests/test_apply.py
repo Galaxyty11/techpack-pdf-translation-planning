@@ -2,14 +2,23 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pymupdf
 import pytest
 
+import techpack_pdf.apply as apply_module
 from techpack_pdf.apply import apply_review
-from techpack_pdf.models import FileArtifact, PipelineInfo, ReviewDocument, ReviewItem
+from techpack_pdf.models import (
+    FileArtifact,
+    JobManifest,
+    PipelineInfo,
+    ReviewDocument,
+    ReviewItem,
+    ReviewStatus,
+)
 
 
 def _sha256(path: Path) -> str:
@@ -113,6 +122,59 @@ def _review(source: Path, *, include_skipped: bool = True, secret: str = "SOURCE
     )
 
 
+def _review_bundle(
+    tmp_path: Path,
+    source: Path,
+    *,
+    include_skipped: bool = True,
+    secret: str = "SOURCE",
+    statuses: tuple[str, ...] | None = None,
+) -> tuple[Path, JobManifest, dict]:
+    glossary = tmp_path / f"{source.stem}-glossary.csv"
+    glossary.write_text("source_term,target_term\nshell,大身\n", encoding="utf-8")
+    review = _review(source, include_skipped=include_skipped, secret=secret)
+    if statuses is not None:
+        replacements = []
+        for item, status in zip(review.items, statuses, strict=True):
+            replacements.append(
+                item.model_copy(
+                    update={
+                        "review_status": ReviewStatus(status),
+                        "reviewed_translation": (
+                            item.suggested_translation
+                            if status == "approved_edited"
+                            else None
+                        ),
+                    }
+                )
+            )
+        review = review.model_copy(update={"items": replacements})
+    job = JobManifest(
+        job_id=review.job_id,
+        source=review.source.model_copy(update={"path": source}),
+        glossary=FileArtifact(
+            filename=glossary.name,
+            sha256=_sha256(glossary),
+            path=glossary,
+        ),
+        job_dir=tmp_path / f"{source.stem}-job",
+        created_at=datetime(2026, 8, 22, tzinfo=timezone.utc),
+    )
+    review = review.model_copy(update={"glossary": job.glossary})
+    payload = review.model_dump(mode="json")
+    expected_output = {
+        "pipeline": deepcopy(payload["pipeline"]),
+        "items": deepcopy(payload["items"]),
+        "blocking_issues": deepcopy(payload["blocking_issues"]),
+    }
+    for item in expected_output["items"]:
+        item["review_status"] = None
+        item["reviewed_translation"] = None
+    review_path = tmp_path / f"{source.stem}-review.json"
+    review_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return review_path, job, expected_output
+
+
 def _review_item(
     item_id: str,
     source_text: str,
@@ -186,7 +248,8 @@ def test_apply_review_preserves_source_and_adds_only_three_editable_red_freetext
     _make_source(source)
     before = _snapshot(source)
 
-    result = apply_review(source, _review(source))
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    result = apply_review(source, review_path, job, expected_output)
 
     expected = tmp_path / "source.pdf.annotated.pdf"
     assert result.success is True
@@ -245,7 +308,10 @@ def test_apply_review_unresolved_layout_returns_safe_problem_and_leaves_no_outpu
     _make_source(source, blocked=True)
     private_text = "PRIVATE-CUSTOMER-MEASUREMENTS-DO-NOT-LOG"
 
-    result = apply_review(source, _review(source, secret=private_text))
+    review_path, job, expected_output = _review_bundle(
+        tmp_path, source, secret=private_text
+    )
+    result = apply_review(source, review_path, job, expected_output)
 
     assert result.success is False
     assert result.output_path is None
@@ -263,6 +329,11 @@ def test_apply_review_unresolved_layout_returns_safe_problem_and_leaves_no_outpu
         "attempted_placements",
         "final_render_reference",
     } <= set(overlap)
+    assert Path(overlap["final_render_reference"]).is_file()
+    assert Path(overlap["final_render_reference"]).suffix == ".png"
+    assert result.failure_report_path is not None
+    report = json.loads(result.failure_report_path.read_text(encoding="utf-8"))
+    assert private_text not in json.dumps(report, ensure_ascii=False)
 
 
 def test_apply_review_does_not_overwrite_an_existing_final_file(tmp_path: Path) -> None:
@@ -271,7 +342,8 @@ def test_apply_review_does_not_overwrite_an_existing_final_file(tmp_path: Path) 
     final = tmp_path / "already.pdf.annotated.pdf"
     final.write_bytes(b"existing-result")
 
-    result = apply_review(source, _review(source))
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    result = apply_review(source, review_path, job, expected_output)
 
     assert result.success is False
     assert final.read_bytes() == b"existing-result"
@@ -281,13 +353,274 @@ def test_apply_review_does_not_overwrite_an_existing_final_file(tmp_path: Path) 
 def test_apply_review_rejects_stale_source_without_leaking_review_text(tmp_path: Path) -> None:
     source = tmp_path / "stale.pdf"
     _make_source(source)
-    review = _review(source, secret="PRIVATE-STYLE-INSTRUCTION")
+    review_path, job, expected_output = _review_bundle(
+        tmp_path, source, secret="PRIVATE-STYLE-INSTRUCTION"
+    )
     with source.open("ab") as stream:
         stream.write(b"\n% changed after validation")
 
-    result = apply_review(source, review)
+    result = apply_review(source, review_path, job, expected_output)
 
     assert result.success is False
-    assert result.problems[0]["code"] == "source_mismatch"
+    assert result.problems[0]["code"] == "review_validation_failed"
     assert "PRIVATE-STYLE-INSTRUCTION" not in json.dumps(result.to_dict())
     assert not (tmp_path / "stale.pdf.annotated.pdf").exists()
+
+
+def test_apply_review_requires_task7_load_review_trust_boundary(tmp_path: Path) -> None:
+    source = tmp_path / "trust.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    constructed = ReviewDocument.model_validate(
+        json.loads(review_path.read_text(encoding="utf-8"))
+    )
+
+    result = apply_review(source, constructed, job, expected_output)
+
+    assert result.success is False
+    assert result.problems[0]["code"] == "review_validation_failed"
+    assert not (tmp_path / "trust.pdf.annotated.pdf").exists()
+
+
+@pytest.mark.parametrize("tamper", ["item", "status", "glossary", "job"])
+def test_apply_review_blocks_tampered_review_job_and_glossary_bindings(
+    tmp_path: Path, tamper: str
+) -> None:
+    source = tmp_path / f"tampered-{tamper}.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    if tamper in {"item", "status"}:
+        payload = json.loads(review_path.read_text(encoding="utf-8"))
+        if tamper == "item":
+            payload["items"][0]["source_text"] = "PRIVATE TAMPERED TEXT"
+        else:
+            payload["items"][0]["review_status"] = None
+        review_path.write_text(json.dumps(payload), encoding="utf-8")
+    elif tamper == "glossary":
+        Path(job.glossary.path).write_text("changed", encoding="utf-8")
+    else:
+        job = job.model_copy(update={"job_id": "different-job"})
+
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is False
+    assert result.problems[0]["code"] == "review_validation_failed"
+    assert "PRIVATE TAMPERED TEXT" not in json.dumps(result.to_dict())
+    assert not source.with_name(source.name + ".annotated.pdf").exists()
+
+
+def test_apply_review_rejects_source_argument_different_from_bound_job_path(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "bound.pdf"
+    other = tmp_path / "same-bytes.pdf"
+    _make_source(source)
+    other.write_bytes(source.read_bytes())
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+
+    result = apply_review(other, review_path, job, expected_output)
+
+    assert result.success is False
+    assert result.problems[0]["code"] == "source_job_mismatch"
+    assert not other.with_name(other.name + ".annotated.pdf").exists()
+
+
+def test_apply_review_all_skipped_publishes_verified_faithful_copy(tmp_path: Path) -> None:
+    source = tmp_path / "all-skipped.pdf"
+    _make_source(source)
+    before = _snapshot(source)
+    review_path, job, expected_output = _review_bundle(
+        tmp_path,
+        source,
+        include_skipped=False,
+        statuses=("skipped", "skipped", "skipped"),
+    )
+
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is True
+    assert result.output_path == tmp_path / "all-skipped.pdf.annotated.pdf"
+    assert _snapshot(result.output_path) == before
+
+
+def test_apply_review_atomic_publish_does_not_clobber_a_racing_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "race.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    final = source.with_name(source.name + ".annotated.pdf")
+
+    def racing_link(_source, target):
+        Path(target).write_bytes(b"racing-writer")
+        raise FileExistsError("racing target")
+
+    monkeypatch.setattr(apply_module.os, "link", racing_link)
+
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is False
+    assert result.problems[0]["code"] == "output_exists"
+    assert final.read_bytes() == b"racing-writer"
+    assert not list(tmp_path.glob(".race.pdf.*.tmp.pdf"))
+
+
+def test_apply_review_reports_failed_exact_temp_cleanup_without_deleting_other_files(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "cleanup.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    unrelated = tmp_path / "keep-me.tmp.pdf"
+    unrelated.write_bytes(b"unrelated")
+    real_unlink = Path.unlink
+
+    def failed_link(_source, _target):
+        raise OSError("publish unavailable")
+
+    def guarded_unlink(path, *args, **kwargs):
+        if path.name.startswith(".cleanup.pdf.") and path.name.endswith(".tmp.pdf"):
+            raise PermissionError("locked temp")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(apply_module.os, "link", failed_link)
+    monkeypatch.setattr(Path, "unlink", guarded_unlink)
+
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is False
+    assert result.problems[0]["code"] == "temp_cleanup_failed"
+    assert unrelated.read_bytes() == b"unrelated"
+    retained = list(tmp_path.glob(".cleanup.pdf.*.tmp.pdf"))
+    assert len(retained) == 1
+    assert result.problems[0]["details"]["temp_path"] == str(retained[0])
+
+
+def test_successful_link_with_failed_temp_unlink_rolls_back_only_its_final_name(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "post-link-cleanup.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    final = source.with_name(source.name + ".annotated.pdf")
+    real_unlink = Path.unlink
+
+    def fail_temp_only(path, *args, **kwargs):
+        if path.name.startswith(".post-link-cleanup.pdf.") and path.name.endswith(
+            ".tmp.pdf"
+        ):
+            raise PermissionError("locked temp")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_temp_only)
+
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is False
+    assert result.problems[0]["code"] == "temp_cleanup_failed"
+    assert not final.exists()
+    assert len(list(tmp_path.glob(".post-link-cleanup.pdf.*.tmp.pdf"))) == 1
+
+
+def test_apply_review_detects_preexisting_annotation_object_or_appearance_mutation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "old-annotation.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    real_write = apply_module._write_annotations
+
+    def mutate_old_annotation(document, placements):
+        real_write(document, placements)
+        page = document[0]
+        old = next(
+            annotation
+            for annotation in page.annots()
+            if annotation.info.get("title") == "legacy-review"
+        )
+        old.set_opacity(0.35)
+        old.update()
+
+    monkeypatch.setattr(apply_module, "_write_annotations", mutate_old_annotation)
+
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is False
+    assert result.problems[0]["code"] == "verification_failed"
+    assert not source.with_name(source.name + ".annotated.pdf").exists()
+
+
+def test_layout_reflows_a_render_only_collision_inside_the_bounded_search(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "render-reflow.pdf"
+    _make_source(source)
+    review = _review(source, include_skipped=False)
+    approved = tuple(review.items)
+    first_signature = None
+
+    def render_gate(page, placements):
+        nonlocal first_signature
+        signature = tuple((value.item_id, value.rect) for value in placements)
+        if first_signature is None:
+            first_signature = signature
+        if signature == first_signature:
+            return [
+                apply_module.Collision(
+                    page.number,
+                    placements[0].item_id,
+                    "render_overlap",
+                    "original_render",
+                    9,
+                    300,
+                )
+            ]
+        return []
+
+    monkeypatch.setattr(apply_module, "detect_candidate_collisions", render_gate)
+    document = pymupdf.open(source)
+    try:
+        layout, _attempted = apply_module._layout_document(document, approved)
+    finally:
+        document.close()
+
+    assert layout.collisions == ()
+    assert layout.rounds <= 10
+    assert tuple((value.item_id, value.rect) for value in layout.placements) != first_signature
+
+
+def test_final_real_render_collision_is_fed_back_into_the_shared_ten_round_budget(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "final-render-reflow.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    real_verify = apply_module._verify_temp
+    calls = 0
+
+    def collide_once(source_path, temp, baseline, placements, modified_pages):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return apply_module._VerificationOutcome(
+                None,
+                (
+                    apply_module.Collision(
+                        placements[0].page_index,
+                        placements[0].item_id,
+                        "render_overlap",
+                        "original_render",
+                        9,
+                        300,
+                    ),
+                ),
+            )
+        return real_verify(source_path, temp, baseline, placements, modified_pages)
+
+    monkeypatch.setattr(apply_module, "_verify_temp", collide_once)
+
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is True
+    assert calls == 2
+    assert result.layout_rounds <= 10

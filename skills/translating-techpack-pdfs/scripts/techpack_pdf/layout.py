@@ -141,11 +141,7 @@ def extract_protected_geometry(page: pymupdf.Page) -> tuple[ProtectedGeometry, .
         if _nonempty(bbox):
             protected.append(ProtectedGeometry("image", _tuple(bbox), f"image-{index}"))
     for index, drawing in enumerate(page.get_drawings()):
-        bbox = _minimum_visible_rect(pymupdf.Rect(drawing["rect"]))
-        if _nonempty(bbox):
-            protected.append(
-                ProtectedGeometry("drawing", _tuple(bbox), f"drawing-{index}", True)
-            )
+        protected.extend(_drawing_geometries(drawing, index))
     for annotation in page.annots():
         bbox = pymupdf.Rect(annotation.rect)
         if _nonempty(bbox):
@@ -155,6 +151,38 @@ def extract_protected_geometry(page: pymupdf.Page) -> tuple[ProtectedGeometry, .
                 )
             )
     return tuple(protected)
+
+
+def infer_semantic_region(
+    page: pymupdf.Page,
+    source_bbox: pymupdf.Rect | Sequence[float],
+) -> RectTuple:
+    """Infer the smallest native table or text-block region containing the source."""
+    source = pymupdf.Rect(source_bbox)
+    center = pymupdf.Point(
+        (source.x0 + source.x1) / 2.0, (source.y0 + source.y1) / 2.0
+    )
+    table_regions: list[pymupdf.Rect] = []
+    try:
+        for table in page.find_tables().tables:
+            region = pymupdf.Rect(table.bbox)
+            if region.contains(center):
+                table_regions.append(region)
+    except (AttributeError, RuntimeError, ValueError):
+        pass
+    if table_regions:
+        return _tuple(min(table_regions, key=lambda rect: rect.get_area()))
+
+    blocks = []
+    for block in page.get_text("blocks"):
+        region = pymupdf.Rect(block[:4])
+        if region.contains(center) or _overlaps(region, source):
+            blocks.append(region)
+    if blocks:
+        block = min(blocks, key=lambda rect: rect.get_area())
+        expanded = _expand(block, 18.0) & page.rect
+        return _tuple(expanded)
+    return _tuple(page.rect)
 
 
 def find_same_row_blank_cells(
@@ -195,11 +223,12 @@ def find_same_row_blank_cells(
                 if str(value or "").strip():
                     continue
                 cell = pymupdf.Rect(row_cells[column])
+                inset_amount = MIN_CLEARANCE_PT + 1.0
                 inset = pymupdf.Rect(
-                    cell.x0 + MIN_CLEARANCE_PT,
-                    cell.y0 + MIN_CLEARANCE_PT,
-                    cell.x1 - MIN_CLEARANCE_PT,
-                    cell.y1 - MIN_CLEARANCE_PT,
+                    cell.x0 + inset_amount,
+                    cell.y0 + inset_amount,
+                    cell.x1 - inset_amount,
+                    cell.y1 - inset_amount,
                 )
                 if _nonempty(inset):
                     candidate = _tuple(inset)
@@ -282,11 +311,34 @@ def detect_collisions(
                         ),
                     )
                 )
+            elif _overlaps(
+                _expand(pymupdf.Rect(first.rect), MIN_CLEARANCE_PT),
+                pymupdf.Rect(second.rect),
+            ):
+                collisions.extend(
+                    (
+                        Collision(
+                            page.number,
+                            first.item_id,
+                            "new_annotation_clearance",
+                            second.item_id,
+                        ),
+                        Collision(
+                            page.number,
+                            second.item_id,
+                            "new_annotation_clearance",
+                            first.item_id,
+                        ),
+                    )
+                )
             for owner, line, other in (
                 (first, first.leader_line, second),
                 (second, second.leader_line, first),
             ):
-                if line and _polyline_hits_rect(line, pymupdf.Rect(other.rect)):
+                if line and _polyline_hits_rect(
+                    line,
+                    _expand(pymupdf.Rect(other.rect), MIN_CLEARANCE_PT),
+                ):
                     collisions.append(
                         Collision(
                             page.number,
@@ -355,6 +407,39 @@ def detect_rendered_collisions(
             )
             for placement in placements
         )
+    return _deduplicate_collisions(collisions)
+
+
+def detect_candidate_collisions(
+    page: pymupdf.Page,
+    placements: Sequence[Placement],
+) -> list[Collision]:
+    """Run geometry plus true before/after rendering for a candidate page layout."""
+    collisions = detect_collisions(page, placements, render_check=False)
+    if not placements:
+        return collisions
+    rendered = pymupdf.open()
+    try:
+        rendered.insert_pdf(
+            page.parent, from_page=page.number, to_page=page.number, annots=True
+        )
+        target = rendered[0]
+        for placement in placements:
+            annotation = target.add_freetext_annot(
+                placement.rect,
+                placement.text,
+                fontsize=placement.font_size,
+                fontname=TOOL_CJK_FONT,
+                text_color=TEXT_COLOR,
+                fill_color=None,
+                border_color=None,
+                border_width=0,
+                callout=placement.leader_line,
+            )
+            annotation.update()
+        collisions.extend(detect_rendered_collisions(page, target, placements))
+    finally:
+        rendered.close()
     return _deduplicate_collisions(collisions)
 
 
@@ -483,20 +568,76 @@ def _generate_candidates(
                 )
             )
 
+        step_x = max(base_width * 0.55, 28.0)
+        step_y = max(height * 0.9, 14.0)
+        for step in range(1, 5):
+            offsets = (
+                ("same_region_above", 0.0, -step * step_y),
+                ("same_region_below", 0.0, step * step_y),
+                ("same_region_right", step * step_x, 0.0),
+                ("same_region_left", -step * step_x, 0.0),
+            )
+            for direction, dx, dy in offsets:
+                base = dict(positions)[direction]
+                shifted = pymupdf.Rect(base.x0 + dx, base.y0 + dy, base.x1 + dx, base.y1 + dy)
+                raw.append((direction, shifted, font_size, True, None))
+                for suffix, factor in (("wide_wrap", 1.35), ("narrow_wrap", 0.75)):
+                    width = max(48.0, min(base_width * factor, semantic_region.width))
+                    lines = wrap_text(text, width, font_size)
+                    variant_height = max(
+                        font_size * 1.35 * max(len(lines), 1) + 3.0,
+                        font_size + 4.0,
+                    )
+                    variant = pymupdf.Rect(
+                        shifted.x0,
+                        shifted.y0,
+                        shifted.x0 + width,
+                        shifted.y0 + variant_height,
+                    )
+                    raw.append(
+                        (
+                            f"{direction}_{suffix}",
+                            variant,
+                            font_size,
+                            True,
+                            None,
+                        )
+                    )
+
     margin_width = min(92.0, max(60.0, page_rect.width * 0.25))
     margin_font = 5.0
     margin_lines = wrap_text(text, margin_width - 6.0, margin_font)
     margin_height = max(margin_font * 1.35 * max(len(margin_lines), 1) + 4.0, 14.0)
-    margin_y = min(max(page_rect.y0 + 4.0, source.y0), page_rect.y1 - margin_height - 4.0)
-    margin = pymupdf.Rect(
-        page_rect.x1 - margin_width - 4.0,
-        margin_y,
-        page_rect.x1 - 4.0,
-        margin_y + margin_height,
-    )
-    source_anchor = (source.x1 + 1.0, source.y0 + source.height / 2.0)
-    margin_anchor = (margin.x0, margin.y0 + margin.height / 2.0)
-    raw.append(("margin_track", margin, margin_font, False, (source_anchor, margin_anchor)))
+    source_y = source.y0 + source.height / 2.0
+    margin_ys = {
+        min(max(page_rect.y0 + 4.0, value), page_rect.y1 - margin_height - 4.0)
+        for value in (
+            source.y0,
+            page_rect.y0 + 4.0,
+            page_rect.y1 - margin_height - 4.0,
+            source.y0 - margin_height - 6.0,
+            source.y1 + 6.0,
+        )
+    }
+    for margin_y in sorted(margin_ys, key=lambda value: (abs(value - source.y0), value)):
+        margin = pymupdf.Rect(
+            page_rect.x1 - margin_width - 4.0,
+            margin_y,
+            page_rect.x1 - 4.0,
+            margin_y + margin_height,
+        )
+        source_anchor = (source.x1 + MIN_CLEARANCE_PT + 0.01, source_y)
+        margin_anchor = (margin.x0, margin.y0 + margin.height / 2.0)
+        elbow = (margin.x0 - 4.0, source_y)
+        raw.append(
+            (
+                "margin_track",
+                margin,
+                margin_font,
+                False,
+                (source_anchor, elbow, margin_anchor),
+            )
+        )
 
     placements: list[Placement] = []
     for strategy, rect, font_size, intended_same_region, leader in raw:
@@ -533,8 +674,6 @@ def _placement_sort_key(placement: Placement) -> tuple[object, ...]:
     valid = placement.collision_count == 0 and placement.in_bounds
     return (
         not valid,
-        not placement.in_bounds,
-        placement.collision_count,
         not placement.same_semantic_region,
         placement.leader_line is not None,
         round(placement.source_distance, 6),
@@ -716,6 +855,98 @@ def _minimum_visible_rect(rect: pymupdf.Rect) -> pymupdf.Rect:
     return result
 
 
+def _drawing_geometries(
+    drawing: dict[str, object], drawing_index: int
+) -> list[ProtectedGeometry]:
+    geometries: list[ProtectedGeometry] = []
+    stroke_width = max(float(drawing.get("width") or 0.0), 0.1)
+    half = stroke_width / 2.0
+    if drawing.get("fill") is not None:
+        fill_rect = pymupdf.Rect(drawing["rect"])
+        if _nonempty(fill_rect):
+            geometries.append(
+                ProtectedGeometry(
+                    "drawing", _tuple(fill_rect), f"drawing-{drawing_index}-fill", True
+                )
+            )
+    for item_index, item in enumerate(drawing.get("items", ())):
+        operator = item[0]
+        rects: list[pymupdf.Rect] = []
+        if operator == "l":
+            rects.append(_points_rect(item[1:3], half))
+        elif operator == "re":
+            rectangle = pymupdf.Rect(item[1])
+            rects.extend(
+                (
+                    pymupdf.Rect(rectangle.x0 - half, rectangle.y0 - half, rectangle.x1 + half, rectangle.y0 + half),
+                    pymupdf.Rect(rectangle.x0 - half, rectangle.y1 - half, rectangle.x1 + half, rectangle.y1 + half),
+                    pymupdf.Rect(rectangle.x0 - half, rectangle.y0, rectangle.x0 + half, rectangle.y1),
+                    pymupdf.Rect(rectangle.x1 - half, rectangle.y0, rectangle.x1 + half, rectangle.y1),
+                )
+            )
+        elif operator == "c":
+            curve = [value for value in item[1:] if isinstance(value, pymupdf.Point)]
+            if len(curve) == 4:
+                sampled = [_cubic_point(*curve, step / 16.0) for step in range(17)]
+                rects.extend(
+                    _points_rect((start, end), half)
+                    for start, end in zip(sampled, sampled[1:])
+                )
+        elif operator == "qu" and isinstance(item[1], pymupdf.Quad):
+            quad = item[1]
+            rects.extend(
+                _points_rect(edge, half)
+                for edge in (
+                    (quad.ul, quad.ur),
+                    (quad.ur, quad.lr),
+                    (quad.lr, quad.ll),
+                    (quad.ll, quad.ul),
+                )
+            )
+        for part_index, rect in enumerate(rects):
+            if _nonempty(rect):
+                geometries.append(
+                    ProtectedGeometry(
+                        "drawing",
+                        _tuple(rect),
+                        f"drawing-{drawing_index}-{item_index}-{part_index}",
+                        True,
+                    )
+                )
+    return geometries
+
+
+def _points_rect(points: Sequence[pymupdf.Point], padding: float) -> pymupdf.Rect:
+    xs = [point.x for point in points]
+    ys = [point.y for point in points]
+    return pymupdf.Rect(
+        min(xs) - padding,
+        min(ys) - padding,
+        max(xs) + padding,
+        max(ys) + padding,
+    )
+
+
+def _cubic_point(
+    p0: pymupdf.Point,
+    p1: pymupdf.Point,
+    p2: pymupdf.Point,
+    p3: pymupdf.Point,
+    t: float,
+) -> pymupdf.Point:
+    inverse = 1.0 - t
+    return pymupdf.Point(
+        inverse**3 * p0.x
+        + 3 * inverse**2 * t * p1.x
+        + 3 * inverse * t**2 * p2.x
+        + t**3 * p3.x,
+        inverse**3 * p0.y
+        + 3 * inverse**2 * t * p1.y
+        + 3 * inverse * t**2 * p2.y
+        + t**3 * p3.y,
+    )
+
+
 def _polyline_hits_rect(points: Sequence[PointTuple], rect: pymupdf.Rect) -> bool:
     if len(points) < 2:
         return False
@@ -741,9 +972,22 @@ def _segments_intersect(a: PointTuple, b: PointTuple, c: PointTuple, d: PointTup
     def orientation(p: PointTuple, q: PointTuple, r: PointTuple) -> float:
         return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
 
+    def on_segment(p: PointTuple, q: PointTuple, r: PointTuple) -> bool:
+        return (
+            min(p[0], r[0]) - 1e-9 <= q[0] <= max(p[0], r[0]) + 1e-9
+            and min(p[1], r[1]) - 1e-9 <= q[1] <= max(p[1], r[1]) + 1e-9
+        )
+
     o1, o2 = orientation(a, b, c), orientation(a, b, d)
     o3, o4 = orientation(c, d, a), orientation(c, d, b)
-    return o1 * o2 <= 0 and o3 * o4 <= 0
+    if (o1 > 0 > o2 or o2 > 0 > o1) and (o3 > 0 > o4 or o4 > 0 > o3):
+        return True
+    return (
+        (abs(o1) <= 1e-9 and on_segment(a, c, b))
+        or (abs(o2) <= 1e-9 and on_segment(a, d, b))
+        or (abs(o3) <= 1e-9 and on_segment(c, a, d))
+        or (abs(o4) <= 1e-9 and on_segment(c, b, d))
+    )
 
 
 def _expand(rect: pymupdf.Rect, amount: float) -> pymupdf.Rect:
@@ -792,9 +1036,11 @@ __all__ = [
     "ProtectedGeometry",
     "TEXT_COLOR",
     "detect_collisions",
+    "detect_candidate_collisions",
     "detect_rendered_collisions",
     "extract_protected_geometry",
     "find_same_row_blank_cells",
+    "infer_semantic_region",
     "optimize_layout",
     "rank_placements",
     "wrap_text",

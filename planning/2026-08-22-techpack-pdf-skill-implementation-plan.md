@@ -388,8 +388,8 @@ git commit -m "feat: add offline TechPack translation review"
 - Test: “tests/test_apply.py”
 
 **Interfaces:**
-- Consumes: source.pdf、已验证 ReviewDocument。
-- Produces: rank_placements(...) -> list[Placement]；detect_collisions(...) -> list[Collision]；apply_review(...) -> ApplyResult。
+- Consumes: source.pdf、review.json 路径、带输入路径的 JobManifest、生成审核页时使用的可信 expected_output 快照；apply 内部必须调用 Task 7 `load_review(...)`，普通 ReviewDocument 不能绕过绑定验证。
+- Produces: rank_placements(...) -> list[Placement]；detect_collisions(...) -> list[Collision]；`apply_review(source_pdf, review_path, job, expected_output) -> ApplyResult`。
 
 - [ ] **Step 1: 写几何和 PDF 失败测试**
 
@@ -405,13 +405,13 @@ apply 测试断言页数与 boxes 不变、原文本提取值不变、现有批�
 
 - [ ] **Step 3: 实现几何与渲染检测**
 
-几何保护集合包含原文字形、图片、绘图、旧/新批注和 CropBox 外部，最小间距 1 pt。200 DPI 前后渲染产生新增红色掩膜，原内容和其他新增批注使用 OpenCV 膨胀 2 像素；交集超过 4 像素为碰撞，潜在冲突页用 300 DPI 复检。
+几何保护集合包含原文字形、图片、按实际描边/填充分解的绘图、旧/新批注和 CropBox 外部，最小间距 1 pt。200 DPI 前后渲染产生新增红色掩膜，原内容和其他新增批注使用 OpenCV 膨胀 2 像素；交集超过 4 像素为碰撞，潜在冲突页用 300 DPI 复检。实际候选 FreeText 必须写入内存副本并在每次移动后的全页重排循环中执行该渲染门禁。
 
 全局重排最多 10 轮，布局签名连续两轮相同即停止。仍碰撞、裁字、越界或引线穿字时写 unresolved_overlap 报告并返回失败。
 
 - [ ] **Step 4: 实现安全写入**
 
-复制源文件到同目录唯一临时名，使用 PyMuPDF FreeText 注释 API 写入，无填充、无可见边框、红色文字。全部门禁通过后关闭并重新打开临时 PDF、重新渲染所有修改页，再用 Path.replace 原子发布为 “source.annotated.pdf”；任一失败删除临时文件并保留 JSON 问题报告。
+apply 内部先调用 Task 7 `load_review` 完成 review/job/trusted-output/source/glossary 全绑定验证。复制源文件到同目录唯一临时名，使用 PyMuPDF FreeText 注释 API 写入，无填充、无可见边框、红色文字。全部门禁通过后关闭并重新打开临时 PDF、重新渲染所有修改页，再以同目录原子 no-clobber 操作发布为 `<原文件完整文件名>.annotated.pdf`；任一失败只清理精确临时文件并保留 JSON/300-DPI 问题证据，清理失败必须显式返回。
 
 - [ ] **Step 5: 运行测试**
 
