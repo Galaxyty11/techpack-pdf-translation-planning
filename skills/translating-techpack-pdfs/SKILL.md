@@ -5,30 +5,30 @@ description: Use when an English apparel TechPack PDF needs reviewed Chinese pro
 
 # Translating TechPack PDFs
 
-Set `SKILL_DIR` to this `SKILL.md`'s absolute directory and `PY311` to the configured Python 3.11 interpreter's absolute path. Stop if missing; never use unqualified `python` or a cwd-relative CLI.
+Set absolute `SKILL_DIR` to this file's directory and absolute `PY311` to configured Python 3.11. Stop if missing; never use unqualified `python` or cwd-relative CLI.
 
-Confirm input, required XLSX/CSV glossary, and job directory. Read [the translation policy](references/translation-policy.md), then run:
+Confirm input/glossary/job paths. Read [the translation policy](references/translation-policy.md), then run:
 
 ```text
 "<PY311>" "<SKILL_DIR>/scripts/techpack_pdf_cli.py" analyze "<absolute-input>" --glossary "<absolute-glossary>" --job-dir "<absolute-job-root>"
 ```
 
-For `classification-request.json`, read [the Agent contract](references/agent-contract.md). The visual Host Agent or read-only sub-agent saves bound `classification-response.json`; then run:
+For `classification-request.json`, read [the Agent contract](references/agent-contract.md). The visual Host Agent classifies or validates strict JSON returned by a read-only sub-agent, then saves bound `classification-response.json` and runs:
 
 ```text
 "<PY311>" "<SKILL_DIR>/scripts/techpack_pdf_cli.py" prepare-review --job "<absolute-job>"
 ```
 
-If classification stays `parsed`, stop; do not skip unknown pages. For `translation-request.json`, the Host Agent or read-only sub-agent saves strict `translation-response.json`; rerun `prepare-review`.
+If still `parsed`, stop; never skip unknown pages. For `translation-request.json`, the Host translates or validates strict JSON returned by a read-only sub-agent, saves `translation-response.json`, then reruns `prepare-review`.
 
-The user reviews every item in `review.html` and exports `review.json`. Do not apply before it exists.
+Stop and require the user to explicitly approve, edit-and-approve, or skip every item in `review.html`, then export `review.json`. Do not apply before it exists.
 
-After review, read [the review and apply gates](references/review-and-apply.md), then run:
+Read [the review and apply gates](references/review-and-apply.md), then run:
 
 ```text
 "<PY311>" "<SKILL_DIR>/scripts/techpack_pdf_cli.py" apply "<absolute-source.pdf>" --review "<absolute-job>/review.json" --output "<absolute-source.pdf>.annotated.pdf"
 ```
 
-Translate selected production content only. Preserve locked tokens and order; never convert units or numbers. Deliver approved red editable FreeText annotations, never a full-document translation.
+Translate only selected production content. Preserve locked-token order; never convert units or numbers. Deliver approved red editable FreeText annotations, never a full-document translation.
 
-On failure, stop, preserve artifacts, and report the status or error code. Never bypass validation or review.
+On failure, stop and report status/error; never bypass validation or review.

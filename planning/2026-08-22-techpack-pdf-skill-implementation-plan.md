@@ -302,7 +302,7 @@ git commit -m "feat: select and protect TechPack translation candidates"
 
 - [ ] **Step 1: 写契约失败测试**
 
-断言请求 envelope 严格绑定 schema_version、job_id、source/glossary SHA-256 和规范化 request SHA-256；items 按 item_id 排序且只包含 source_text、必要 context、locked_tokens、glossary_terms、page_type、mode。响应 envelope 必须原样回显全部绑定字段；测试覆盖跨任务/跨请求交换、ID 集合不等、重复 ID、空译文、token 丢失/增加/同多重数换序、`preserved_tokens` 与请求序列不等、术语不符、缺 translator、model 空值、model=unknown、mode 不一致和一次纠偏后的终止状态。
+断言请求 envelope 严格绑定 schema_version、job_id、source/glossary SHA-256 和规范化 request SHA-256；items 按 item_id 排序且只包含 source_text、必要 context、locked_tokens、glossary_terms、page_type、mode。响应 envelope 必须原样回显全部绑定字段；测试覆盖跨任务/跨请求交换、ID 集合不等、重复 ID、空译文、token 丢失/增加/同多重数换序、`preserved_tokens` 与请求序列不等、术语不符、缺 translator、model 空值、model=unknown、mode 不一致和一次纠偏后的终止状态。`agent_role` 键必须存在但可为 null：main_agent 显式 null 合法，subagent/mixed 的 null、空白及所有模式的缺键必须在 attempt 0 进入一次纠偏、attempt 1 转人工。
 
 ~~~python
 def test_response_is_joined_by_item_id_not_array_position():
@@ -320,7 +320,7 @@ def test_response_is_joined_by_item_id_not_array_position():
 
 - [ ] **Step 3: 实现严格验证与缓存**
 
-  请求与响应都先由 `extra=forbid` 的 Pydantic envelope 验证。请求必须与传入 JobManifest 精确一致，`request_sha256` 必须由除自身外的规范化请求 envelope 重新计算；响应必须回显相同 schema_version、job_id、source/glossary SHA-256 和 request_sha256，旧式裸数组一律拒绝。可信 workflow state 传入 `expected_attempt`：期望 0 时任何失败至多写一个绑定的 correction-request.json，期望 1 时任何失败直接为 human_review_required 且不得写入或覆盖纠偏文件；响应自报 attempt 必须精确匹配该可信值。绑定通过后再比较 item_id 集合，要求 `preserved_tokens` 与请求 `locked_tokens` 精确序列相等，并检查译文中冲突安全边界检测得到的区分大小写 occurrence 序列，最后逐个检查 glossary_terms_used 与译文目标词。纠偏请求字段还包括 attempt=1、failed_item_ids、error_codes、required_fixes，不生成猜测结果。
+  请求与响应都先由 `extra=forbid` 的 Pydantic envelope 验证。请求必须与传入 JobManifest 精确一致，`request_sha256` 必须由除自身外的规范化请求 envelope 重新计算；响应必须回显相同 schema_version、job_id、source/glossary SHA-256 和 request_sha256，旧式裸数组一律拒绝。翻译来源在本层完成全部结构/语义验证：`agent_role` 键必填；main_agent 可显式 null，subagent/mixed 必须为无首尾空白的非空角色，后续 workflow 不重复施加更严格且无法纠偏的 provenance 门。可信 workflow state 传入 `expected_attempt`：期望 0 时任何失败至多写一个绑定的 correction-request.json，期望 1 时任何失败直接为 human_review_required 且不得写入或覆盖纠偏文件；响应自报 attempt 必须精确匹配该可信值。绑定通过后再比较 item_id 集合，要求 `preserved_tokens` 与请求 `locked_tokens` 精确序列相等，并检查译文中冲突安全边界检测得到的区分大小写 occurrence 序列，最后逐个检查 glossary_terms_used 与译文目标词。纠偏请求字段还包括 attempt=1、failed_item_ids、error_codes、required_fixes，不生成猜测结果。
 
 缓存 SHA-256 输入依次为规范化请求 JSON、术语表 SHA-256、prompt_version、host、model、execution_mode。model=unknown 时再加入 job_id，禁止跨任务复用。
 
@@ -440,7 +440,7 @@ git commit -m "feat: apply collision-safe editable PDF annotations"
 
 - [ ] **Step 1: 写端到端状态机失败测试**
 
-合成 PDF 测试 analyze 生成独立 job、manifest.json、translation-request.json 后以退出码 4 停止，且不会自行创建 translation-response.json。冲突/未知页覆盖 `parsed -> classification-request.json -> 宿主视觉 Agent -> classification-response.json -> translation_requested` 断点：请求/响应严格绑定 job/source/glossary/规范化 request SHA-256，页集合不得重复、缺失或多出；低于 0.80、仍为 unknown 或视觉能力不可用时保持 parsed 并退出 4，不生成翻译请求；合法分类续跑时必须保留全部页和候选。把合法翻译响应放入任务目录后，prepare-review 生成 review.html。apply 在批准 review 下生成最终 PDF；两个目录输入任务中一个失败不会污染另一个。
+合成 PDF 测试 analyze 生成独立 job、manifest.json、translation-request.json 后以退出码 4 停止，且不会自行创建 translation-response.json。冲突/未知页覆盖 `parsed -> classification-request.json -> 宿主视觉 Agent -> classification-response.json -> translation_requested` 断点：请求/响应严格绑定 job/source/glossary/规范化 request SHA-256，页集合不得重复、缺失或多出；外部分类模型严格拒绝可强制转换的数字字符串和布尔值（page_index 仅 JSON 整数，confidence 接受 JSON 整数/小数），字符串/数组也不强制转换；低于 0.80、仍为 unknown 或视觉能力不可用时保持 parsed 并退出 4，不生成翻译请求；合法分类续跑时必须保留全部页和候选。把合法翻译响应放入任务目录后，prepare-review 生成 review.html。apply 在批准 review 下生成最终 PDF；两个目录输入任务中一个失败不会污染另一个。
 
 补充轻量完整性回归：SHA-256、严格 schema、JobManifest/job 精确绑定、稳定源快照、规范化请求/响应/expected-output 重建、原子 no-clobber、路径/reparse/所有权及 review/apply 前后摘要复核必须阻断意外损坏、过期、缺失和跨任务串用。删除 HMAC、trust record、外部密钥和 OS 凭据库测试；同一 OS 用户主动或协调修改全部任务文件不在 v1 防御范围内。
 

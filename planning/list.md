@@ -158,7 +158,7 @@ how_to_measure | construction_detail | category_fields | unknown
 
 任一页在标题、表头和已有视觉结构规则后仍冲突或未知时，工作流保持 `parsed`，以退出码 4 和 `wait_reason=agent_classification` 写出 `classification-request.json`；不得先生成 `translation-request.json` 或丢弃未知页的候选。请求为 `extra=forbid` 的严格 schema 1.1 envelope，绑定 `job_id`、`source_sha256`、`glossary_sha256` 和规范化 `request_sha256`；项目按 `page_index` 稳定对应，只包含 `reason`、`title`、`table_headers`、`visual_features`、`evidence` 和任务内最小 `thumbnail` 引用。
 
-宿主视觉 Agent 或只读 sub-agent 写出同样严格的 `classification-response.json`，原样回显上述五个绑定字段，并对请求中每个页码恰好返回一个 `page_type`、`confidence` 和 `evidence`。重复、缺失、多出、跨任务、过期或绑定不符的响应一律拒绝。只有非 `unknown`、`confidence >= 0.80` 且证据非空的结果才能重建该页候选并继续；低置信、证据为空、仍为 `unknown` 或视觉能力不可用时继续保持 `parsed` 并等待人工分类，不静默跳过。
+宿主视觉 Agent 直接分类，或接收只读 sub-agent 仅返回的严格 JSON；只读 sub-agent 不写任务文件。宿主校验后保存同样严格的 `classification-response.json`，原样回显上述五个绑定字段，并对请求中每个页码恰好返回一个 `page_type`、`confidence` 和 `evidence`。外部分类请求/响应类型不做 Pydantic 强制转换：`page_index` 必须是 JSON 整数（不得为数字字符串或布尔值），`confidence` 必须是 0 至 1 的 JSON 数值（可为整数或小数，不得为数字字符串或布尔值），字符串和数组也必须为对应 JSON 类型。重复、缺失、多出、跨任务、过期或绑定不符的响应一律拒绝。只有非 `unknown`、`confidence >= 0.80` 且证据非空的结果才能重建该页候选并继续；低置信、证据为空、仍为 `unknown` 或视觉能力不可用时继续保持 `parsed` 并等待人工分类，不静默跳过。
 
 ### 5.5 候选文本筛选
 
@@ -252,7 +252,7 @@ skipped_duplicate | low_confidence
 }
 ```
 
-响应验证：请求 envelope 必须与传入的 JobManifest 精确一致，并重新计算验证 `request_sha256`；响应 envelope 的 schema_version、job_id、source/glossary SHA-256 和 request_sha256 必须与请求完全一致。跨任务或跨请求交换即使 items 内容相同也必须拒绝。绑定通过后，项目 ID 集合必须完全一致；不得重复或漏项；`preserved_tokens` 必须与请求的 `locked_tokens` 精确序列相等，译文中检出的锁定 occurrence 也必须保持同一边界、大小写、数量和顺序；术语必须符合；译文不得为空；每项必须包含翻译来源。任何失败都不能按索引猜配。
+响应验证：请求 envelope 必须与传入的 JobManifest 精确一致，并重新计算验证 `request_sha256`；响应 envelope 的 schema_version、job_id、source/glossary SHA-256 和 request_sha256 必须与请求完全一致。跨任务或跨请求交换即使 items 内容相同也必须拒绝。绑定通过后，项目 ID 集合必须完全一致；不得重复或漏项；`preserved_tokens` 必须与请求的 `locked_tokens` 精确序列相等，译文中检出的锁定 occurrence 也必须保持同一边界、大小写、数量和顺序；术语必须符合；译文不得为空；每项必须包含翻译来源。`agent_role` 键结构上必填且可为 null：`main_agent` 可显式为 null，`subagent` 和 `mixed` 必须为去除首尾空白后非空的角色；缺键或委派模式 null/空白在本阶段进入同一一次纠偏，不能留到后续 workflow 终止。任何失败都不能按索引猜配。
 
 无效 JSON、绑定不符、漏项、token 变化或术语不符只允许向翻译 Agent 发起一次定向纠偏；纠偏请求必须携带相同 schema/job/source/glossary/request 绑定和 `attempt=1`，仍失败则转人工审核。验证 API 的 `expected_attempt` 必须由可信工作流状态传入，响应自报的 `attempt` 只能与其精确比对，不能决定是否再发起纠偏；`expected_attempt=0` 的任一失败最多写出一次纠偏，`expected_attempt=1` 的任一失败直接转人工审核。宿主任务中断、上下文不足、额度耗尽或 sub-agent 失败时停止翻译阶段并保留断点，不得伪造结果。成功结果按请求内容、术语表、提示词版本、宿主、模型标识和执行方式哈希缓存；模型标识为 `unknown` 时缓存仅限当前任务。
 

@@ -96,6 +96,28 @@ class _UnknownMinerUFixture:
         }
 
 
+class _DntMinerUFixture:
+    def __init__(self, *, title="BOM"):
+        self._title = title
+
+    def parse_or_degrade(self, _source, _manifest):
+        return {
+            "pages": [
+                {
+                    "page_index": 0,
+                    "title": self._title,
+                    "nodes": [
+                        {
+                            "text": "Use AcmeTex fabric",
+                            "bbox": [72, 72, 180, 86],
+                            "field_role": "body",
+                        }
+                    ],
+                }
+            ]
+        }
+
+
 class _MixedClassificationFixture:
     def parse_or_degrade(self, _source, _manifest):
         return {
@@ -147,8 +169,24 @@ def _two_page_techpack_pdf(path):
     document.close()
 
 
+def _dnt_techpack_pdf(path):
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "BOM")
+    page.insert_text((72, 86), "Use AcmeTex fabric")
+    document.save(path)
+    document.close()
+
+
 def _glossary(path):
     path.write_text("source_term,target_term\nShell,大身\n", encoding="utf-8")
+
+
+def _dnt_glossary(path):
+    path.write_text(
+        "source_term,target_term,do_not_translate\nAcmeTex,,true\n",
+        encoding="utf-8",
+    )
 
 
 def _response_for(request, *, attempt=0, translated_text="大身 12 mm"):
@@ -271,6 +309,55 @@ def test_analyze_creates_an_isolated_translation_request_and_waits_for_host(tmp_
     assert not (result.job_dir / "translation-response.json").exists()
 
 
+def test_analysis_accepts_empty_target_only_for_do_not_translate_hit(tmp_path):
+    source, glossary = tmp_path / "dnt.pdf", tmp_path / "terms.csv"
+    _dnt_techpack_pdf(source)
+    _dnt_glossary(glossary)
+
+    result = analyze(
+        source,
+        glossary,
+        tmp_path / "jobs",
+        mineru_client=_DntMinerUFixture(),
+    )
+
+    assert (result.exit_code, result.state) == (4, "translation_requested")
+    analysis = json.loads((result.job_dir / "analysis.json").read_text(encoding="utf-8"))
+    assert analysis["candidates"][0]["glossary_hits"] == [
+        {
+            "source_term": "AcmeTex",
+            "target_term": "",
+            "matched_text": "AcmeTex",
+            "start": 4,
+            "end": 11,
+            "do_not_translate": True,
+            "priority": 0,
+        }
+    ]
+    request = json.loads(
+        (result.job_dir / "translation-request.json").read_text(encoding="utf-8")
+    )
+    assert request["items"][0]["locked_tokens"] == ["AcmeTex"]
+    assert request["items"][0]["glossary_terms"] == [
+        {"source_term": "AcmeTex", "target_term": ""}
+    ]
+
+
+def test_glossary_hit_snapshot_rejects_empty_target_for_ordinary_hit():
+    with pytest.raises(ValidationError):
+        workflow._GlossaryHitSnapshot.model_validate(
+            {
+                "source_term": "Shell",
+                "target_term": "",
+                "matched_text": "Shell",
+                "start": 0,
+                "end": 5,
+                "do_not_translate": False,
+                "priority": 0,
+            }
+        )
+
+
 def test_unknown_page_writes_bound_classification_request_and_waits_in_parsed(tmp_path):
     source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
     _techpack_pdf(source)
@@ -336,6 +423,111 @@ def test_valid_classification_response_resumes_same_job_into_translation_request
     assert state["artifacts"]["classification_response"] == hashlib.sha256(
         (job.job_dir / "classification-response.json").read_bytes()
     ).hexdigest()
+
+
+def test_classification_rebuild_preserves_empty_target_dnt_hit_binding(tmp_path):
+    source, glossary = tmp_path / "dnt.pdf", tmp_path / "terms.csv"
+    _dnt_techpack_pdf(source)
+    _dnt_glossary(glossary)
+    job = analyze(
+        source,
+        glossary,
+        tmp_path / "jobs",
+        mineru_client=_DntMinerUFixture(title=""),
+    )
+    request = json.loads(
+        (job.job_dir / "classification-request.json").read_text(encoding="utf-8")
+    )
+    (job.job_dir / "classification-response.json").write_text(
+        json.dumps(_classification_response(request)), encoding="utf-8"
+    )
+
+    resumed = prepare_review(job.job_dir)
+
+    assert resumed.state == "translation_requested"
+    translation_request = json.loads(
+        (job.job_dir / "translation-request.json").read_text(encoding="utf-8")
+    )
+    assert translation_request["items"][0]["locked_tokens"] == ["AcmeTex"]
+    assert translation_request["items"][0]["glossary_terms"] == [
+        {"source_term": "AcmeTex", "target_term": ""}
+    ]
+    rebuilt = json.loads((job.job_dir / "analysis.json").read_text(encoding="utf-8"))
+    assert rebuilt["candidates"][0]["glossary_hits"][0]["matched_text"] == "AcmeTex"
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("page_index", "0"),
+        ("page_index", False),
+        ("confidence", "0.95"),
+        ("confidence", True),
+    ],
+)
+def test_classification_response_rejects_coercible_numeric_types(
+    tmp_path,
+    field,
+    invalid_value,
+):
+    source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_UnknownMinerUFixture())
+    request = json.loads(
+        (job.job_dir / "classification-request.json").read_text(encoding="utf-8")
+    )
+    response = _classification_response(request)
+    response["items"][0][field] = invalid_value
+    (job.job_dir / "classification-response.json").write_text(
+        json.dumps(response), encoding="utf-8"
+    )
+
+    with pytest.raises(TechpackError) as caught:
+        prepare_review(job.job_dir)
+
+    assert caught.value.code == "workflow_artifact_invalid"
+    state = json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["state"] == "parsed"
+    assert not (job.job_dir / "translation-request.json").exists()
+
+
+def test_classification_response_accepts_json_integer_confidence(tmp_path):
+    source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_UnknownMinerUFixture())
+    request = json.loads(
+        (job.job_dir / "classification-request.json").read_text(encoding="utf-8")
+    )
+    (job.job_dir / "classification-response.json").write_text(
+        json.dumps(_classification_response(request, confidence=1)), encoding="utf-8"
+    )
+
+    assert prepare_review(job.job_dir).state == "translation_requested"
+
+
+def test_classification_request_rejects_coercible_page_index_type(tmp_path):
+    source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_UnknownMinerUFixture())
+    request_path = job.job_dir / "classification-request.json"
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    request["items"][0]["page_index"] = "0"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    state_path = job.job_dir / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["artifacts"]["classification_request"] = hashlib.sha256(
+        request_path.read_bytes()
+    ).hexdigest()
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    with pytest.raises(TechpackError) as caught:
+        prepare_review(job.job_dir)
+
+    assert caught.value.code == "workflow_artifact_invalid"
+    assert not (job.job_dir / "translation-request.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -687,7 +879,7 @@ def test_native_only_bom_uses_native_evidence_and_marks_output_risk(tmp_path):
     assert "native_only_degradation" in expected["output"]["items"][0]["warnings"]
 
 
-def test_prepare_blocks_missing_agent_role_before_generating_unapplicable_review(tmp_path):
+def test_prepare_accepts_explicit_null_agent_role_for_main_agent(tmp_path):
     source, glossary = tmp_path / "techpack.pdf", tmp_path / "terms.csv"
     _techpack_pdf(source)
     _glossary(glossary)
@@ -697,13 +889,11 @@ def test_prepare_blocks_missing_agent_role_before_generating_unapplicable_review
     response["items"][0]["translator"]["agent_role"] = None
     (job.job_dir / "translation-response.json").write_text(json.dumps(response), encoding="utf-8")
 
-    with pytest.raises(TechpackError) as caught:
-        prepare_review(job.job_dir)
+    result = prepare_review(job.job_dir)
 
-    assert caught.value.code == "workflow_quality_provenance"
-    assert not (job.job_dir / "expected-output.json").exists()
-    assert not (job.job_dir / "review.html").exists()
-    assert json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "failed"
+    assert result.state == "review_ready"
+    expected = json.loads((job.job_dir / "expected-output.json").read_text(encoding="utf-8"))
+    assert expected["output"]["items"][0]["translation_agent_role"] is None
 
 
 def test_expected_output_promotes_unknown_model_translation_warning_and_nonhigh_coordinate_risk(tmp_path, monkeypatch):

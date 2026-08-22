@@ -16,7 +16,17 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from .apply import ApplyResult, apply_review
 from .errors import TechpackError
@@ -151,29 +161,29 @@ class _AnalysisPage(_StrictModel):
 
 
 class _ClassificationRequestItem(_StrictModel):
-    page_index: int = Field(ge=0)
+    page_index: StrictInt = Field(ge=0)
     reason: Literal["unknown", "conflict", "low_confidence"]
-    title: str
-    table_headers: list[str]
-    visual_features: list[str]
-    evidence: list[str]
-    thumbnail: str = Field(min_length=1)
+    title: StrictStr
+    table_headers: list[StrictStr]
+    visual_features: list[StrictStr]
+    evidence: list[StrictStr]
+    thumbnail: StrictStr = Field(min_length=1)
 
 
 class _ClassificationRequestEnvelope(_StrictModel):
     schema_version: Literal["1.1"]
-    job_id: str = Field(min_length=1)
-    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    glossary_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    job_id: StrictStr = Field(min_length=1)
+    source_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    glossary_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    request_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     items: list[_ClassificationRequestItem] = Field(min_length=1)
 
 
 class _ClassificationResponseItem(_StrictModel):
-    page_index: int = Field(ge=0)
+    page_index: StrictInt = Field(ge=0)
     page_type: PageType
-    confidence: float = Field(ge=0, le=1)
-    evidence: list[str]
+    confidence: StrictFloat = Field(ge=0, le=1)
+    evidence: list[StrictStr]
 
     @field_validator("evidence")
     @classmethod
@@ -185,21 +195,27 @@ class _ClassificationResponseItem(_StrictModel):
 
 class _ClassificationResponseEnvelope(_StrictModel):
     schema_version: Literal["1.1"]
-    job_id: str = Field(min_length=1)
-    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    glossary_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    job_id: StrictStr = Field(min_length=1)
+    source_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    glossary_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    request_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     items: list[_ClassificationResponseItem] = Field(min_length=1)
 
 
 class _GlossaryHitSnapshot(_StrictModel):
     source_term: str = Field(min_length=1)
-    target_term: str = Field(min_length=1)
+    target_term: str
     matched_text: str = Field(min_length=1)
     start: int = Field(ge=0)
     end: int = Field(gt=0)
     do_not_translate: bool
     priority: int
+
+    @model_validator(mode="after")
+    def target_matches_translation_policy(self) -> "_GlossaryHitSnapshot":
+        if not self.do_not_translate and not self.target_term.strip():
+            raise ValueError("target_term may be empty only for do_not_translate hits")
+        return self
 
 
 class _CandidateSnapshot(_StrictModel):
@@ -536,12 +552,6 @@ def _prepare_review_locked(job_dir: str | Path) -> WorkflowResult:
             return WorkflowResult(4, WorkflowState.TRANSLATION_REQUESTED, directory)
         _write_state(directory, job, WorkflowState.TRANSLATION_REQUESTED, state.revision + 1, 1, "human_review_required")
         return WorkflowResult(4, WorkflowState.TRANSLATION_REQUESTED, directory)
-
-    try:
-        _ensure_translation_provenance(translations)
-    except TechpackError:
-        _write_state(directory, job, WorkflowState.FAILED, state.revision + 1, state.expected_attempt, None)
-        raise
 
     if state.state is WorkflowState.TRANSLATION_REQUESTED:
         _write_state(directory, job, WorkflowState.TRANSLATION_VALIDATED, state.revision + 1, state.expected_attempt, None)
@@ -1478,13 +1488,6 @@ def _trusted_output(
         "items": items,
         "blocking_issues": [],
     })
-
-
-def _ensure_translation_provenance(translations: Sequence[Any]) -> None:
-    for translation in translations:
-        role = getattr(translation.translator, "agent_role", None)
-        if not isinstance(role, str) or not role.strip():
-            raise _workflow_error("workflow_quality_provenance", "Translation provenance is incomplete")
 
 
 def _quality_warnings(candidate: _CandidateSnapshot, parser: str, translation: Any) -> list[str]:

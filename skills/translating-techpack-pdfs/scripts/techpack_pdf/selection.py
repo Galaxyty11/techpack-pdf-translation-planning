@@ -215,8 +215,9 @@ def select_candidates(page: SelectionPage, glossary: Glossary) -> list[Candidate
         node = page_node.matched_node
         text = node.text
         normalized = normalize_term(text)
-        hits = tuple(glossary.match(text))
-        locked = _with_glossary_locks(lock_tokens(text), hits)
+        normalized_hits = tuple(glossary.match(text))
+        locked = _with_glossary_locks(lock_tokens(text), normalized_hits)
+        hits = _restore_glossary_hit_spelling(text, normalized_hits)
         should_translate, reason = _candidate_decision(
             page.classification,
             page_node.field_role,
@@ -505,6 +506,31 @@ def _with_glossary_locks(locked: LockedText, hits: tuple[GlossaryHit, ...]) -> L
         tokens.append(LockedToken(value, start, end, "glossary"))
     tokens.sort(key=lambda token: (token.start, token.end))
     return LockedText(locked.text, tuple(tokens))
+
+
+def _restore_glossary_hit_spelling(
+    text: str,
+    hits: tuple[GlossaryHit, ...],
+) -> tuple[GlossaryHit, ...]:
+    restored: list[GlossaryHit] = []
+    for hit in hits:
+        projected = _project_normalized_span(text, hit.start, hit.end)
+        if projected is None:
+            restored.append(hit)
+            continue
+        start, end = projected
+        restored.append(
+            GlossaryHit(
+                source_term=hit.source_term,
+                target_term=hit.target_term,
+                matched_text=text[start:end],
+                start=start,
+                end=end,
+                do_not_translate=hit.do_not_translate,
+                priority=hit.priority,
+            )
+        )
+    return tuple(restored)
 
 
 def _project_normalized_span(text: str, start: int, end: int) -> tuple[int, int] | None:

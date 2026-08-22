@@ -6,7 +6,7 @@ Every envelope, item, and nested object below is `extra=forbid`: return every re
 
 ## Visual classification checkpoint
 
-When `classification-request.json` exists, read it without recreating its page set. It is a strict schema 1.1 object with `job_id: string`, lowercase 64-character `source_sha256`, `glossary_sha256`, canonical `request_sha256`, and `items: array`. Each request item contains one stable `page_index: integer`, `reason: unknown|conflict|low_confidence`, `title: string`, `table_headers: string[]`, `visual_features: string[]`, `evidence: string[]`, and the minimal job-local `thumbnail: string` reference.
+When `classification-request.json` exists, read it without recreating its page set. It is a strict schema 1.1 object with `job_id: string`, lowercase 64-character `source_sha256`, `glossary_sha256`, canonical `request_sha256`, and `items: array`. Each request item contains one stable `page_index: integer`, `reason: unknown|conflict|low_confidence`, `title: string`, `table_headers: string[]`, `visual_features: string[]`, `evidence: string[]`, and the minimal job-local `thumbnail: string` reference. Types are strict: every string is a JSON string and every array is a JSON array; `page_index` is a JSON integer, never a numeric string or boolean.
 
 Return `classification-response.json` with the exact five binding fields and exactly one item for every requested page, with no duplicate, missing, or extra page:
 
@@ -28,7 +28,7 @@ Return `classification-response.json` with the exact five binding fields and exa
 }
 ```
 
-`page_type` is one of `general_info|bom|measurement|technical_drawing|label_pack|sample_review|style_sample|how_to_measure|construction_detail|category_fields|unknown`; `confidence` is a number from 0 through 1; `evidence` is a required array whose entries, when present, are trimmed non-empty strings. The workflow continues only for non-`unknown` results with confidence at least 0.80 and non-empty evidence. Otherwise it keeps the same job at `parsed` with `wait_reason=agent_classification`; overwrite the response only after obtaining a valid manual/visual classification, then rerun `prepare-review`.
+`page_type` is one of `general_info|bom|measurement|technical_drawing|label_pack|sample_review|style_sample|how_to_measure|construction_detail|category_fields|unknown`; `confidence` is a JSON number from 0 through 1 (integer or decimal, never a numeric string or boolean); `evidence` is a required JSON array of trimmed non-empty JSON strings when populated. The workflow continues only for non-`unknown` results with confidence at least 0.80 and non-empty evidence. Otherwise it keeps the same job at `parsed` with `wait_reason=agent_classification`; overwrite the response only after obtaining a valid manual/visual classification, then rerun `prepare-review`.
 
 ## Translation exchange
 
@@ -64,7 +64,7 @@ Return a strict object, never a bare array or prose:
 }
 ```
 
-Translation response types are exact: `schema_version="1.1"`; binding hashes are lowercase 64-character strings; `attempt` is `0|1`; `items` is an array. Every item requires `item_id`, nonblank `translated_text`, `preserved_tokens: string[]`, `glossary_terms_used: string[]`, `mode: direct|faithful_digest`, `warnings: string[]` (required even when empty), and `translator`. The translator requires nonblank `host`, `execution_mode: main_agent|subagent|mixed`, nonblank `model`, required `agent_role: string|null`, and nonblank `prompt_version`. `model` cannot have leading or trailing whitespace; use exact `unknown` when the host cannot report it. Although the exchange schema permits a nullable `agent_role`, the downstream provenance quality gate requires a meaningful role before review can be prepared.
+Translation response types are exact: `schema_version="1.1"`; binding hashes are lowercase 64-character strings; `attempt` is `0|1`; `items` is an array. Every item requires `item_id`, nonblank `translated_text`, `preserved_tokens: string[]`, `glossary_terms_used: string[]`, `mode: direct|faithful_digest`, `warnings: string[]` (required even when empty), and `translator`. The translator requires nonblank `host`, `execution_mode: main_agent|subagent|mixed`, nonblank `model`, the structurally required key `agent_role: string|null`, and nonblank `prompt_version`. `model` and non-null `agent_role` must be trimmed; use exact `unknown` when the host cannot report the model. `main_agent` may explicitly use `agent_role: null`; `subagent` and `mixed` require a meaningful nonblank role. Omitting `agent_role`, or using null/blank for delegated execution, is a Task 6 validation failure handled by the same one-correction rule, not a later workflow gate.
 
 Echo all binding fields exactly. Return every requested `item_id` exactly once and no others; ordering is irrelevant. Match each requested mode. `preserved_tokens` must exactly equal the request's `locked_tokens` sequence, and the translated text must contain the same case-sensitive, boundary-safe occurrences in the same order and multiplicity. Report exactly the requested source terms in `glossary_terms_used`, use every authoritative target, and include provenance per item.
 

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from .errors import TechpackError
 from .glossary import Glossary, GlossaryHit, normalize_term
@@ -61,7 +61,7 @@ class Translator(_StrictModel):
     host: str = Field(min_length=1)
     execution_mode: Literal["main_agent", "subagent", "mixed"]
     model: str = Field(min_length=1)
-    agent_role: str | None = None
+    agent_role: str | None
     prompt_version: str = Field(min_length=1)
 
     @field_validator("host", "prompt_version")
@@ -75,6 +75,19 @@ class Translator(_StrictModel):
     @classmethod
     def model_is_normalized(cls, value: str) -> str:
         return _normalize_model_identifier(value)
+
+    @field_validator("agent_role")
+    @classmethod
+    def agent_role_is_normalized(cls, value: str | None) -> str | None:
+        if value is not None and (not value.strip() or value != value.strip()):
+            raise ValueError("agent_role must be nonblank and have no surrounding whitespace")
+        return value
+
+    @model_validator(mode="after")
+    def delegated_execution_has_role(self) -> "Translator":
+        if self.execution_mode in {"subagent", "mixed"} and self.agent_role is None:
+            raise ValueError("delegated execution requires agent_role")
+        return self
 
 
 class _TranslationResponseItem(_StrictModel):
@@ -319,7 +332,7 @@ def _schema_failure(exc: ValidationError) -> list[str]:
             codes.add("empty_translation")
         elif "translator" in location and "model" in location:
             codes.add("model_missing")
-        elif location and location[-1] == "translator":
+        elif "translator" in location:
             codes.add("translator_missing")
         else:
             codes.add("response_schema_invalid")

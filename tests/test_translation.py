@@ -302,6 +302,71 @@ def test_response_is_strictly_pydantic_validated_before_semantic_checks(mutation
     assert caught.value.error_codes == (expected_code,)
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda translator: translator.pop("agent_role"),
+        lambda translator: translator.update(agent_role=None),
+        lambda translator: translator.update(agent_role="   "),
+        lambda translator: translator.update(execution_mode="mixed", agent_role=None),
+    ],
+)
+def test_initial_response_invalid_agent_role_requests_one_correction(mutation):
+    request = _items(("p001-i001", "Shell 12 mm", "direct"))
+    response = _item("p001-i001", "大身 12 mm", "direct", ["12", "mm"])
+    mutation(response["translator"])
+
+    with pytest.raises(TranslationValidationError) as caught:
+        _validate_items(request, [response], _empty_glossary())
+
+    assert caught.value.correction_request is not None
+    assert caught.value.correction_request["attempt"] == 1
+    assert caught.value.error_codes == ("translator_missing",)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda translator: translator.pop("agent_role"),
+        lambda translator: translator.update(agent_role=None),
+        lambda translator: translator.update(agent_role="   "),
+        lambda translator: translator.update(execution_mode="mixed", agent_role=None),
+    ],
+)
+def test_correction_response_invalid_agent_role_stops_for_human_review(mutation):
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+    response = _bound_response(
+        [_item("p001-i001", "大身 12 mm", "direct", ["12", "mm"])],
+        request,
+        attempt=1,
+    )
+    mutation(response["items"][0]["translator"])
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(
+            request,
+            response,
+            _empty_glossary(),
+            job,
+            expected_attempt=1,
+        )
+
+    assert caught.value.result == {"status": "human_review_required"}
+    assert caught.value.correction_request is None
+    assert caught.value.error_codes == ("translator_missing",)
+
+
+def test_main_agent_may_explicitly_report_null_agent_role():
+    request = _items(("p001-i001", "Shell 12 mm", "direct"))
+    response = _item("p001-i001", "大身 12 mm", "direct", ["12", "mm"])
+    response["translator"].update(execution_mode="main_agent", agent_role=None)
+
+    validated = _validate_items(request, [response], _empty_glossary())
+
+    assert validated[0].translator.agent_role is None
+
+
 @pytest.mark.parametrize("untrusted_id", ["customer confidential measurement notes", "p1-i1", f"p{'1' * 80}-i001"])
 def test_schema_failure_never_copies_untrusted_item_ids_to_correction(untrusted_id):
     request = _items(("p001-i001", "Shell 12 mm", "direct"))
