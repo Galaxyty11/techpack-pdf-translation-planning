@@ -77,11 +77,72 @@ class _SnapshotMutatingMinerUFixture(_MinerUFixture):
         return super().parse_or_degrade(source, manifest)
 
 
+class _UnknownMinerUFixture:
+    def parse_or_degrade(self, _source, _manifest):
+        return {
+            "pages": [
+                {
+                    "page_index": 0,
+                    "title": "",
+                    "nodes": [
+                        {
+                            "text": "Shell 12 mm",
+                            "bbox": [72, 72, 150, 86],
+                            "field_role": "body",
+                        }
+                    ],
+                }
+            ]
+        }
+
+
+class _MixedClassificationFixture:
+    def parse_or_degrade(self, _source, _manifest):
+        return {
+            "pages": [
+                {
+                    "page_index": 0,
+                    "title": "BOM",
+                    "nodes": [
+                        {
+                            "text": "Shell 12 mm",
+                            "bbox": [72, 72, 150, 86],
+                            "field_role": "body",
+                        }
+                    ],
+                },
+                {
+                    "page_index": 1,
+                    "title": "",
+                    "nodes": [
+                        {
+                            "text": "Collar 5 mm",
+                            "bbox": [72, 72, 150, 86],
+                            "field_role": "body",
+                        }
+                    ],
+                },
+            ]
+        }
+
+
 def _techpack_pdf(path):
     document = pymupdf.open()
     page = document.new_page()
     page.insert_text((72, 72), "BOM")
     page.insert_text((72, 86), "Shell 12 mm")
+    document.save(path)
+    document.close()
+
+
+def _two_page_techpack_pdf(path):
+    document = pymupdf.open()
+    first = document.new_page()
+    first.insert_text((72, 72), "BOM")
+    first.insert_text((72, 86), "Shell 12 mm")
+    second = document.new_page()
+    second.insert_text((72, 72), "Unlabelled details")
+    second.insert_text((72, 86), "Collar 5 mm")
     document.save(path)
     document.close()
 
@@ -135,6 +196,29 @@ def _response_for_all(request, *, attempt=0):
     return payload
 
 
+def _classification_response(request, *, page_type="bom", confidence=0.95, evidence=None):
+    return {
+        key: request[key]
+        for key in (
+            "schema_version",
+            "job_id",
+            "source_sha256",
+            "glossary_sha256",
+            "request_sha256",
+        )
+    } | {
+        "items": [
+            {
+                "page_index": item["page_index"],
+                "page_type": page_type,
+                "confidence": confidence,
+                "evidence": ["agent:visual BOM structure"] if evidence is None else evidence,
+            }
+            for item in request["items"]
+        ]
+    }
+
+
 def _write_approved_review(job_dir):
     match = re.search(r'<script id="review-data" type="application/json">(.*?)</script>', (job_dir / "review.html").read_text(encoding="utf-8"), re.S)
     assert match is not None
@@ -185,6 +269,194 @@ def test_analyze_creates_an_isolated_translation_request_and_waits_for_host(tmp_
         }
     ]
     assert not (result.job_dir / "translation-response.json").exists()
+
+
+def test_unknown_page_writes_bound_classification_request_and_waits_in_parsed(tmp_path):
+    source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+
+    result = analyze(
+        source,
+        glossary,
+        tmp_path / "jobs",
+        now=datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc),
+        mineru_client=_UnknownMinerUFixture(),
+    )
+
+    assert (result.exit_code, result.state, result.wait_reason) == (
+        4,
+        "parsed",
+        "agent_classification",
+    )
+    request = json.loads(
+        (result.job_dir / "classification-request.json").read_text(encoding="utf-8")
+    )
+    assert request["request_sha256"] == _request_hash(request)
+    assert [{key: value for key, value in item.items() if key != "thumbnail"} for item in request["items"]] == [
+        {
+            "page_index": 0,
+            "reason": "unknown",
+            "title": "",
+            "table_headers": [],
+            "visual_features": [],
+            "evidence": [],
+        }
+    ]
+    assert Path(request["items"][0]["thumbnail"]) == Path("thumbnails/page-0001.png")
+    assert not (result.job_dir / "translation-request.json").exists()
+    state = json.loads((result.job_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["state"] == "parsed"
+    assert state["wait_reason"] == "agent_classification"
+    assert state["artifacts"]["classification_request"] == hashlib.sha256(
+        (result.job_dir / "classification-request.json").read_bytes()
+    ).hexdigest()
+
+
+def test_valid_classification_response_resumes_same_job_into_translation_request(tmp_path):
+    source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_UnknownMinerUFixture())
+    request = json.loads((job.job_dir / "classification-request.json").read_text(encoding="utf-8"))
+    (job.job_dir / "classification-response.json").write_text(
+        json.dumps(_classification_response(request)), encoding="utf-8"
+    )
+
+    resumed = prepare_review(job.job_dir)
+
+    assert (resumed.exit_code, resumed.state) == (4, "translation_requested")
+    translation_request = json.loads(
+        (job.job_dir / "translation-request.json").read_text(encoding="utf-8")
+    )
+    assert [item["item_id"] for item in translation_request["items"]] == ["p001-i001"]
+    assert translation_request["items"][0]["source_text"] == "Shell 12 mm"
+    assert translation_request["items"][0]["page_type"] == "bom"
+    state = json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["artifacts"]["classification_response"] == hashlib.sha256(
+        (job.job_dir / "classification-response.json").read_bytes()
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("page_type", "confidence", "evidence"),
+    [
+        ("bom", 0.79, ["agent:uncertain visual structure"]),
+        ("bom", 0.95, []),
+        ("unknown", 0.95, ["agent:no supported page type"]),
+    ],
+)
+def test_unresolved_agent_classification_waits_without_mutation(
+    tmp_path,
+    page_type,
+    confidence,
+    evidence,
+):
+    source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_UnknownMinerUFixture())
+    before = (job.job_dir / "state.json").read_bytes()
+    request = json.loads((job.job_dir / "classification-request.json").read_text(encoding="utf-8"))
+    (job.job_dir / "classification-response.json").write_text(
+        json.dumps(_classification_response(
+            request,
+            page_type=page_type,
+            confidence=confidence,
+            evidence=evidence,
+        )),
+        encoding="utf-8",
+    )
+
+    resumed = prepare_review(job.job_dir)
+
+    assert (resumed.exit_code, resumed.state, resumed.wait_reason) == (
+        4,
+        "parsed",
+        "agent_classification",
+    )
+    assert (job.job_dir / "state.json").read_bytes() == before
+    assert not (job.job_dir / "translation-request.json").exists()
+
+
+def test_classification_response_with_invalid_binding_fails_closed(tmp_path):
+    source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_UnknownMinerUFixture())
+    request = json.loads((job.job_dir / "classification-request.json").read_text(encoding="utf-8"))
+    response = _classification_response(request)
+    response["request_sha256"] = "0" * 64
+    (job.job_dir / "classification-response.json").write_text(json.dumps(response), encoding="utf-8")
+
+    with pytest.raises(TechpackError) as caught:
+        prepare_review(job.job_dir)
+
+    assert caught.value.code == "workflow_binding_mismatch"
+    assert json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "parsed"
+    assert not (job.job_dir / "translation-request.json").exists()
+
+
+def test_cross_job_classification_response_fails_closed(tmp_path):
+    glossary = tmp_path / "terms.csv"
+    source_a, source_b = tmp_path / "a.pdf", tmp_path / "b.pdf"
+    _techpack_pdf(source_a)
+    _techpack_pdf(source_b)
+    _glossary(glossary)
+    job_a = analyze(source_a, glossary, tmp_path / "jobs-a", mineru_client=_UnknownMinerUFixture())
+    job_b = analyze(source_b, glossary, tmp_path / "jobs-b", mineru_client=_UnknownMinerUFixture())
+    request_a = json.loads((job_a.job_dir / "classification-request.json").read_text(encoding="utf-8"))
+    (job_b.job_dir / "classification-response.json").write_text(
+        json.dumps(_classification_response(request_a)), encoding="utf-8"
+    )
+
+    with pytest.raises(TechpackError) as caught:
+        prepare_review(job_b.job_dir)
+
+    assert caught.value.code == "workflow_binding_mismatch"
+    assert not (job_b.job_dir / "translation-request.json").exists()
+
+
+def test_bound_classification_response_tamper_is_detected_after_resume(tmp_path):
+    source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_UnknownMinerUFixture())
+    request = json.loads((job.job_dir / "classification-request.json").read_text(encoding="utf-8"))
+    response_path = job.job_dir / "classification-response.json"
+    response_path.write_text(json.dumps(_classification_response(request)), encoding="utf-8")
+    assert prepare_review(job.job_dir).state == "translation_requested"
+    response_path.write_text(json.dumps({"tampered": True}), encoding="utf-8")
+
+    with pytest.raises(TechpackError) as caught:
+        prepare_review(job.job_dir)
+
+    assert caught.value.code == "workflow_artifact_invalid"
+
+
+def test_mixed_known_and_unknown_pages_wait_then_keep_every_candidate_on_resume(tmp_path):
+    source, glossary = tmp_path / "mixed.pdf", tmp_path / "terms.csv"
+    _two_page_techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MixedClassificationFixture())
+
+    assert (job.exit_code, job.state, job.wait_reason) == (4, "parsed", "agent_classification")
+    request = json.loads((job.job_dir / "classification-request.json").read_text(encoding="utf-8"))
+    assert [item["page_index"] for item in request["items"]] == [1]
+    (job.job_dir / "classification-response.json").write_text(
+        json.dumps(_classification_response(request)), encoding="utf-8"
+    )
+
+    resumed = prepare_review(job.job_dir)
+
+    assert resumed.state == "translation_requested"
+    translation_request = json.loads(
+        (job.job_dir / "translation-request.json").read_text(encoding="utf-8")
+    )
+    assert [(item["item_id"], item["source_text"]) for item in translation_request["items"]] == [
+        ("p001-i001", "Shell 12 mm"),
+        ("p002-i001", "Collar 5 mm"),
+    ]
 
 
 def test_prepare_review_waits_for_response_then_creates_offline_review(tmp_path):
@@ -941,7 +1213,7 @@ def test_concurrent_apply_has_one_winner_and_never_overwrites_final(tmp_path, mo
     assert hashlib.sha256(output.read_bytes()).hexdigest() == hashlib.sha256(source.read_bytes()).hexdigest()
 
 
-def test_native_only_non_techpack_still_fails_closed(tmp_path):
+def test_native_only_non_techpack_waits_for_host_visual_classification(tmp_path):
     source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
     document = pymupdf.open()
     page = document.new_page()
@@ -955,7 +1227,13 @@ def test_native_only_non_techpack_still_fails_closed(tmp_path):
         now=datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc), mineru_client=_NativeOnlyFixture(),
     )
 
-    assert (result.exit_code, result.state) == (2, "failed")
+    assert (result.exit_code, result.state, result.wait_reason) == (
+        4,
+        "parsed",
+        "agent_classification",
+    )
+    assert (result.job_dir / "classification-request.json").is_file()
+    assert not (result.job_dir / "translation-request.json").exists()
 
 
 def test_batch_exit_priority_and_safe_input_indexes_preserve_independent_jobs(tmp_path, monkeypatch):

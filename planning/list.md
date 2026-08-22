@@ -156,6 +156,10 @@ how_to_measure | construction_detail | category_fields | unknown
 4. 模型分类；必须返回类型、置信度和证据。
 5. 置信度低于 0.80 时归为 `unknown` 并进入审核。
 
+任一页在标题、表头和已有视觉结构规则后仍冲突或未知时，工作流保持 `parsed`，以退出码 4 和 `wait_reason=agent_classification` 写出 `classification-request.json`；不得先生成 `translation-request.json` 或丢弃未知页的候选。请求为 `extra=forbid` 的严格 schema 1.1 envelope，绑定 `job_id`、`source_sha256`、`glossary_sha256` 和规范化 `request_sha256`；项目按 `page_index` 稳定对应，只包含 `reason`、`title`、`table_headers`、`visual_features`、`evidence` 和任务内最小 `thumbnail` 引用。
+
+宿主视觉 Agent 或只读 sub-agent 写出同样严格的 `classification-response.json`，原样回显上述五个绑定字段，并对请求中每个页码恰好返回一个 `page_type`、`confidence` 和 `evidence`。重复、缺失、多出、跨任务、过期或绑定不符的响应一律拒绝。只有非 `unknown`、`confidence >= 0.80` 且证据非空的结果才能重建该页候选并继续；低置信、证据为空、仍为 `unknown` 或视觉能力不可用时继续保持 `parsed` 并等待人工分类，不静默跳过。
+
 ### 5.5 候选文本筛选
 
 - BOM：材料、成分、克重、用途、部件和工艺备注。
@@ -173,7 +177,7 @@ mixed_text | manual_candidate | skipped_admin | skipped_code |
 skipped_duplicate | low_confidence
 ```
 
-在发送翻译前，从混合文本中提取并锁定代码、数字、单位、日期、人名、TCX/Pantone 和 POM/物料编号。返回译文必须包含完全相同的锁定 token 集合。
+在发送翻译前，从混合文本中提取并锁定代码、数字、单位、日期、人名、TCX/Pantone 和 POM/物料编号。返回译文必须按原文出现顺序包含完全相同、区分大小写的锁定 token occurrence 序列；边界、数量或顺序任一改变都必须拒绝。
 
 ### 5.6 Agent 翻译任务
 
@@ -248,7 +252,7 @@ skipped_duplicate | low_confidence
 }
 ```
 
-响应验证：请求 envelope 必须与传入的 JobManifest 精确一致，并重新计算验证 `request_sha256`；响应 envelope 的 schema_version、job_id、source/glossary SHA-256 和 request_sha256 必须与请求完全一致。跨任务或跨请求交换即使 items 内容相同也必须拒绝。绑定通过后，项目 ID 集合必须完全一致；不得重复或漏项；锁定 token 必须完整；术语必须符合；译文不得为空；每项必须包含翻译来源。任何失败都不能按索引猜配。
+响应验证：请求 envelope 必须与传入的 JobManifest 精确一致，并重新计算验证 `request_sha256`；响应 envelope 的 schema_version、job_id、source/glossary SHA-256 和 request_sha256 必须与请求完全一致。跨任务或跨请求交换即使 items 内容相同也必须拒绝。绑定通过后，项目 ID 集合必须完全一致；不得重复或漏项；`preserved_tokens` 必须与请求的 `locked_tokens` 精确序列相等，译文中检出的锁定 occurrence 也必须保持同一边界、大小写、数量和顺序；术语必须符合；译文不得为空；每项必须包含翻译来源。任何失败都不能按索引猜配。
 
 无效 JSON、绑定不符、漏项、token 变化或术语不符只允许向翻译 Agent 发起一次定向纠偏；纠偏请求必须携带相同 schema/job/source/glossary/request 绑定和 `attempt=1`，仍失败则转人工审核。验证 API 的 `expected_attempt` 必须由可信工作流状态传入，响应自报的 `attempt` 只能与其精确比对，不能决定是否再发起纠偏；`expected_attempt=0` 的任一失败最多写出一次纠偏，`expected_attempt=1` 的任一失败直接转人工审核。宿主任务中断、上下文不足、额度耗尽或 sub-agent 失败时停止翻译阶段并保留断点，不得伪造结果。成功结果按请求内容、术语表、提示词版本、宿主、模型标识和执行方式哈希缓存；模型标识为 `unknown` 时缓存仅限当前任务。
 
@@ -311,7 +315,7 @@ approved | approved_edited | skipped
 
 提交的完整 pipeline 和 `blocking_issues` 必须分别与上述可信派生值精确一致；可信阻断项非空时，即使提交 JSON 删除阻断项也仍必须阻止加载。任务级 pipeline 还必须与全部 item 的 `translation_host`、`translation_execution_mode`、`translation_model`、`translation_prompt_version` 确定性汇总完全一致。`schema_version` 是必填字段；`review_completed_at` 只接受带时区的 ISO-8601 字符串。
 
-批准项以 `suggested_translation` 为最终译文，修改后批准项以 `reviewed_translation` 为最终译文；加载时必须重新验证锁定 token 的精确多重集/边界、普通术语的权威目标译法，以及 do-not-translate 命中的原文保留。DNT 校验独立于 `locked_tokens`：必须按可信 hit 的规范化区间/命中文本投影回源文精确子串，并要求最终译文保留完全相同的源文拼写和精确出现次数。
+批准项以 `suggested_translation` 为最终译文，修改后批准项以 `reviewed_translation` 为最终译文；加载时必须重新验证锁定 token 的精确序列/边界（包括大小写、数量和出现顺序）、普通术语的权威目标译法，以及 do-not-translate 命中的原文保留。DNT 校验独立于 `locked_tokens`：必须按可信 hit 的规范化区间/命中文本投影回源文精确子串，并要求最终译文保留完全相同的源文拼写和精确出现次数。
 
 `source.sha256`、`glossary.sha256`、页数、`schema_version`、JobManifest/候选集合绑定或上述确定性约束不匹配时，apply 阶段立即失败，不能提供“忽略并继续”选项。
 

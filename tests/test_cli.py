@@ -75,6 +75,24 @@ def test_cli_emits_busy_as_status_without_inventing_workflow_state(capsys, monke
     assert "state" not in payload
 
 
+def test_cli_emits_agent_classification_wait_checkpoint(capsys, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        techpack_pdf_cli,
+        "analyze",
+        lambda *_args: WorkflowResult(
+            4,
+            "parsed",
+            tmp_path / "job",
+            wait_reason="agent_classification",
+        ),
+    )
+
+    assert main(["analyze", "input.pdf", "--glossary", "terms.csv", "--job-dir", "jobs"]) == 4
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "parsed"
+    assert payload["wait_reason"] == "agent_classification"
+
+
 def test_workflow_result_rejects_non_state_status_in_state_field():
     with pytest.raises(ValueError):
         WorkflowResult(4, "workflow_busy")

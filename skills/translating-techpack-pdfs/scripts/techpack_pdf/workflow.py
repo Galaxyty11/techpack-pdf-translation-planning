@@ -16,7 +16,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .apply import ApplyResult, apply_review
 from .errors import TechpackError
@@ -34,7 +34,15 @@ from .models import (
 )
 from .pdf_analysis import PdfManifest, inspect_pdf
 from .review import build_review_html, load_review
-from .selection import PageFeatures, PageNode, SelectionPage, classify_page, select_candidates
+from .selection import (
+    AgentClassification,
+    PageClassification,
+    PageFeatures,
+    PageNode,
+    SelectionPage,
+    classify_page,
+    select_candidates,
+)
 from .translation import TranslationValidationError, validate_translation_response, write_translation_request
 
 
@@ -92,12 +100,21 @@ class _StateSnapshot(_StrictModel):
     state: WorkflowState
     revision: int = Field(ge=0)
     expected_attempt: Literal[0, 1]
-    wait_reason: Literal["host_translation", "host_correction", "agent_failure", "human_review_required", "human_review"] | None
+    wait_reason: Literal[
+        "agent_classification",
+        "host_translation",
+        "host_correction",
+        "agent_failure",
+        "human_review_required",
+        "human_review",
+    ] | None
     artifacts: "_ArtifactDigests"
 
 
 class _ArtifactDigests(_StrictModel):
     analysis: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    classification_request: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    classification_response: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     request: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     response: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     expected_output: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
@@ -113,6 +130,14 @@ class _AnalysisNode(_StrictModel):
     field_role: str = Field(min_length=1)
 
 
+class _PendingClassification(_StrictModel):
+    reason: Literal["unknown", "conflict", "low_confidence"]
+    title: str
+    table_headers: list[str]
+    visual_features: list[str]
+    evidence: list[str]
+
+
 class _AnalysisPage(_StrictModel):
     page_index: int = Field(ge=0)
     page_type: PageType
@@ -122,6 +147,49 @@ class _AnalysisPage(_StrictModel):
     width: float = Field(gt=0)
     height: float = Field(gt=0)
     nodes: list[_AnalysisNode]
+    classification_request: _PendingClassification | None = None
+
+
+class _ClassificationRequestItem(_StrictModel):
+    page_index: int = Field(ge=0)
+    reason: Literal["unknown", "conflict", "low_confidence"]
+    title: str
+    table_headers: list[str]
+    visual_features: list[str]
+    evidence: list[str]
+    thumbnail: str = Field(min_length=1)
+
+
+class _ClassificationRequestEnvelope(_StrictModel):
+    schema_version: Literal["1.1"]
+    job_id: str = Field(min_length=1)
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    glossary_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    items: list[_ClassificationRequestItem] = Field(min_length=1)
+
+
+class _ClassificationResponseItem(_StrictModel):
+    page_index: int = Field(ge=0)
+    page_type: PageType
+    confidence: float = Field(ge=0, le=1)
+    evidence: list[str]
+
+    @field_validator("evidence")
+    @classmethod
+    def evidence_is_nonblank(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() or item != item.strip() for item in value):
+            raise ValueError("evidence must contain trimmed nonblank strings")
+        return value
+
+
+class _ClassificationResponseEnvelope(_StrictModel):
+    schema_version: Literal["1.1"]
+    job_id: str = Field(min_length=1)
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    glossary_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    items: list[_ClassificationResponseItem] = Field(min_length=1)
 
 
 class _GlossaryHitSnapshot(_StrictModel):
@@ -310,7 +378,12 @@ class WorkflowResult:
     input_index: int | None = None
     batch_status: Literal["completed"] | None = None
     status: Literal["workflow_busy", "recovery_required"] | None = None
-    wait_reason: Literal["concurrent_operation", "apply_recovery", "review_recovery"] | None = None
+    wait_reason: Literal[
+        "agent_classification",
+        "concurrent_operation",
+        "apply_recovery",
+        "review_recovery",
+    ] | None = None
 
     def __post_init__(self) -> None:
         if self.state is not None:
@@ -409,7 +482,15 @@ def _prepare_review_locked(job_dir: str | Path) -> WorkflowResult:
     if state.state is WorkflowState.PARSED:
         analysis = _load_model(directory, "analysis.json", _AnalysisSnapshot)
         _assert_snapshot_binding(analysis, job)
-        _atomic_translation_request(directory, _candidates_from_analysis(analysis), job)
+        effective = _effective_analysis(directory, job, analysis)
+        if effective is None:
+            return WorkflowResult(
+                4,
+                WorkflowState.PARSED,
+                directory,
+                wait_reason="agent_classification",
+            )
+        _atomic_translation_request(directory, _candidates_from_analysis(effective), job)
         _write_state(
             directory,
             job,
@@ -437,8 +518,12 @@ def _prepare_review_locked(job_dir: str | Path) -> WorkflowResult:
     if not _artifact_exists(directory, "translation-response.json"):
         return WorkflowResult(4, WorkflowState.TRANSLATION_REQUESTED, directory)
 
-    analysis = _load_model(directory, "analysis.json", _AnalysisSnapshot)
-    _assert_snapshot_binding(analysis, job)
+    analysis = _effective_analysis(directory, job)
+    if analysis is None:
+        raise _workflow_error(
+            "workflow_state_invalid",
+            "Validated classification is missing",
+        )
     request = _read_json(directory, "translation-request.json")
     response = _response_input(directory)
     glossary = load_glossary(_snapshot_glossary_path(directory, job))
@@ -742,8 +827,9 @@ def _verify_apply_integrity_closure(
 ) -> None:
     """Reconstruct every bound upstream contract before editing a PDF."""
     try:
-        analysis = _load_model(directory, "analysis.json", _AnalysisSnapshot)
-        _assert_snapshot_binding(analysis, job)
+        analysis = _effective_analysis(directory, job)
+        if analysis is None:
+            raise ValueError
         request_bytes = _bounded_binary_read(_inside(directory, "translation-request.json"))
         if request_bytes != _canonical_request_bytes(directory, analysis, job):
             raise ValueError
@@ -786,7 +872,14 @@ def _analyze_one(
         _atomic_json_write(directory / "manifest.json", job.model_dump(mode="json"))
         _write_state(directory, job, WorkflowState.INITIALIZED, 0, 0, None)
         job = _resume_initialized_job(directory, job, mineru_client)
-        analysis = _load_model(directory, "analysis.json", _AnalysisSnapshot)
+        analysis = _effective_analysis(directory, job)
+        if analysis is None:
+            return WorkflowResult(
+                4,
+                WorkflowState.PARSED,
+                directory,
+                wait_reason="agent_classification",
+            )
         _atomic_translation_request(directory, _candidates_from_analysis(analysis), job)
         _write_state(directory, job, WorkflowState.TRANSLATION_REQUESTED, 2, 0, "host_translation")
         return WorkflowResult(4, WorkflowState.TRANSLATION_REQUESTED, directory)
@@ -827,11 +920,22 @@ def _resume_initialized_job(
     parsed = mineru_client.parse_or_degrade(snapshot_source, pdf)
     _verify_snapshot_inputs(directory, job, snapshot_identities)
     analysis = _analysis_snapshot(directory, job, pdf, parsed, glossary)
-    _ensure_techpack_gate(analysis)
+    classification_pending = _classification_request_from_analysis(analysis, job) is not None
+    if not classification_pending:
+        _ensure_techpack_gate(analysis)
     _verify_snapshot_inputs(directory, job, snapshot_identities)
     _verify_original_inputs(job, identities)
     _atomic_json_write(directory / "analysis.json", analysis.model_dump(mode="json"))
-    _write_state(directory, job, WorkflowState.PARSED, 1, 0, None)
+    if classification_pending:
+        _write_classification_request(directory, analysis, job)
+    _write_state(
+        directory,
+        job,
+        WorkflowState.PARSED,
+        1,
+        0,
+        "agent_classification" if classification_pending else None,
+    )
     return job
 
 
@@ -890,6 +994,17 @@ def _analysis_snapshot(
                     for position, node in enumerate(matched)
                     if node.text.strip()
                 ],
+                classification_request=(
+                    _PendingClassification(
+                        reason=classification.classification_request.reason,
+                        title=classification.classification_request.title,
+                        table_headers=list(classification.classification_request.table_headers),
+                        visual_features=list(classification.classification_request.visual_features),
+                        evidence=list(classification.classification_request.evidence),
+                    )
+                    if classification.classification_request is not None
+                    else None
+                ),
             )
         )
         candidates.extend(_candidate_snapshot(candidate) for candidate in page_candidates)
@@ -902,6 +1017,260 @@ def _analysis_snapshot(
         pages=pages,
         candidates=candidates,
     )
+
+
+def _classification_request_from_analysis(
+    analysis: _AnalysisSnapshot,
+    job: JobManifest,
+) -> _ClassificationRequestEnvelope | None:
+    items = [
+        {
+            "page_index": page.page_index,
+            "reason": page.classification_request.reason,
+            "title": page.classification_request.title,
+            "table_headers": page.classification_request.table_headers,
+            "visual_features": page.classification_request.visual_features,
+            "evidence": page.classification_request.evidence,
+            "thumbnail": page.thumbnail,
+        }
+        for page in analysis.pages
+        if page.classification_request is not None
+    ]
+    if not items:
+        return None
+    payload = {
+        "schema_version": _SCHEMA_VERSION,
+        "job_id": job.job_id,
+        "source_sha256": job.source.sha256,
+        "glossary_sha256": job.glossary.sha256,
+        "items": items,
+    }
+    payload["request_sha256"] = _classification_request_hash(payload)
+    return _ClassificationRequestEnvelope.model_validate(payload)
+
+
+def _classification_request_hash(payload: Mapping[str, Any]) -> str:
+    material = dict(payload)
+    material.pop("request_sha256", None)
+    return hashlib.sha256(_canonical_json_bytes(material)).hexdigest()
+
+
+def _write_classification_request(
+    directory: Path,
+    analysis: _AnalysisSnapshot,
+    job: JobManifest,
+) -> bool:
+    request = _classification_request_from_analysis(analysis, job)
+    if request is None:
+        return False
+    _atomic_json_write(
+        directory / "classification-request.json",
+        request.model_dump(mode="json"),
+    )
+    return True
+
+
+def _load_classification_request(
+    directory: Path,
+    analysis: _AnalysisSnapshot,
+    job: JobManifest,
+) -> _ClassificationRequestEnvelope:
+    expected = _classification_request_from_analysis(analysis, job)
+    if expected is None:
+        raise _workflow_error(
+            "workflow_state_invalid",
+            "Classification request has no pending page",
+        )
+    try:
+        actual = _load_model(
+            directory,
+            "classification-request.json",
+            _ClassificationRequestEnvelope,
+        )
+    except TechpackError:
+        raise _workflow_error(
+            "workflow_artifact_invalid",
+            "Classification request is invalid",
+        ) from None
+    actual_payload = actual.model_dump(mode="json")
+    if (
+        actual.request_sha256 != _classification_request_hash(actual_payload)
+        or actual_payload != expected.model_dump(mode="json")
+    ):
+        raise _workflow_error(
+            "workflow_binding_mismatch",
+            "Classification request does not match analysis",
+        )
+    return actual
+
+
+def _load_classification_response(
+    directory: Path,
+    request: _ClassificationRequestEnvelope,
+) -> _ClassificationResponseEnvelope:
+    try:
+        response = _load_model(
+            directory,
+            "classification-response.json",
+            _ClassificationResponseEnvelope,
+        )
+    except TechpackError:
+        raise _workflow_error(
+            "workflow_artifact_invalid",
+            "Classification response is invalid",
+        ) from None
+    if (
+        response.schema_version != request.schema_version
+        or response.job_id != request.job_id
+        or response.source_sha256 != request.source_sha256
+        or response.glossary_sha256 != request.glossary_sha256
+        or response.request_sha256 != request.request_sha256
+    ):
+        raise _workflow_error(
+            "workflow_binding_mismatch",
+            "Classification response does not match its request",
+        )
+    requested_pages = [item.page_index for item in request.items]
+    response_pages = [item.page_index for item in response.items]
+    if (
+        len(response_pages) != len(set(response_pages))
+        or set(response_pages) != set(requested_pages)
+    ):
+        raise _workflow_error(
+            "workflow_artifact_invalid",
+            "Classification response page set is invalid",
+        )
+    return response
+
+
+def _effective_analysis(
+    directory: Path,
+    job: JobManifest,
+    analysis: _AnalysisSnapshot | None = None,
+) -> _AnalysisSnapshot | None:
+    base = analysis or _load_model(directory, "analysis.json", _AnalysisSnapshot)
+    _assert_snapshot_binding(base, job)
+    pending = _classification_request_from_analysis(base, job)
+    if pending is None:
+        return base
+    request = _load_classification_request(directory, base, job)
+    if not _artifact_exists(directory, "classification-response.json"):
+        return None
+    response = _load_classification_response(directory, request)
+    classified = _apply_classification_response(
+        base,
+        response,
+        load_glossary(_snapshot_glossary_path(directory, job)),
+    )
+    if classified is not None:
+        _ensure_techpack_gate(classified)
+    return classified
+
+
+def _apply_classification_response(
+    analysis: _AnalysisSnapshot,
+    response: _ClassificationResponseEnvelope,
+    glossary: Glossary,
+) -> _AnalysisSnapshot | None:
+    responses = {item.page_index: item for item in response.items}
+    pages: list[_AnalysisPage] = []
+    candidates: list[_CandidateSnapshot] = []
+    unresolved = False
+    for page in analysis.pages:
+        existing = [item for item in analysis.candidates if item.page_index == page.page_index]
+        pending = page.classification_request
+        if pending is None:
+            pages.append(page)
+            candidates.extend(existing)
+            continue
+        agent = responses[page.page_index]
+        classification = classify_page(
+            PageFeatures(
+                title=pending.title,
+                table_headers=tuple(pending.table_headers),
+                visual_features=tuple(pending.visual_features),
+                agent_result=AgentClassification(
+                    page_type=agent.page_type,
+                    confidence=agent.confidence,
+                    evidence=tuple(agent.evidence),
+                ),
+            )
+        )
+        if (
+            classification.page_type is PageType.UNKNOWN
+            or classification.confidence < 0.80
+            or not any(item.strip() for item in classification.evidence)
+        ):
+            unresolved = True
+            pages.append(page)
+            candidates.extend(existing)
+            continue
+        pages.append(page.model_copy(update={
+            "page_type": classification.page_type,
+            "confidence": classification.confidence,
+            "evidence": list(classification.evidence),
+            "classification_request": None,
+        }))
+        candidates.extend(
+            _reselect_page_candidates(
+                page.page_index,
+                classification,
+                existing,
+                glossary,
+            )
+        )
+    if unresolved:
+        return None
+    if [item.item_id for item in candidates] != [item.item_id for item in analysis.candidates]:
+        raise _workflow_error(
+            "workflow_artifact_invalid",
+            "Classification changed the candidate set",
+        )
+    return analysis.model_copy(update={"pages": pages, "candidates": candidates})
+
+
+def _reselect_page_candidates(
+    page_index: int,
+    classification: PageClassification,
+    existing: Sequence[_CandidateSnapshot],
+    glossary: Glossary,
+) -> list[_CandidateSnapshot]:
+    nodes: list[PageNode] = []
+    for position, candidate in enumerate(existing):
+        source_bbox = (
+            tuple(candidate.source_bbox)
+            if candidate.source_bbox is not None
+            else None
+        )
+        nodes.append(PageNode(
+            MatchedNode(
+                mineru_index=position,
+                native_index=position if source_bbox is not None else None,
+                text=candidate.source_text,
+                source_bbox=source_bbox,
+                mineru_bbox=source_bbox,
+                coordinate_confidence=candidate.coordinate_confidence,
+                similarity=1.0 if source_bbox is not None else 0.0,
+                distance_ratio=0.0 if source_bbox is not None else None,
+                auto_approvable=candidate.source_auto_approvable,
+            ),
+            candidate.source_kind,
+        ))
+    selected = select_candidates(
+        SelectionPage(
+            page_index=page_index,
+            classification=classification,
+            nodes=tuple(nodes),
+        ),
+        glossary,
+    )
+    rebuilt = [_candidate_snapshot(candidate) for candidate in selected]
+    if [item.item_id for item in rebuilt] != [item.item_id for item in existing]:
+        raise _workflow_error(
+            "workflow_artifact_invalid",
+            "Classification changed stable candidate identities",
+        )
+    return rebuilt
 
 
 def _raw_pages(parsed: dict[str, Any] | NativeOnlyDegradation, pdf: PdfManifest) -> dict[int, dict[str, Any]]:
@@ -1284,7 +1653,10 @@ def _load_state(directory: Path, job: JobManifest) -> _StateSnapshot:
 
 def _verify_state_artifacts(directory: Path, state: _StateSnapshot) -> None:
     names = {
-        "analysis": "analysis.json", "request": "translation-request.json", "response": "translation-response.json",
+        "analysis": "analysis.json",
+        "classification_request": "classification-request.json",
+        "classification_response": "classification-response.json",
+        "request": "translation-request.json", "response": "translation-response.json",
         "expected_output": "expected-output.json", "review_html": "review.html", "review": _TRUSTED_REVIEW_NAME,
         "correction_request": "correction-request.json", "apply_result": "apply-result.json",
     }
@@ -1322,14 +1694,14 @@ def _verify_state_invariants(state: _StateSnapshot) -> None:
         raise _workflow_error("workflow_state_invalid", "Workflow state lacks required artifacts")
     allowed = {
         WorkflowState.INITIALIZED: set(),
-        WorkflowState.PARSED: {"analysis"},
-        WorkflowState.TRANSLATION_REQUESTED: {"analysis", "request", "correction_request"},
-        WorkflowState.TRANSLATION_VALIDATED: {"analysis", "request", "response", "correction_request"},
-        WorkflowState.REVIEW_READY: {"analysis", "request", "response", "expected_output", "review_html", "correction_request"},
-        WorkflowState.REVIEW_COMPLETED: {"analysis", "request", "response", "expected_output", "review_html", "review", "correction_request"},
-        WorkflowState.APPLYING: {"analysis", "request", "response", "expected_output", "review_html", "review", "correction_request", "apply_result"},
-        WorkflowState.SUCCEEDED: {"analysis", "request", "response", "expected_output", "review_html", "review", "correction_request", "apply_result"},
-        WorkflowState.FAILED: {"analysis", "request", "response", "expected_output", "review_html", "review", "correction_request", "apply_result"},
+        WorkflowState.PARSED: {"analysis", "classification_request"},
+        WorkflowState.TRANSLATION_REQUESTED: {"analysis", "classification_request", "classification_response", "request", "correction_request"},
+        WorkflowState.TRANSLATION_VALIDATED: {"analysis", "classification_request", "classification_response", "request", "response", "correction_request"},
+        WorkflowState.REVIEW_READY: {"analysis", "classification_request", "classification_response", "request", "response", "expected_output", "review_html", "correction_request"},
+        WorkflowState.REVIEW_COMPLETED: {"analysis", "classification_request", "classification_response", "request", "response", "expected_output", "review_html", "review", "correction_request"},
+        WorkflowState.APPLYING: {"analysis", "classification_request", "classification_response", "request", "response", "expected_output", "review_html", "review", "correction_request", "apply_result"},
+        WorkflowState.SUCCEEDED: {"analysis", "classification_request", "classification_response", "request", "response", "expected_output", "review_html", "review", "correction_request", "apply_result"},
+        WorkflowState.FAILED: {"analysis", "classification_request", "classification_response", "request", "response", "expected_output", "review_html", "review", "correction_request", "apply_result"},
     }
     if state.state is not WorkflowState.FAILED and any(
         getattr(state.artifacts, field) is not None and field not in allowed[state.state]
@@ -1338,7 +1710,7 @@ def _verify_state_invariants(state: _StateSnapshot) -> None:
         raise _workflow_error("workflow_state_invalid", "Workflow state contains future artifacts")
     valid_waits = {
         WorkflowState.INITIALIZED: {None},
-        WorkflowState.PARSED: {None},
+        WorkflowState.PARSED: {None, "agent_classification"},
         WorkflowState.TRANSLATION_REQUESTED: {"host_translation", "host_correction", "agent_failure", "human_review_required"},
         WorkflowState.TRANSLATION_VALIDATED: {None},
         WorkflowState.REVIEW_READY: {"human_review"},
@@ -1355,6 +1727,16 @@ def _verify_state_invariants(state: _StateSnapshot) -> None:
         raise _workflow_error("workflow_state_invalid", "Workflow revision is contradictory")
     if state.state is WorkflowState.PARSED and state.revision < 1:
         raise _workflow_error("workflow_state_invalid", "Workflow revision is contradictory")
+    if state.state is WorkflowState.PARSED:
+        if state.wait_reason == "agent_classification" and state.artifacts.classification_request is None:
+            raise _workflow_error("workflow_state_invalid", "Workflow state lacks classification request")
+        if state.wait_reason is None and state.artifacts.classification_request is not None:
+            raise _workflow_error("workflow_state_invalid", "Workflow classification wait is contradictory")
+        if state.artifacts.classification_response is not None:
+            raise _workflow_error("workflow_state_invalid", "Parsed state cannot bind classification response")
+    if state.state not in {WorkflowState.INITIALIZED, WorkflowState.PARSED, WorkflowState.FAILED}:
+        if (state.artifacts.classification_request is None) != (state.artifacts.classification_response is None):
+            raise _workflow_error("workflow_state_invalid", "Workflow classification artifacts are incomplete")
     if state.state is WorkflowState.TRANSLATION_REQUESTED:
         if state.wait_reason == "host_translation" and state.expected_attempt != 0:
             raise _workflow_error("workflow_state_invalid", "Workflow attempt is contradictory")
@@ -1373,7 +1755,7 @@ def _load_state_payload(directory: Path) -> _StateSnapshot:
     return state
 
 
-def _write_state(directory: Path, job: JobManifest, state: WorkflowState, revision: int, expected_attempt: Literal[0, 1], wait_reason: Literal["host_translation", "host_correction", "agent_failure", "human_review_required", "human_review"] | None) -> None:
+def _write_state(directory: Path, job: JobManifest, state: WorkflowState, revision: int, expected_attempt: Literal[0, 1], wait_reason: Literal["agent_classification", "host_translation", "host_correction", "agent_failure", "human_review_required", "human_review"] | None) -> None:
     path = directory / "state.json"
     previous: _StateSnapshot | None = None
     if path.exists():
@@ -1433,7 +1815,10 @@ def _mark_job_failed(directory: Path, guard: _JobGuard) -> None:
 
 def _artifact_digests(directory: Path) -> _ArtifactDigests:
     names = {
-        "analysis": "analysis.json", "request": "translation-request.json",
+        "analysis": "analysis.json",
+        "classification_request": "classification-request.json",
+        "classification_response": "classification-response.json",
+        "request": "translation-request.json",
         "response": "translation-response.json", "expected_output": "expected-output.json",
         "review_html": "review.html", "review": _TRUSTED_REVIEW_NAME,
         "correction_request": "correction-request.json", "apply_result": "apply-result.json",

@@ -5,22 +5,30 @@ description: Use when an English apparel TechPack PDF needs reviewed Chinese pro
 
 # Translating TechPack PDFs
 
-Confirm the PDF or first-level PDF directory, the required XLSX/CSV glossary, and the job directory. Read [the translation policy](references/translation-policy.md), then run:
+Set `SKILL_DIR` to this `SKILL.md`'s absolute directory and `PY311` to the configured Python 3.11 interpreter's absolute path. Stop if missing; never use unqualified `python` or a cwd-relative CLI.
+
+Confirm input, required XLSX/CSV glossary, and job directory. Read [the translation policy](references/translation-policy.md), then run:
 
 ```text
-python scripts/techpack_pdf_cli.py analyze <pdf-or-directory> --glossary <glossary> --job-dir <job-root>
+"<PY311>" "<SKILL_DIR>/scripts/techpack_pdf_cli.py" analyze "<absolute-input>" --glossary "<absolute-glossary>" --job-dir "<absolute-job-root>"
 ```
 
-When a job contains `translation-request.json`, read [the Agent contract](references/agent-contract.md). Have the Host Agent or a read-only translation sub-agent return the strict response envelope as `translation-response.json`, then run `python scripts/techpack_pdf_cli.py prepare-review --job <job-dir>`.
+For `classification-request.json`, read [the Agent contract](references/agent-contract.md). The visual Host Agent or read-only sub-agent saves bound `classification-response.json`; then run:
 
-Stop for the user to review every item in `review.html` and export `review.json`. Do not apply before that file exists.
+```text
+"<PY311>" "<SKILL_DIR>/scripts/techpack_pdf_cli.py" prepare-review --job "<absolute-job>"
+```
+
+If classification stays `parsed`, stop; do not skip unknown pages. For `translation-request.json`, the Host Agent or read-only sub-agent saves strict `translation-response.json`; rerun `prepare-review`.
+
+The user reviews every item in `review.html` and exports `review.json`. Do not apply before it exists.
 
 After review, read [the review and apply gates](references/review-and-apply.md), then run:
 
 ```text
-python scripts/techpack_pdf_cli.py apply <source.pdf> --review <job-dir>/review.json --output <source.pdf>.annotated.pdf
+"<PY311>" "<SKILL_DIR>/scripts/techpack_pdf_cli.py" apply "<absolute-source.pdf>" --review "<absolute-job>/review.json" --output "<absolute-source.pdf>.annotated.pdf"
 ```
 
-Translate only selected production content. Preserve every locked token exactly; never convert units or numbers. The deliverable is the original document plus approved red, editable FreeText annotations, never a full-document translation.
+Translate selected production content only. Preserve locked tokens and order; never convert units or numbers. Deliver approved red editable FreeText annotations, never a full-document translation.
 
-If any command or gate fails, stop, preserve the job artifacts, and report the returned status or error code. Do not bypass validation or review.
+On failure, stop, preserve artifacts, and report the status or error code. Never bypass validation or review.

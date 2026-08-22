@@ -2,7 +2,7 @@
 
 ## Glossary gate
 
-The glossary is required and must contain non-empty `source_term` plus `target_term` unless the row is a do-not-translate entry. Optional fields are `aliases`, `category`, `context`, `do_not_translate`, `priority`, and `notes`.
+The glossary is required and must contain non-empty `source_term` plus `target_term` unless the row is a do-not-translate entry. `aliases` is a `|`-separated string. Optional-field defaults are: `aliases=""`, `category="general"`, `context=""`, `do_not_translate=false`, `priority=0`, and `notes=""`.
 
 - Match after Unicode NFKC normalization, case folding, whitespace compression, and common punctuation normalization; preserve the displayed source form.
 - Prefer word-boundary matches, the longest match, then higher priority. A do-not-translate hit overrides an ordinary translation.
@@ -11,7 +11,7 @@ The glossary is required and must contain non-empty `source_term` plus `target_t
 
 ## Page and candidate scope
 
-Classify with deterministic title and table rules before model judgment. The only page types are `general_info`, `bom`, `measurement`, `technical_drawing`, `label_pack`, `sample_review`, `style_sample`, `how_to_measure`, `construction_detail`, `category_fields`, and `unknown`. Use visual Agent classification only for a conflict or unknown result; without visual capability, or below 0.80 confidence, keep `unknown` for review.
+Classify with deterministic title, table, and existing visual-structure rules before model judgment. The only page types are `general_info`, `bom`, `measurement`, `technical_drawing`, `label_pack`, `sample_review`, `style_sample`, `how_to_measure`, `construction_detail`, `category_fields`, and `unknown`. Use the bound visual Agent checkpoint only for a conflict or unknown result. Without visual capability, with empty evidence, or below 0.80 confidence, keep the job at `parsed` for manual classification; do not silently drop the page or generate its translation request.
 
 Select only content a factory must execute or verify:
 

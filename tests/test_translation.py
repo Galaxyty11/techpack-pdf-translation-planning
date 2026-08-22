@@ -399,6 +399,22 @@ def test_response_reuses_task5_validation_for_missing_added_or_changed_tokens(tr
     assert caught.value.failed_item_ids == ("p001-i001",)
 
 
+def test_response_rejects_preserved_tokens_in_a_different_order_from_the_request():
+    request = _items(("p001-i001", "Use ABC123 before XYZ456", "direct"))
+    response = [_item(
+        "p001-i001",
+        "先用 ABC123，再用 XYZ456",
+        "direct",
+        ["XYZ456", "ABC123"],
+    )]
+
+    with pytest.raises(TranslationValidationError) as caught:
+        _validate_items(request, response, _empty_glossary())
+
+    assert caught.value.error_codes == ("locked_token_mismatch",)
+    assert caught.value.failed_item_ids == ("p001-i001",)
+
+
 def test_response_rejects_glossary_terms_used_mismatch():
     request = _request_with_glossary("p001-i001")
     response = [_item("p001-i001", "边缘明线 0.6 cm", "direct", ["0.6", "cm"])]

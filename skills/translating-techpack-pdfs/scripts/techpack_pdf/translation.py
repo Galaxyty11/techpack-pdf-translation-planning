@@ -331,7 +331,7 @@ def _validate_item(request: _TranslationRequestItem, response: _TranslationRespo
     if response.mode != request.mode:
         codes.add("mode_mismatch")
     locked = _locked_text_from_request(request)
-    if Counter(response.preserved_tokens) != Counter(request.locked_tokens) or not validate_locked_tokens(locked, response.translated_text):
+    if response.preserved_tokens != request.locked_tokens or not validate_locked_tokens(locked, response.translated_text):
         codes.add("locked_token_mismatch")
     requested_terms = [term.source_term for term in request.glossary_terms]
     if Counter(response.glossary_terms_used) != Counter(requested_terms):
@@ -400,7 +400,7 @@ def _required_fix(error_code: str) -> str:
         "glossary_terms_used_mismatch": "Report exactly the requested source terms in glossary_terms_used.",
         "invalid_json": "Return valid JSON matching the bound translation response schema.",
         "item_id_set_mismatch": "Return exactly one item for every requested item_id and no others.",
-        "locked_token_mismatch": "Preserve the exact locked token multiset without additions or changes.",
+        "locked_token_mismatch": "Preserve the exact locked token sequence without reordering, additions, or changes.",
         "mode_mismatch": "Return each item using the mode specified by its request.",
         "model_missing": "Set translator.model to a non-empty identifier or unknown.",
         "response_binding_mismatch": "Return an envelope bound to the exact request and job.",

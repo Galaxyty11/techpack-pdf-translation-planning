@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections import Counter
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -292,12 +291,12 @@ def lock_tokens(text: str) -> LockedText:
 
 
 def validate_locked_tokens(source: LockedText, translated_text: str) -> bool:
-    """Compare the exact case-sensitive multiset of source and returned protected values."""
-    expected = Counter(token.value for token in source.tokens)
+    """Compare the exact case-sensitive protected occurrence sequence."""
+    expected = tuple(token.value for token in source.tokens)
     source_occurrences = _source_token_occurrences(source, translated_text)
     detected = lock_tokens(translated_text).tokens
     actual_tokens = _merge_validation_occurrences(source_occurrences, detected)
-    actual = Counter(token.value for token in actual_tokens)
+    actual = tuple(token.value for token in actual_tokens)
     return actual == expected
 
 

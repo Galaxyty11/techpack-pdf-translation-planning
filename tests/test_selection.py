@@ -418,6 +418,13 @@ def test_locked_token_validation_compares_exact_multisets_without_conversion() -
     assert validate_locked_tokens(source, "允许 0.6 cm 两次：0.6 cm 另加 1 mm") is False
 
 
+def test_locked_token_validation_rejects_the_same_occurrences_in_a_different_order() -> None:
+    source = lock_tokens("Use ABC123 before XYZ456")
+
+    assert [token.value for token in source.tokens] == ["ABC123", "XYZ456"]
+    assert validate_locked_tokens(source, "先用 XYZ456，再用 ABC123") is False
+
+
 def test_locked_person_remains_valid_when_the_surrounding_label_is_translated() -> None:
     source = lock_tokens("DESIGNER: Jane Doe; tolerance 0.6 cm")
 
