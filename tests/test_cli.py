@@ -1,0 +1,49 @@
+import json
+
+import pytest
+
+import techpack_pdf_cli
+from techpack_pdf.errors import TechpackError
+from techpack_pdf_cli import main
+
+
+@pytest.mark.parametrize("flag", ["--skip-review", "--ignore-hash", "--force-overlap", "--flatten", "--overwrite"])
+def test_cli_rejects_forbidden_bypass_flags(capsys, flag):
+    assert main(["analyze", "input.pdf", "--glossary", "terms.csv", "--job-dir", "jobs", flag]) == 2
+
+    result = json.loads(capsys.readouterr().err)
+    assert result == {"code": "input_error", "status": "failed"}
+
+
+def test_cli_rejects_apply_output_that_is_not_the_task8_final_path(capsys, tmp_path):
+    source = tmp_path / "a.pdf"
+    review = tmp_path / "review.json"
+    source.write_bytes(b"%PDF-1.4\n")
+    review.write_text("{}", encoding="utf-8")
+
+    assert main(["apply", str(source), "--review", str(review), "--output", str(tmp_path / "other.pdf")]) == 2
+    assert json.loads(capsys.readouterr().err) == {"code": "output_invalid", "status": "failed"}
+
+
+@pytest.mark.parametrize(("code", "expected"), [("mineru_unavailable", 3), ("workflow_quality_failed", 5), ("workflow_input_changed", 2)])
+def test_cli_maps_safe_error_categories_without_traceback(capsys, monkeypatch, code, expected):
+    def fail(*_args, **_kwargs):
+        raise TechpackError(code, "SECRET-DO-NOT-LEAK", {"error_code": code})
+
+    monkeypatch.setattr(techpack_pdf_cli, "analyze", fail)
+    assert main(["analyze", "input.pdf", "--glossary", "terms.csv", "--job-dir", "jobs"]) == expected
+    rendered = capsys.readouterr().err
+    assert "SECRET-DO-NOT-LEAK" not in rendered
+    assert json.loads(rendered)["code"] == code
+
+
+def test_cli_catches_unexpected_exception_as_one_safe_json_result(capsys, monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise RuntimeError(r"C:\\SECRET\\path and traceback must not leak")
+
+    monkeypatch.setattr(techpack_pdf_cli, "analyze", fail)
+    assert main(["analyze", "input.pdf", "--glossary", "terms.csv", "--job-dir", "jobs"]) == 2
+    rendered = capsys.readouterr().err
+    assert json.loads(rendered) == {"code": "internal_error", "status": "failed"}
+    assert "SECRET" not in rendered
+    assert "Traceback" not in rendered
