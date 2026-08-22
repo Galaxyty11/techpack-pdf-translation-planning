@@ -425,16 +425,18 @@ def detect_candidate_collisions(
         )
         target = rendered[0]
         for placement in placements:
+            options = {
+                "fontsize": placement.font_size,
+                "fontname": TOOL_CJK_FONT,
+                "text_color": TEXT_COLOR,
+                "fill_color": None,
+                "border_color": None,
+                "border_width": 0,
+            }
+            if placement.leader_line is not None:
+                options["callout"] = placement.leader_line
             annotation = target.add_freetext_annot(
-                placement.rect,
-                placement.text,
-                fontsize=placement.font_size,
-                fontname=TOOL_CJK_FONT,
-                text_color=TEXT_COLOR,
-                fill_color=None,
-                border_color=None,
-                border_width=0,
-                callout=placement.leader_line,
+                placement.rect, placement.text, **options
             )
             annotation.update()
         collisions.extend(detect_rendered_collisions(page, target, placements))
@@ -764,16 +766,18 @@ def _placement_mask(
         canonical = _canonical_page_rect(page)
         blank = document.new_page(width=canonical.width, height=canonical.height)
         blank.set_rotation(page.rotation)
+        options = {
+            "fontsize": placement.font_size,
+            "fontname": TOOL_CJK_FONT,
+            "text_color": TEXT_COLOR,
+            "fill_color": None,
+            "border_color": None,
+            "border_width": 0,
+        }
+        if placement.leader_line is not None:
+            options["callout"] = placement.leader_line
         annotation = blank.add_freetext_annot(
-            placement.rect,
-            placement.text,
-            fontsize=placement.font_size,
-            fontname=TOOL_CJK_FONT,
-            text_color=TEXT_COLOR,
-            fill_color=None,
-            border_color=None,
-            border_width=0,
-            callout=placement.leader_line,
+            placement.rect, placement.text, **options
         )
         annotation.update()
         pixels = _page_array(blank, dpi)

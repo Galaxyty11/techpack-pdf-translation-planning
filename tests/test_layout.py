@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import shutil
 
+import numpy as np
 import pymupdf
+import pytest
+
+import techpack_pdf.layout as layout_module
 
 from techpack_pdf.layout import (
     Collision,
@@ -558,3 +563,61 @@ def test_optimize_layout_stops_after_two_unchanged_rounds_and_caps_at_ten() -> N
     assert capped.rounds == 10
     assert capped.stable is False
     assert capped.collisions == tuple(render_unresolved)
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_rotated_rectangular_crop_masks_align_and_attribute_source_text_collision(
+    tmp_path: Path, rotation: int
+) -> None:
+    source = tmp_path / f"mask-{rotation}.pdf"
+    after_path = tmp_path / f"mask-{rotation}-after.pdf"
+    document = pymupdf.open()
+    page = document.new_page(width=340, height=220)
+    page.insert_text((60, 80), "SOURCE MARK", fontsize=12)
+    page.set_cropbox(pymupdf.Rect(20, 20, 320, 200))
+    page.set_rotation(rotation)
+    document.save(source)
+    document.close()
+    shutil.copyfile(source, after_path)
+    before = pymupdf.open(source)
+    source_bbox = before[0].search_for("SOURCE MARK")[0]
+    placement = _placement(
+        "over-source",
+        rect=tuple(source_bbox),
+        font_size=7.0,
+    )
+    after = pymupdf.open(after_path)
+    annotation = after[0].add_freetext_annot(
+        placement.rect,
+        placement.text,
+        fontsize=placement.font_size,
+        fontname="china-s",
+        text_color=(0.85, 0.05, 0.05),
+        fill_color=None,
+        border_color=None,
+        border_width=0,
+    )
+    annotation.update()
+    after.saveIncr()
+    after.close()
+    after = pymupdf.open(after_path)
+    try:
+        expected_shape = (
+            int(round(before[0].rect.height * 300 / 72)),
+            int(round(before[0].rect.width * 300 / 72)),
+        )
+        mask = layout_module._placement_mask(before[0], placement, 300)
+        actual_red = layout_module._red_mask(layout_module._page_array(after[0], 300))
+        assert mask.shape == expected_shape
+        assert actual_red.shape == expected_shape
+        assert np.count_nonzero(mask & actual_red) > 4
+        collisions = detect_rendered_collisions(before[0], after[0], (placement,))
+        assert any(
+            value.item_id == placement.item_id
+            and value.kind == "render_overlap"
+            and value.render_dpi == 300
+            for value in collisions
+        )
+    finally:
+        after.close()
+        before.close()

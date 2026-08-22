@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import uuid
@@ -89,6 +90,11 @@ class _WrittenAnnotation:
     page_index: int
     item_id: str
     xref: int
+    placement_signature: tuple[object, ...]
+    text: str
+    rect: tuple[float, float, float, float]
+    font_size: float
+    leader_line: tuple[tuple[float, float], ...] | None
 
 
 @dataclass(frozen=True)
@@ -146,7 +152,7 @@ def apply_review(
         if _sha256(snapshot_path) != review.source.sha256:
             cleanup = _cleanup_problem(snapshot_path, source)
             snapshot_path = None if cleanup is None else snapshot_path
-            return _failure(cleanup or _problem("source_mismatch", "Source PDF changed during validation"))
+            return _failure(_combine_problems(_problem("source_mismatch", "Source PDF changed during validation"), cleanup))
 
         approved = tuple(
             item
@@ -160,7 +166,7 @@ def apply_review(
         if identity_problem is not None:
             cleanup = _cleanup_problem(snapshot_path, source)
             snapshot_path = None if cleanup is None else snapshot_path
-            return _failure(cleanup or identity_problem)
+            return _failure(_combine_problems(identity_problem, cleanup))
 
         source_document = pymupdf.open(snapshot_path)
         try:
@@ -174,7 +180,11 @@ def apply_review(
                 cleanup = _cleanup_problem(snapshot_path, source)
                 snapshot_path = None if cleanup is None else snapshot_path
                 if artifact.problem is not None or cleanup is not None:
-                    return _failure(artifact.problem or cleanup)
+                    return _failure(
+                        _combine_problems(artifact.problem, cleanup),
+                        unresolved_overlaps=artifact.unresolved,
+                        failure_report_path=artifact.report_path,
+                    )
                 return ApplyResult(
                     success=False,
                     output_path=None,
@@ -200,7 +210,7 @@ def apply_review(
         if identity_problem is not None:
             cleanup = _cleanup_problem(snapshot_path, source)
             snapshot_path = None if cleanup is None else snapshot_path
-            return _failure(cleanup or identity_problem)
+            return _failure(_combine_problems(identity_problem, cleanup))
         excluded: set[tuple[object, ...]] = set()
         while True:
             temp_path = _unique_temp_path(source)
@@ -236,7 +246,13 @@ def apply_review(
                     temp_path = None if cleanup is None else temp_path
                     snapshot_path = None if cleanup is None else snapshot_path
                     if artifact.problem is not None or cleanup is not None:
-                        return _failure(artifact.problem or cleanup)
+                        return _failure(
+                            _combine_problems(artifact.problem, cleanup),
+                            layout_rounds=10,
+                            modified_pages=modified_pages,
+                            unresolved_overlaps=artifact.unresolved,
+                            failure_report_path=artifact.report_path,
+                        )
                     return ApplyResult(
                         success=False,
                         output_path=None,
@@ -282,7 +298,13 @@ def apply_review(
                         cleanup = _cleanup_problem(snapshot_path, source)
                         snapshot_path = None if cleanup is None else snapshot_path
                         if artifact.problem is not None or cleanup is not None:
-                            return _failure(artifact.problem or cleanup)
+                            return _failure(
+                                _combine_problems(artifact.problem, cleanup),
+                                layout_rounds=min(total_rounds, 10),
+                                modified_pages=modified_pages,
+                                unresolved_overlaps=artifact.unresolved,
+                                failure_report_path=artifact.report_path,
+                            )
                         return ApplyResult(
                             success=False,
                             output_path=None,
@@ -305,7 +327,7 @@ def apply_review(
                 if identity_problem is not None:
                     cleanup = _cleanup_problem(snapshot_path, source)
                     snapshot_path = None if cleanup is None else snapshot_path
-                    return _failure(cleanup or identity_problem)
+                    return _failure(_combine_problems(identity_problem, cleanup))
                 continue
             if verification.problem is not None:
                 cleanup = _cleanup_many((temp_path, snapshot_path), source)
@@ -324,13 +346,19 @@ def apply_review(
             cleanup = _cleanup_many((temp_path, snapshot_path), source)
             temp_path = None if cleanup is None else temp_path
             snapshot_path = None if cleanup is None else snapshot_path
-            return _failure(cleanup or _problem("source_mismatch", "Source PDF changed before publication"))
+            return _failure(_combine_problems(_problem("source_mismatch", "Source PDF changed before publication"), cleanup))
         cleanup = _cleanup_problem(snapshot_path, source)
         if cleanup is not None:
             combined = _cleanup_many((snapshot_path, temp_path), source)
             return _failure(combined or cleanup)
         snapshot_path = None
-        publish_problem = _publish_no_clobber(temp_path, final_path, source)
+        publish_problem = _publish_no_clobber(
+            temp_path,
+            final_path,
+            source,
+            expected_source_identity=source_identity,
+            expected_source_sha256=review.source.sha256,
+        )
         if publish_problem is not None:
             if publish_problem["code"] == "temp_cleanup_failed":
                 return _failure(publish_problem)
@@ -468,16 +496,18 @@ def _write_annotations(
     written: list[_WrittenAnnotation] = []
     for placement in placements:
         page = document[placement.page_index]
+        annotation_options: dict[str, Any] = {
+            "fontsize": placement.font_size,
+            "fontname": TOOL_CJK_FONT,
+            "text_color": TEXT_COLOR,
+            "fill_color": None,
+            "border_color": None,
+            "border_width": 0,
+        }
+        if placement.leader_line is not None:
+            annotation_options["callout"] = placement.leader_line
         annotation = page.add_freetext_annot(
-            placement.rect,
-            placement.text,
-            fontsize=placement.font_size,
-            fontname=TOOL_CJK_FONT,
-            text_color=TEXT_COLOR,
-            fill_color=None,
-            border_color=None,
-            border_width=0,
-            callout=placement.leader_line,
+            placement.rect, placement.text, **annotation_options
         )
         metadata = {
             "item_id": placement.item_id,
@@ -490,7 +520,16 @@ def _write_annotations(
         )
         annotation.update()
         written.append(
-            _WrittenAnnotation(placement.page_index, placement.item_id, annotation.xref)
+            _WrittenAnnotation(
+                placement.page_index,
+                placement.item_id,
+                annotation.xref,
+                _placement_signature(placement),
+                placement.text,
+                placement.rect,
+                placement.font_size,
+                placement.leader_line,
+            )
         )
     return tuple(written)
 
@@ -570,10 +609,17 @@ def _verify_temp(
         written = tuple(written or ())
         approved_ids = Counter(placement.item_id for placement in placements)
         written_ids = Counter(value.item_id for value in written)
+        placements_by_id = {placement.item_id: placement for placement in placements}
         if (
             approved_ids != written_ids
             or any(count != 1 for count in approved_ids.values())
             or len({(value.page_index, value.xref) for value in written}) != len(written)
+            or any(
+                value.item_id not in placements_by_id
+                or value.placement_signature
+                != _placement_signature(placements_by_id[value.item_id])
+                for value in written
+            )
         ):
             return _VerificationOutcome(
                 _problem("verification_failed", "Approved item annotation mapping is invalid")
@@ -594,7 +640,7 @@ def _verify_temp(
                 )
                 or before.content_streams != after.content_streams
                 or before.images != after.images
-                or before.drawings != after.drawings
+                or not all(drawing in after.drawings for drawing in before.drawings)
                 or before.annotations != after.annotations
             ):
                 return _VerificationOutcome(
@@ -618,6 +664,29 @@ def _verify_temp(
                 return _VerificationOutcome(_problem("verification_failed", "New annotation metadata is invalid"))
             if metadata.get("item_id") != record.item_id:
                 return _VerificationOutcome(_problem("verification_failed", "New annotation item binding is invalid"))
+            expected_metadata = {
+                "item_id": record.item_id,
+                "source_page": record.page_index + 1,
+                "tool_version": TOOL_VERSION,
+            }
+            if metadata != expected_metadata:
+                return _VerificationOutcome(_problem("verification_failed", "New annotation metadata is incomplete"))
+            if (
+                annotation.info.get("content") != record.text
+                or annotation.info.get("title") != "techpack_pdf"
+                or not _rect_close(
+                    _annotation_body_rect(output, annotation),
+                    record.rect,
+                    tolerance=0.05,
+                )
+                or not _appearance_is_valid(output, annotation, record.font_size)
+                or float(annotation.border.get("width") or 0.0) > 0.01
+                or bool(annotation.colors.get("fill"))
+                or not _leader_is_valid(output, annotation, record.leader_line)
+            ):
+                return _VerificationOutcome(
+                    _problem("verification_failed", "New annotation appearance or geometry is invalid")
+                )
             actual_ids[str(metadata["item_id"])] += 1
         if actual_ids != approved_ids:
             return _VerificationOutcome(_problem("verification_failed", "Approved item annotation set is incomplete"))
@@ -713,6 +782,120 @@ def _snapshot_document(
     return tuple(snapshots)
 
 
+def _rect_close(
+    actual: pymupdf.Rect,
+    expected: Sequence[float],
+    *,
+    tolerance: float,
+) -> bool:
+    return all(
+        abs(float(left) - float(right)) <= tolerance
+        for left, right in zip(tuple(actual), expected, strict=True)
+    )
+
+
+def _annotation_body_rect(
+    document: pymupdf.Document, annotation: pymupdf.Annot
+) -> pymupdf.Rect:
+    rect = pymupdf.Rect(annotation.rect)
+    key_type, raw = document.xref_get_key(annotation.xref, "RD")
+    if key_type != "array":
+        return rect
+    values = [float(value) for value in re.findall(r"[-+]?\d*\.?\d+", raw)]
+    if len(values) != 4:
+        return pymupdf.Rect()
+    left, bottom, right, top = values
+    return pymupdf.Rect(
+        rect.x0 + left,
+        rect.y0 + top,
+        rect.x1 - right,
+        rect.y1 - bottom,
+    )
+
+
+def _appearance_is_valid(
+    document: pymupdf.Document,
+    annotation: pymupdf.Annot,
+    expected_font_size: float,
+) -> bool:
+    if annotation.type[1] != "FreeText" or not 5.0 <= expected_font_size <= 7.0:
+        return False
+    default_appearance = document.xref_get_key(annotation.xref, "DA")[1]
+    color_match = re.search(
+        r"([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+rg",
+        default_appearance,
+    )
+    font_match = re.search(r"/([^\s]+)\s+([-+]?\d*\.?\d+)\s+Tf", default_appearance)
+    if color_match is None or font_match is None:
+        return False
+    color = tuple(float(color_match.group(index)) for index in (1, 2, 3))
+    appearance_type, appearance_value = document.xref_get_key(annotation.xref, "AP/N")
+    if appearance_type != "xref":
+        return False
+    try:
+        appearance_xref = int(appearance_value.split()[0])
+        appearance_object = document.xref_object(appearance_xref, compressed=False)
+        appearance_stream = document.xref_stream(appearance_xref).decode(
+            "latin-1", errors="strict"
+        )
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        return False
+    ap_color_match = re.search(
+        r"([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+rg",
+        appearance_stream,
+    )
+    ap_font_match = re.search(
+        r"/([^\s]+)\s+([-+]?\d*\.?\d+)\s+Tf", appearance_stream
+    )
+    if ap_color_match is None or ap_font_match is None:
+        return False
+    ap_color = tuple(float(ap_color_match.group(index)) for index in (1, 2, 3))
+    resource_name = ap_font_match.group(1)
+    resource_match = re.search(
+        rf"/{re.escape(resource_name)}\s+(\d+)\s+0\s+R", appearance_object
+    )
+    if resource_match is None:
+        return False
+    try:
+        font_object = document.xref_object(
+            int(resource_match.group(1)), compressed=False
+        )
+    except (RuntimeError, ValueError):
+        return False
+    stable_cjk_font = resource_name == "Song" or (
+        "/Subtype /Type0" in font_object
+        and "Droid#20Sans#20Fallback" in font_object
+    )
+    return (
+        all(abs(actual - expected) <= 0.005 for actual, expected in zip(color, TEXT_COLOR, strict=True))
+        and bool(font_match.group(1))
+        and abs(float(font_match.group(2)) - expected_font_size) <= 0.01
+        and all(
+            abs(actual - expected) <= 0.01
+            for actual, expected in zip(ap_color, TEXT_COLOR, strict=True)
+        )
+        and abs(float(ap_font_match.group(2)) - expected_font_size) <= 0.01
+        and stable_cjk_font
+    )
+
+
+def _leader_is_valid(
+    document: pymupdf.Document,
+    annotation: pymupdf.Annot,
+    expected: Sequence[Sequence[float]] | None,
+) -> bool:
+    if expected is None:
+        return document.xref_get_key(annotation.xref, "IT")[0] == "null"
+    actual = annotation.vertices
+    if actual is None or len(actual) != len(expected):
+        return False
+    return all(
+        abs(float(actual_value) - float(expected_value)) <= 0.05
+        for actual_point, expected_point in zip(actual, expected, strict=True)
+        for actual_value, expected_value in zip(actual_point, expected_point, strict=True)
+    )
+
+
 def _unresolved(
     layout: LayoutResult,
     attempted: Mapping[str, Sequence[Placement]],
@@ -781,8 +964,8 @@ def _write_unresolved_artifacts(
             data = rendered[page_index].get_pixmap(
                 dpi=300, alpha=False, colorspace=pymupdf.csRGB, annots=True
             ).tobytes("png")
-            created.append(path)
             _atomic_artifact_write(path, data)
+            created.append(path)
             render_paths[page_index] = path
         unresolved = _unresolved(layout, attempted, render_paths)
         report_path = source.with_name(f".{source.name}.unresolved.{artifact_id}.json")
@@ -796,8 +979,8 @@ def _write_unresolved_artifacts(
             ensure_ascii=False,
             indent=2,
         ).encode("utf-8")
-        created.append(report_path)
         _atomic_artifact_write(report_path, report_data)
+        created.append(report_path)
         return _ArtifactOutcome(unresolved, report_path)
     except Exception as error:
         retained = list(_cleanup_artifacts(created, source))
@@ -820,16 +1003,19 @@ def _write_unresolved_artifacts(
 
 def _atomic_artifact_write(final_path: Path, data: bytes) -> Path:
     part = final_path.with_name(f".{final_path.name}.{uuid.uuid4().hex}.part")
+    linked_by_this_call = False
     try:
         with part.open("xb") as stream:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
         os.link(part, final_path)
+        linked_by_this_call = True
         part.unlink()
     except Exception as error:
         retained: list[Path] = []
-        for path in (part, final_path):
+        owned_paths = (part, final_path) if linked_by_this_call else (part,)
+        for path in owned_paths:
             try:
                 path.unlink(missing_ok=True)
             except OSError:
@@ -885,7 +1071,7 @@ def _remove_exact_temp(path: Path, source: Path) -> bool:
 
 
 def _cleanup_problem(path: Path | None, source: Path) -> dict[str, Any] | None:
-    if path is None or _remove_exact_temp(path, source):
+    if path is None or _remove_temp_with_retry(path, source):
         return None
     return _problem(
         "temp_cleanup_failed",
@@ -897,7 +1083,11 @@ def _cleanup_problem(path: Path | None, source: Path) -> dict[str, Any] | None:
 def _cleanup_many(
     paths: Sequence[Path | None], source: Path
 ) -> dict[str, Any] | None:
-    retained = [path for path in paths if path is not None and not _remove_exact_temp(path, source)]
+    retained = [
+        path
+        for path in paths
+        if path is not None and not _remove_temp_with_retry(path, source)
+    ]
     if not retained:
         return None
     return _problem(
@@ -906,8 +1096,81 @@ def _cleanup_many(
         retained_paths=[str(path) for path in retained],
         temp_path=str(retained[0]),
     )
+
+
+def _remove_temp_with_retry(path: Path, source: Path) -> bool:
+    for _attempt in range(2):
+        if _remove_exact_temp(path, source) or not path.exists():
+            return True
+    return not path.exists()
+
+
+def _combine_problems(
+    *problems: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    present = tuple(problem for problem in problems if problem is not None)
+    if not present:
+        return None
+    if len(present) == 1:
+        return present[0]
+    paths: dict[str, dict[str, Any]] = {}
+    for problem in present:
+        for path in _paths_from_problem(problem):
+            paths.setdefault(
+                str(path),
+                {
+                    "path": str(path),
+                    "kind": _resource_kind(path),
+                    "exists": path.exists(),
+                },
+            )
+    return _problem(
+        "combined_failure",
+        "Multiple safety operations failed",
+        causes=list(present),
+        retained_resources=list(paths.values()),
+    )
+
+
+def _paths_from_problem(problem: Mapping[str, Any]) -> tuple[Path, ...]:
+    found: list[Path] = []
+
+    def visit(key: str, value: Any) -> None:
+        if isinstance(value, Mapping):
+            for nested_key, nested_value in value.items():
+                visit(str(nested_key), nested_value)
+        elif isinstance(value, (list, tuple)):
+            for nested in value:
+                visit(key, nested)
+        elif isinstance(value, str) and "path" in key.casefold():
+            candidate = Path(value)
+            if candidate not in found:
+                found.append(candidate)
+
+    visit("problem", problem)
+    return tuple(found)
+
+
+def _resource_kind(path: Path) -> str:
+    name = path.name.casefold()
+    if name.endswith(".part"):
+        return "artifact_part"
+    if name.endswith(".png"):
+        return "artifact_png"
+    if name.endswith(".json"):
+        return "artifact_json"
+    if name.endswith(".annotated.pdf"):
+        return "final_pdf"
+    if name.endswith(".tmp.pdf"):
+        return "temporary_pdf"
+    return "path"
 def _publish_no_clobber(
-    temp_path: Path, final_path: Path, source: Path
+    temp_path: Path,
+    final_path: Path,
+    source: Path,
+    *,
+    expected_source_identity: tuple[int, int, int, int] | None = None,
+    expected_source_sha256: str | None = None,
 ) -> dict[str, Any] | None:
     try:
         os.link(temp_path, final_path)
@@ -918,6 +1181,29 @@ def _publish_no_clobber(
         code = "publish_failed"
         message = "Final output could not be published atomically"
     else:
+        if (
+            expected_source_identity is not None
+            and expected_source_sha256 is not None
+            and not _source_unchanged(
+                source, expected_source_identity, expected_source_sha256
+            )
+        ):
+            try:
+                final_path.unlink()
+            except OSError:
+                return _problem(
+                    "publish_rollback_failed",
+                    "Source changed and published output could not be rolled back",
+                    temp_path=str(temp_path),
+                    final_path=str(final_path),
+                    temp_exists=temp_path.exists(),
+                    final_exists=final_path.exists(),
+                )
+            cleanup = _cleanup_problem(temp_path, source)
+            source_problem = _problem(
+                "source_mismatch", "Source PDF changed during publication"
+            )
+            return _combine_problems(source_problem, cleanup)
         if _remove_exact_temp(temp_path, source):
             return None
         try:
@@ -985,17 +1271,23 @@ def _problem(code: str, message: str, **details: Any) -> dict[str, Any]:
 
 
 def _failure(
-    problem: dict[str, Any],
+    problem: dict[str, Any] | None,
     *,
     layout_rounds: int = 0,
     modified_pages: Sequence[int] = (),
+    unresolved_overlaps: Sequence[dict[str, Any]] = (),
+    failure_report_path: Path | None = None,
 ) -> ApplyResult:
+    if problem is None:
+        problem = _problem("apply_failed", "PDF annotations could not be applied safely")
     return ApplyResult(
         success=False,
         output_path=None,
         problems=(problem,),
+        unresolved_overlaps=tuple(unresolved_overlaps),
         layout_rounds=layout_rounds,
         modified_pages=tuple(modified_pages),
+        failure_report_path=failure_report_path,
     )
 
 

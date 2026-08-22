@@ -60,6 +60,21 @@ def _make_source(path: Path, *, blocked: bool = False) -> None:
     document.close()
 
 
+def _make_rectangular_cropped_source(path: Path, rotation: int) -> None:
+    document = pymupdf.open()
+    page = document.new_page(width=340, height=220)
+    page.insert_text((40, 55), "SOURCE A", fontsize=9)
+    page.insert_text((40, 105), "SOURCE B", fontsize=9)
+    page.insert_text((40, 155), "SOURCE C", fontsize=9)
+    old = page.add_text_annot((120, 175), "existing")
+    old.set_info(title="legacy")
+    old.update()
+    page.set_cropbox(pymupdf.Rect(20, 20, 320, 200))
+    page.set_rotation(rotation)
+    document.save(path)
+    document.close()
+
+
 def _review(source: Path, *, include_skipped: bool = True, secret: str = "SOURCE") -> ReviewDocument:
     items = [
         _review_item(
@@ -782,18 +797,12 @@ def test_source_change_after_validation_before_publish_is_rejected(
     assert not source.with_name(source.name + ".annotated.pdf").exists()
 
 
-@pytest.mark.parametrize("rotation", [90, 180, 270])
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
 def test_apply_uses_crop_relative_unrotated_coordinates_on_rotated_cropped_pages(
     tmp_path: Path, rotation: int
 ) -> None:
     source = tmp_path / f"rotated-{rotation}.pdf"
-    _make_source(source)
-    document = pymupdf.open(source)
-    page = document[0]
-    page.set_cropbox(pymupdf.Rect(10, 10, 300, 300))
-    page.set_rotation(rotation)
-    document.saveIncr()
-    document.close()
+    _make_rectangular_cropped_source(source, rotation)
     review_path, job, expected_output = _review_bundle(tmp_path, source)
 
     result = apply_review(source, review_path, job, expected_output)
@@ -802,6 +811,11 @@ def test_apply_uses_crop_relative_unrotated_coordinates_on_rotated_cropped_pages
     output = pymupdf.open(result.output_path)
     try:
         canonical = pymupdf.Rect(0, 0, output[0].cropbox.width, output[0].cropbox.height)
+        assert tuple(canonical) == pytest.approx((0.0, 0.0, 300.0, 180.0))
+        expected_render_size = (180.0, 300.0) if rotation in {90, 270} else (300.0, 180.0)
+        assert (output[0].rect.width, output[0].rect.height) == pytest.approx(
+            expected_render_size
+        )
         rects = []
         for annot in output[0].annots():
             if annot.info.get("title") == "techpack_pdf" and annot.info.get(
@@ -926,3 +940,308 @@ def test_attempted_history_merges_in_first_seen_order_without_duplicates(
     assert [apply_module._placement_signature(value) for value in merged[item.item_id]] == [
         apply_module._placement_signature(value) for value in candidates[:3]
     ]
+
+
+def test_publish_rechecks_trusted_source_after_link_and_rolls_back(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "post-link-source.pdf"
+    _make_source(source)
+    temp = apply_module._unique_temp_path(source)
+    temp.write_bytes(source.read_bytes())
+    final = source.with_name(source.name + ".annotated.pdf")
+    identity = apply_module._source_identity(source)
+    digest = _sha256(source)
+    real_link = apply_module.os.link
+
+    def mutate_in_link_window(source_path, target_path):
+        result = real_link(source_path, target_path)
+        with source.open("ab") as stream:
+            stream.write(b"\n% changed in link window")
+        return result
+
+    monkeypatch.setattr(apply_module.os, "link", mutate_in_link_window)
+    problem = apply_module._publish_no_clobber(
+        temp,
+        final,
+        source,
+        expected_source_identity=identity,
+        expected_source_sha256=digest,
+    )
+
+    assert problem is not None
+    assert problem["code"] == "source_mismatch"
+    assert not final.exists()
+    assert not temp.exists()
+
+
+def test_post_link_source_change_reports_observable_rollback_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "post-link-rollback.pdf"
+    _make_source(source)
+    temp = apply_module._unique_temp_path(source)
+    temp.write_bytes(source.read_bytes())
+    final = source.with_name(source.name + ".annotated.pdf")
+    identity = apply_module._source_identity(source)
+    digest = _sha256(source)
+    real_link = apply_module.os.link
+    real_unlink = Path.unlink
+
+    def mutate_in_link_window(source_path, target_path):
+        result = real_link(source_path, target_path)
+        with source.open("ab") as stream:
+            stream.write(b"\n% changed in link window")
+        return result
+
+    def block_final_rollback(path, *args, **kwargs):
+        if path == final:
+            raise PermissionError("locked final")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(apply_module.os, "link", mutate_in_link_window)
+    monkeypatch.setattr(Path, "unlink", block_final_rollback)
+    problem = apply_module._publish_no_clobber(
+        temp,
+        final,
+        source,
+        expected_source_identity=identity,
+        expected_source_sha256=digest,
+    )
+
+    assert problem is not None
+    assert problem["code"] == "publish_rollback_failed"
+    assert problem["details"]["final_path"] == str(final)
+    assert problem["details"]["temp_path"] == str(temp)
+    assert problem["details"]["final_exists"] is True
+    assert problem["details"]["temp_exists"] is True
+
+
+@pytest.mark.parametrize("suffix", ["page-1.png", "report.json"])
+def test_atomic_artifact_collision_never_deletes_a_preexisting_target(
+    tmp_path: Path, suffix: str
+) -> None:
+    target = tmp_path / f".source.pdf.unresolved.fixed.{suffix}"
+    target.write_bytes(b"preexisting-owner")
+
+    with pytest.raises(apply_module._ArtifactWriteError):
+        apply_module._atomic_artifact_write(target, b"new-evidence")
+
+    assert target.read_bytes() == b"preexisting-owner"
+    assert not list(tmp_path.glob(f".{target.name}.*.part"))
+
+
+def test_atomic_artifact_link_race_preserves_the_concurrent_winner(
+    tmp_path: Path, monkeypatch
+) -> None:
+    target = tmp_path / ".source.pdf.unresolved.fixed.page-1.png"
+
+    def racing_link(_part, final_path):
+        Path(final_path).write_bytes(b"concurrent-owner")
+        raise FileExistsError("concurrent winner")
+
+    monkeypatch.setattr(apply_module.os, "link", racing_link)
+    with pytest.raises(apply_module._ArtifactWriteError):
+        apply_module._atomic_artifact_write(target, b"new-evidence")
+
+    assert target.read_bytes() == b"concurrent-owner"
+    assert not list(tmp_path.glob(f".{target.name}.*.part"))
+
+
+def test_successful_artifacts_remain_referenced_when_temp_cleanup_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "artifact-plus-cleanup.pdf"
+    _make_source(source, blocked=True)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    monkeypatch.setattr(apply_module, "_remove_exact_temp", lambda *_args: False)
+
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is False
+    assert result.failure_report_path is not None
+    assert result.failure_report_path.exists()
+    assert result.unresolved_overlaps
+    assert result.problems[0]["code"] == "temp_cleanup_failed"
+
+
+def test_combined_failures_preserve_every_retained_resource_state(tmp_path: Path) -> None:
+    temp = tmp_path / ".source.pdf.one.tmp.pdf"
+    snapshot = tmp_path / ".source.pdf.two.tmp.pdf"
+    png = tmp_path / ".source.pdf.unresolved.x.page-1.png"
+    part = tmp_path / "..source.pdf.unresolved.x.page-1.png.y.part"
+    report = tmp_path / ".source.pdf.unresolved.x.json"
+    final = tmp_path / "source.pdf.annotated.pdf"
+    for path in (temp, snapshot, png, part, report, final):
+        path.write_bytes(b"retained")
+    artifact = apply_module._problem(
+        "artifact_cleanup_failed",
+        "artifact cleanup failed",
+        retained_paths=[str(png), str(part), str(report)],
+    )
+    cleanup = apply_module._problem(
+        "temp_cleanup_failed",
+        "temp cleanup failed",
+        retained_paths=[str(temp), str(snapshot)],
+        final_path=str(final),
+    )
+
+    combined = apply_module._combine_problems(artifact, cleanup)
+
+    assert combined["code"] == "combined_failure"
+    resources = {
+        value["path"]: value for value in combined["details"]["retained_resources"]
+    }
+    assert set(resources) == {str(temp), str(snapshot), str(png), str(part), str(report), str(final)}
+    assert all(value["exists"] is True for value in resources.values())
+
+
+@pytest.mark.parametrize(
+    "mutation", ["content", "rect", "metadata", "appearance", "border", "fill"]
+)
+def test_final_verification_rejects_any_new_annotation_serialization_tamper(
+    tmp_path: Path, monkeypatch, mutation: str
+) -> None:
+    source = tmp_path / f"annotation-tamper-{mutation}.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    real_write = apply_module._write_annotations
+
+    def tamper(document, placements):
+        records = real_write(document, placements)
+        page = document[records[0].page_index]
+        annotation = page.load_annot(records[0].xref)
+        if mutation == "content":
+            annotation.set_info(content="wrong translation")
+            annotation.update()
+        elif mutation == "rect":
+            annotation.set_rect(annotation.rect + (2, 0, 2, 0))
+            annotation.update()
+        elif mutation == "metadata":
+            annotation.set_info(subject=json.dumps({"item_id": records[0].item_id}))
+            annotation.update()
+        elif mutation == "appearance":
+            document.xref_set_key(annotation.xref, "DA", "(0 0 0 rg /Helv 12 Tf)")
+        elif mutation == "border":
+            annotation.set_border(width=2)
+            annotation.update()
+        else:
+            document.xref_set_key(annotation.xref, "IC", "[1 1 0]")
+        return records
+
+    monkeypatch.setattr(apply_module, "_write_annotations", tamper)
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is False
+    assert result.problems[0]["code"] == "verification_failed"
+    assert not source.with_name(source.name + ".annotated.pdf").exists()
+
+
+def test_snapshot_cleanup_retries_once_and_discards_stale_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "snapshot-retry.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    real_remove = apply_module._remove_exact_temp
+    calls = 0
+
+    def fail_once(path, source_path):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return False
+        return real_remove(path, source_path)
+
+    monkeypatch.setattr(apply_module, "_remove_exact_temp", fail_once)
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is True
+    assert result.problems == ()
+    assert result.output_path is not None and result.output_path.exists()
+    assert not list(tmp_path.glob(".snapshot-retry.pdf.*.tmp.pdf"))
+
+
+def test_combines_artifact_and_temp_cleanup_failures_without_losing_either(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "artifact-and-temp.pdf"
+    _make_source(source, blocked=True)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    retained_png = tmp_path / ".artifact-and-temp.pdf.unresolved.fixed.page-1.png"
+    retained_part = tmp_path / "..artifact-and-temp.pdf.unresolved.fixed.page-1.png.x.part"
+    retained_png.write_bytes(b"png")
+    retained_part.write_bytes(b"part")
+
+    def failed_artifacts(*_args, **_kwargs):
+        return apply_module._ArtifactOutcome(
+            problem=apply_module._problem(
+                "artifact_cleanup_failed",
+                "artifact cleanup failed",
+                retained_paths=[str(retained_png), str(retained_part)],
+            )
+        )
+
+    monkeypatch.setattr(apply_module, "_write_unresolved_artifacts", failed_artifacts)
+    monkeypatch.setattr(apply_module, "_remove_exact_temp", lambda *_args: False)
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is False
+    assert result.problems[0]["code"] == "combined_failure"
+    assert {value["code"] for value in result.problems[0]["details"]["causes"]} == {
+        "artifact_cleanup_failed",
+        "temp_cleanup_failed",
+    }
+    resources = result.problems[0]["details"]["retained_resources"]
+    assert {str(retained_png), str(retained_part)} <= {
+        value["path"] for value in resources if value["exists"]
+    }
+
+
+def test_final_verification_checks_exact_leader_geometry(tmp_path: Path) -> None:
+    source = tmp_path / "leader.pdf"
+    document = pymupdf.open()
+    document.new_page(width=300, height=180)
+    document.save(source)
+    document.close()
+    document = pymupdf.open(source)
+    baseline = apply_module._snapshot_document(document)
+    document.close()
+    placement = apply_module.Placement(
+        item_id="leader-item",
+        page_index=0,
+        text="中文",
+        rect=(200.0, 30.0, 285.0, 60.0),
+        font_size=5.0,
+        strategy="margin_track",
+        wrapped_lines=("中文",),
+        same_semantic_region=False,
+        leader_line=((51.01, 40.0), (190.0, 40.0), (200.0, 45.0)),
+        collision_count=0,
+        in_bounds=True,
+        source_distance=10.0,
+        movement_distance=10.0,
+        candidate_index=0,
+    )
+    temp = apply_module._unique_temp_path(source)
+    temp.write_bytes(source.read_bytes())
+    output = pymupdf.open(temp)
+    written = apply_module._write_annotations(output, (placement,))
+    output.saveIncr()
+    output.close()
+
+    valid = apply_module._verify_temp(
+        source, temp, baseline, (placement,), (0,), written=written
+    )
+    assert valid.problem is None
+    assert valid.collisions == ()
+
+    output = pymupdf.open(temp)
+    output.xref_set_key(written[0].xref, "CL", "[61.01 140 190 140 200 135]")
+    output.saveIncr()
+    output.close()
+    tampered = apply_module._verify_temp(
+        source, temp, baseline, (placement,), (0,), written=written
+    )
+    assert tampered.problem is not None
+    assert tampered.problem["code"] == "verification_failed"
