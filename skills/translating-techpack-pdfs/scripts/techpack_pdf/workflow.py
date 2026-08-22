@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
-import hmac
 import json
 import os
 import re
-import secrets
 import stat
 import threading
-import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, is_dataclass
@@ -45,11 +41,9 @@ from .translation import TranslationValidationError, validate_translation_respon
 _SCHEMA_VERSION = "1.1"
 _MAX_JSON_BYTES = 8 * 1024 * 1024
 _TRUSTED_REVIEW_NAME = "trusted-review.json"
-_TRUST_ROOT_NAME = ".techpack-pdf-trust"
-_LOCK_TIMEOUT_SECONDS = 5.0
-_LOCK_POLL_SECONDS = 0.02
 _THREAD_LOCK_GUARD = threading.Lock()
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
+_ACTIVE_JOB_GUARDS: dict[tuple[int, str], str] = {}
 _STATES = (
     "initialized",
     "parsed",
@@ -99,18 +93,6 @@ class _StateSnapshot(_StrictModel):
     expected_attempt: Literal[0, 1]
     wait_reason: Literal["host_translation", "host_correction", "agent_failure", "human_review_required", "human_review"] | None
     artifacts: "_ArtifactDigests"
-    trust_hmac: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-
-
-class _TrustRecord(_StrictModel):
-    """Private per-job signing material, intentionally stored outside the job."""
-
-    schema_version: Literal["1.1"]
-    job_id: str = Field(min_length=1)
-    job_dir: str = Field(min_length=1)
-    manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    key_b64: str = Field(min_length=40, max_length=128)
-    record_hmac: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class _ArtifactDigests(_StrictModel):
@@ -246,16 +228,28 @@ class _WorkflowBusy(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class _JobGuard:
+    key: str
+    token: str
+
+
+def _guard_is_active(guard: _JobGuard) -> bool:
+    with _THREAD_LOCK_GUARD:
+        return _ACTIVE_JOB_GUARDS.get((threading.get_ident(), guard.key)) == guard.token
+
+
 @contextmanager
 def _job_lock(directory: Path):
-    """Hold both process-local and OS locks for the whole public job operation."""
+    """Try once to hold the lightweight per-job guard; same-job waiting is unsupported."""
     key = str(directory)
     with _THREAD_LOCK_GUARD:
         local = _THREAD_LOCKS.setdefault(key, threading.Lock())
-    if not local.acquire(timeout=_LOCK_TIMEOUT_SECONDS):
+    if not local.acquire(blocking=False):
         raise _WorkflowBusy
     stream = None
     os_acquired = False
+    guard = _JobGuard(key, uuid.uuid4().hex)
     try:
         path = _inside(directory, ".workflow.lock")
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -277,20 +271,19 @@ def _job_lock(directory: Path):
         else:
             import fcntl
             lock = lambda: fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
-        while True:
-            try:
-                lock()
-                os_acquired = True
-                break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    raise _WorkflowBusy
-                time.sleep(_LOCK_POLL_SECONDS)
+        try:
+            lock()
+            os_acquired = True
+        except OSError:
+            raise _WorkflowBusy from None
         if _file_stat_identity(before) != _file_stat_identity(path.lstat()):
             raise _workflow_error("workflow_lock_invalid", "Workflow lock changed while being acquired")
-        yield
+        with _THREAD_LOCK_GUARD:
+            _ACTIVE_JOB_GUARDS[(threading.get_ident(), key)] = guard.token
+        yield guard
     finally:
+        with _THREAD_LOCK_GUARD:
+            _ACTIVE_JOB_GUARDS.pop((threading.get_ident(), key), None)
         try:
             if stream is not None and os_acquired and os.name == "nt":
                 import msvcrt
@@ -310,11 +303,17 @@ def _job_lock(directory: Path):
 @dataclass(frozen=True)
 class WorkflowResult:
     exit_code: int
-    state: str | None
+    state: WorkflowState | None
     job_dir: Path | None = None
     jobs: tuple["WorkflowResult", ...] = ()
     input_index: int | None = None
     batch_status: Literal["completed"] | None = None
+    status: Literal["workflow_busy", "recovery_required"] | None = None
+    wait_reason: Literal["concurrent_operation", "apply_recovery"] | None = None
+
+    def __post_init__(self) -> None:
+        if self.state is not None:
+            object.__setattr__(self, "state", WorkflowState(self.state))
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {"exit_code": self.exit_code}
@@ -328,6 +327,10 @@ class WorkflowResult:
             result["jobs"] = [job.to_dict() for job in self.jobs]
         if self.batch_status is not None:
             result["batch_status"] = self.batch_status
+        if self.status is not None:
+            result["status"] = self.status
+        if self.wait_reason is not None:
+            result["wait_reason"] = self.wait_reason
         return result
 
 
@@ -360,7 +363,10 @@ def analyze(
                     clock + timedelta(seconds=offset),
                     mineru_client or MinerUClient(),
                 )
-            results.append(WorkflowResult(one.exit_code, one.state, one.job_dir, one.jobs, offset))
+            results.append(WorkflowResult(
+                one.exit_code, one.state, one.job_dir, one.jobs, offset,
+                status=one.status, wait_reason=one.wait_reason,
+            ))
         except TechpackError as error:
             results.append(WorkflowResult(_exit_for(error), "failed", input_index=offset))
         except Exception:
@@ -373,15 +379,20 @@ def analyze(
 def prepare_review(job_dir: str | Path) -> WorkflowResult:
     directory = _job_directory(job_dir)
     try:
-        with _job_lock(directory):
-            return _prepare_review_locked(directory)
+        with _job_lock(directory) as guard:
+            try:
+                return _prepare_review_locked(directory)
+            except TechpackError:
+                raise
+            except Exception:
+                _mark_job_failed(directory, guard)
+                raise _workflow_error("workflow_internal_error", "Workflow operation failed") from None
     except _WorkflowBusy:
-        return WorkflowResult(4, "workflow_busy", directory)
+        return WorkflowResult(
+            4, None, directory, status="workflow_busy", wait_reason="concurrent_operation",
+        )
     except TechpackError:
         raise
-    except Exception:
-        _mark_job_failed(directory)
-        raise _workflow_error("workflow_internal_error", "Workflow operation failed") from None
 
 
 def _prepare_review_locked(job_dir: str | Path) -> WorkflowResult:
@@ -452,7 +463,7 @@ def apply(
     review: str | Path,
     output: str | Path,
 ) -> WorkflowResult:
-    review_path = _absolute_user_path(review, must_exist=True, regular=True)
+    review_path = _absolute_user_path(review, must_exist=False, regular=False)
     directory = _job_directory(review_path.parent)
     source_path = _absolute_user_path(source, must_exist=True, regular=True)
     output_path = _absolute_user_path(output, must_exist=False, regular=False)
@@ -460,15 +471,22 @@ def apply(
     if output_path != expected_path or (output_path.exists() and not (directory / "state.json").is_file()):
         raise _workflow_error("output_invalid", "Output path is not available for this job")
     try:
-        with _job_lock(directory):
-            return _apply_locked(source, review_path, output)
+        with _job_lock(directory) as guard:
+            try:
+                return _apply_locked(source, review_path, output)
+            except TechpackError as error:
+                if error.code == "workflow_artifact_invalid":
+                    _mark_job_failed(directory, guard)
+                raise
+            except Exception:
+                _mark_job_failed(directory, guard)
+                raise _workflow_error("workflow_internal_error", "Workflow operation failed") from None
     except _WorkflowBusy:
-        return WorkflowResult(4, "workflow_busy", directory)
+        return WorkflowResult(
+            4, None, directory, status="workflow_busy", wait_reason="concurrent_operation",
+        )
     except TechpackError:
         raise
-    except Exception:
-        _mark_job_failed(directory)
-        raise _workflow_error("workflow_internal_error", "Workflow operation failed") from None
 
 
 def _apply_locked(
@@ -478,7 +496,7 @@ def _apply_locked(
 ) -> WorkflowResult:
     """Apply a completed review only from its bound job directory."""
     source_path = _absolute_user_path(source, must_exist=True, regular=True)
-    review_path = _absolute_user_path(review, must_exist=True, regular=True)
+    review_path = _absolute_user_path(review, must_exist=False, regular=False)
     output_path = _absolute_user_path(output, must_exist=False, regular=False)
     expected_path = source_path.with_name(source_path.name + ".annotated.pdf")
     if output_path != expected_path:
@@ -493,7 +511,7 @@ def _apply_locked(
         raise _workflow_error("source_job_mismatch", "Source does not match the job")
     expected = _load_model(directory, "expected-output.json", _ExpectedOutputSnapshot)
     _assert_snapshot_binding(expected, job)
-    _verify_apply_trust_closure(directory, job, state, expected)
+    _verify_apply_integrity_closure(directory, job, state, expected)
     resuming_apply = state.state is WorkflowState.APPLYING
     if resuming_apply:
         # A published final is recoverable only if this applying state already
@@ -501,7 +519,10 @@ def _apply_locked(
         # been placed after a crash and must never complete the job.
         if state.artifacts.apply_result is None:
             if _artifact_exists(directory, "apply-result.json") or expected_path.exists():
-                return WorkflowResult(5, "recovery_required", directory)
+                return WorkflowResult(
+                    5, WorkflowState.APPLYING, directory,
+                    status="recovery_required", wait_reason="apply_recovery",
+                )
         else:
             try:
                 report = _load_model(directory, "apply-result.json", _ApplyResultSnapshot)
@@ -519,14 +540,18 @@ def _apply_locked(
             if valid:
                 _write_state(directory, job, WorkflowState.SUCCEEDED, state.revision + 1, state.expected_attempt, None)
                 return WorkflowResult(0, WorkflowState.SUCCEEDED, directory)
-            return WorkflowResult(5, "recovery_required", directory)
+            return WorkflowResult(
+                5, WorkflowState.APPLYING, directory,
+                status="recovery_required", wait_reason="apply_recovery",
+            )
     if not resuming_apply and output_path.exists():
         raise _workflow_error("output_invalid", "Output path is not available for this job")
     if state.state not in {WorkflowState.REVIEW_READY, WorkflowState.REVIEW_COMPLETED, WorkflowState.APPLYING}:
         raise _workflow_error("workflow_state_conflict", "Job is not ready to apply")
     trusted_review = _inside(directory, _TRUSTED_REVIEW_NAME)
-    trusted_review_digest: str | None = None
-    if not resuming_apply:
+    trusted_review_digest = state.artifacts.review
+    if state.state is WorkflowState.REVIEW_READY:
+        review_path = _absolute_user_path(review_path, must_exist=True, regular=True)
         review_bytes = _bounded_binary_read(review_path)
         _atomic_binary_write(trusted_review, review_bytes)
         trusted_review_digest = _sha256_bytes(review_bytes)
@@ -547,14 +572,26 @@ def _apply_locked(
         state = _load_state(directory, job)
     if state.state is WorkflowState.REVIEW_COMPLETED:
         _write_state(directory, job, WorkflowState.APPLYING, state.revision + 1, state.expected_attempt, None)
+    before_task8_review = _sha256_artifact(directory, _TRUSTED_REVIEW_NAME)
+    if trusted_review_digest is None or before_task8_review != trusted_review_digest:
+        raise _workflow_error("workflow_artifact_invalid", "Trusted review changed before PDF apply")
     result = apply_review(source_path, trusted_review, job, expected.output)
+    if _sha256_artifact(directory, _TRUSTED_REVIEW_NAME) != before_task8_review:
+        _atomic_json_write(directory / "apply-result.json", _apply_result_snapshot(
+            directory,
+            job,
+            "failed",
+            problems=({"code": "review_snapshot_changed"},),
+            final_output_retained=expected_path.exists(),
+        ).model_dump(mode="json"))
+        raise _workflow_error("workflow_artifact_invalid", "Trusted review changed during PDF apply")
     if _apply_succeeded(result, expected_path):
         _atomic_json_write(directory / "apply-result.json", _apply_result_snapshot(
             directory, job, "succeeded", output_sha256=sha256_file(expected_path),
         ).model_dump(mode="json"))
         applying = _load_state(directory, job)
-        # Bind the committed success report while remaining in ``applying``;
-        # only that signed checkpoint may be recovered to ``succeeded``.
+        # Bind the committed success-report digest while remaining in
+        # ``applying``; only that checkpoint may recover to ``succeeded``.
         _write_state(directory, job, WorkflowState.APPLYING, applying.revision + 1, applying.expected_attempt, None)
         bound = _load_state(directory, job)
         _write_state(directory, job, WorkflowState.SUCCEEDED, bound.revision + 1, bound.expected_attempt, None)
@@ -571,26 +608,51 @@ def _apply_locked(
 def _canonical_request_bytes(directory: Path, analysis: _AnalysisSnapshot, job: JobManifest) -> bytes:
     """Rebuild the exact Task 6 request without accepting a job-local substitute."""
     path = _inside(directory, f".canonical-request.{uuid.uuid4().hex}.tmp")
+    owned_identity: tuple[int, int] | None = None
     try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            opened = os.fstat(descriptor)
+            owned_identity = (opened.st_dev, opened.st_ino)
+        finally:
+            os.close(descriptor)
         write_translation_request(_candidates_from_analysis(analysis), path, job)
+        details = path.lstat()
+        if (
+            owned_identity is None
+            or _is_reparse_or_link(details)
+            or not stat.S_ISREG(details.st_mode)
+            or (details.st_dev, details.st_ino) != owned_identity
+        ):
+            raise OSError
         return _bounded_binary_read(path)
     except (OSError, TechpackError):
-        raise _workflow_error("workflow_binding_mismatch", "Workflow request does not match trusted analysis") from None
+        raise _workflow_error("workflow_binding_mismatch", "Workflow request does not match bound analysis") from None
     finally:
         try:
-            if path.exists() and stat.S_ISREG(path.lstat().st_mode):
-                path.unlink()
+            if path.exists() and owned_identity is not None:
+                details = path.lstat()
+                if (
+                    not _is_reparse_or_link(details)
+                    and stat.S_ISREG(details.st_mode)
+                    and (details.st_dev, details.st_ino) == owned_identity
+                ):
+                    path.unlink()
         except OSError:
             pass
 
 
-def _verify_apply_trust_closure(
+def _verify_apply_integrity_closure(
     directory: Path,
     job: JobManifest,
     state: _StateSnapshot,
     expected: _ExpectedOutputSnapshot,
 ) -> None:
-    """Reconstruct every signed upstream contract before editing a PDF."""
+    """Reconstruct every bound upstream contract before editing a PDF."""
     try:
         analysis = _load_model(directory, "analysis.json", _AnalysisSnapshot)
         _assert_snapshot_binding(analysis, job)
@@ -616,7 +678,7 @@ def _verify_apply_trust_closure(
         if rebuilt.model_dump(mode="json") != expected.output.model_dump(mode="json"):
             raise ValueError
     except (KeyError, UnicodeError, json.JSONDecodeError, TranslationValidationError, TechpackError, ValueError):
-        raise _workflow_error("workflow_binding_mismatch", "Workflow artifacts do not form a trusted closure") from None
+        raise _workflow_error("workflow_binding_mismatch", "Workflow artifacts do not form a bound closure") from None
 
 
 def _analyze_one(
@@ -632,7 +694,6 @@ def _analyze_one(
     job = create_job(source, glossary_path, job_root, now)
     directory = _job_directory(job.job_dir)
     _atomic_json_write(directory / "manifest.json", job.model_dump(mode="json"))
-    _create_trust_record(directory, job)
     _write_state(directory, job, WorkflowState.INITIALIZED, 0, 0, None)
     try:
         identities = _input_identities(source, glossary_path)
@@ -651,7 +712,6 @@ def _analyze_one(
             }
         )
         _atomic_json_write(directory / "manifest.json", job.model_dump(mode="json"))
-        _update_trust_manifest(directory, job)
         parsed = mineru_client.parse_or_degrade(snapshot_source, pdf)
         _verify_snapshot_inputs(directory, job, snapshot_identities)
         analysis = _analysis_snapshot(directory, job, pdf, parsed, glossary)
@@ -1093,134 +1153,18 @@ def _canonical_json_bytes(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def _hmac_sha256(key: bytes, value: Any) -> str:
-    return hmac.new(key, _canonical_json_bytes(value), hashlib.sha256).hexdigest()
-
-
-def _trust_root(directory: Path) -> Path:
-    """Return the user-owned trust root beside, never inside, the job directory."""
-    root = directory.parent / _TRUST_ROOT_NAME
-    try:
-        _assert_no_reparse_components(root)
-        if not root.exists():
-            root.mkdir(mode=0o700)
-        details = root.lstat()
-        if _is_reparse_or_link(details) or not stat.S_ISDIR(details.st_mode):
-            raise OSError
-        if os.name != "nt":
-            os.chmod(root, 0o700)
-        return root
-    except (OSError, TechpackError):
-        raise _workflow_error("workflow_trust_invalid", "Workflow trust record is invalid") from None
-
-
-def _trust_record_path(directory: Path) -> Path:
-    return _trust_root(directory) / f"{directory.name}.trust.json"
-
-
-def _trust_key(record: _TrustRecord) -> bytes:
-    try:
-        key = base64.b64decode(record.key_b64.encode("ascii"), validate=True)
-    except (ValueError, UnicodeError):
-        raise _workflow_error("workflow_trust_invalid", "Workflow trust record is invalid") from None
-    if len(key) != 32:
-        raise _workflow_error("workflow_trust_invalid", "Workflow trust record is invalid")
-    return key
-
-
-def _record_material(record: _TrustRecord) -> dict[str, Any]:
-    return record.model_dump(mode="json", exclude={"record_hmac"})
-
-
-def _state_material(state: _StateSnapshot) -> dict[str, Any]:
-    return state.model_dump(mode="json", exclude={"trust_hmac"})
-
-
-def _read_trust_record(directory: Path) -> _TrustRecord:
-    path = _trust_record_path(directory)
-    try:
-        record = _TrustRecord.model_validate(json.loads(_bounded_binary_read(path).decode("utf-8")))
-        key = _trust_key(record)
-        if not hmac.compare_digest(record.record_hmac, _hmac_sha256(key, _record_material(record))):
-            raise ValueError
-        return record
-    except (OSError, UnicodeError, ValueError, ValidationError, TechpackError):
-        raise _workflow_error("workflow_trust_invalid", "Workflow trust record is invalid") from None
-
-
-def _validated_trust_record(directory: Path, job: JobManifest) -> _TrustRecord:
-    record = _read_trust_record(directory)
-    if (
-        record.job_id != job.job_id
-        or record.job_dir != str(directory)
-        or record.manifest_sha256 != _sha256_bytes(_canonical_json_bytes(job.model_dump(mode="json")))
-    ):
-        raise _workflow_error("workflow_trust_invalid", "Workflow trust record does not bind this job")
-    return record
-
-
-def _write_trust_record(path: Path, record: _TrustRecord) -> None:
-    try:
-        _atomic_json_write(path, record.model_dump(mode="json"))
-        if os.name != "nt":
-            os.chmod(path, 0o600)
-    except (OSError, TechpackError):
-        raise _workflow_error("workflow_trust_invalid", "Workflow trust record could not be committed") from None
-
-
-def _create_trust_record(directory: Path, job: JobManifest) -> None:
-    path = _trust_record_path(directory)
-    try:
-        if path.exists():
-            raise OSError
-        key = secrets.token_bytes(32)
-        unsigned = _TrustRecord(
-            schema_version=_SCHEMA_VERSION,
-            job_id=job.job_id,
-            job_dir=str(directory),
-            manifest_sha256=_sha256_bytes(_canonical_json_bytes(job.model_dump(mode="json"))),
-            key_b64=base64.b64encode(key).decode("ascii"),
-            record_hmac="0" * 64,
-        )
-        record = unsigned.model_copy(update={"record_hmac": _hmac_sha256(key, _record_material(unsigned))})
-        _write_trust_record(path, record)
-    except (OSError, TechpackError):
-        raise _workflow_error("workflow_trust_invalid", "Workflow trust record could not be created") from None
-
-
-def _update_trust_manifest(directory: Path, job: JobManifest) -> None:
-    record = _read_trust_record(directory)
-    key = _trust_key(record)
-    if record.job_id != job.job_id or record.job_dir != str(directory):
-        raise _workflow_error("workflow_trust_invalid", "Workflow trust record does not bind this job")
-    unsigned = record.model_copy(update={
-        "manifest_sha256": _sha256_bytes(_canonical_json_bytes(job.model_dump(mode="json"))),
-        "record_hmac": "0" * 64,
-    })
-    _write_trust_record(
-        _trust_record_path(directory),
-        unsigned.model_copy(update={"record_hmac": _hmac_sha256(key, _record_material(unsigned))}),
-    )
-
-
 def _load_job(directory: Path) -> JobManifest:
     job = _load_model(directory, "manifest.json", JobManifest)
     if _absolute_user_path(job.job_dir, must_exist=True, regular=False) != directory:
         raise _workflow_error("workflow_job_invalid", "Manifest job directory does not match")
     if job.source.path is None or job.glossary.path is None:
         raise _workflow_error("workflow_job_invalid", "Manifest input paths are missing")
-    _validated_trust_record(directory, job)
     return job
 
 
 def _load_state(directory: Path, job: JobManifest) -> _StateSnapshot:
     state = _load_state_payload(directory)
     _assert_snapshot_binding(state, job)
-    record = _validated_trust_record(directory, job)
-    if state.trust_hmac is None or not hmac.compare_digest(
-        state.trust_hmac, _hmac_sha256(_trust_key(record), _state_material(state))
-    ):
-        raise _workflow_error("workflow_trust_invalid", "Workflow state signature is invalid")
     if state.state.value not in _STATES:
         raise _workflow_error("workflow_state_invalid", "Workflow state is unknown")
     _verify_state_artifacts(directory, state)
@@ -1342,20 +1286,36 @@ def _write_state(directory: Path, job: JobManifest, state: WorkflowState, revisi
         artifacts=artifacts,
     )
     _verify_state_invariants(snapshot)
-    record = _validated_trust_record(directory, job)
-    snapshot = snapshot.model_copy(update={
-        "trust_hmac": _hmac_sha256(_trust_key(record), _state_material(snapshot)),
-    })
     _atomic_json_write(path, snapshot.model_dump(mode="json"))
 
 
-def _mark_job_failed(directory: Path) -> None:
-    """Best-effort terminalization for an unexpected in-scope workflow exception."""
+def _mark_job_failed(directory: Path, guard: _JobGuard) -> None:
+    """Best-effort terminalization while the exact nonblocking job guard is active."""
+    if not _guard_is_active(guard) or guard.key != str(directory):
+        return
     try:
         job = _load_job(directory)
-        state = _load_state(directory, job)
+        before = _bounded_binary_read(_inside(directory, "state.json"))
+        state = _StateSnapshot.model_validate(json.loads(before.decode("utf-8")))
+        _assert_snapshot_binding(state, job)
+        _verify_state_invariants(state)
         if state.state not in {WorkflowState.SUCCEEDED, WorkflowState.FAILED}:
-            _write_state(directory, job, WorkflowState.FAILED, state.revision + 1, state.expected_attempt, None)
+            artifacts = _artifact_digests(directory)
+            failed = _StateSnapshot(
+                schema_version=_SCHEMA_VERSION,
+                job_id=job.job_id,
+                source_sha256=job.source.sha256,
+                glossary_sha256=job.glossary.sha256,
+                state=WorkflowState.FAILED,
+                revision=state.revision + 1,
+                expected_attempt=state.expected_attempt,
+                wait_reason=None,
+                artifacts=artifacts,
+            )
+            _verify_state_invariants(failed)
+            if _bounded_binary_read(_inside(directory, "state.json")) != before:
+                return
+            _atomic_json_write(directory / "state.json", failed.model_dump(mode="json"))
     except Exception:
         return
 

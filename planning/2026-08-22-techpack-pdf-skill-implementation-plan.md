@@ -442,6 +442,10 @@ git commit -m "feat: apply collision-safe editable PDF annotations"
 
 合成 PDF 测试 analyze 生成独立 job、manifest.json、translation-request.json 后以退出码 4 停止，且不会自行创建 translation-response.json。把合法响应放入任务目录后，prepare-review 生成 review.html。apply 在批准 review 下生成最终 PDF；两个目录输入任务中一个失败不会污染另一个。
 
+补充轻量完整性回归：SHA-256、严格 schema、JobManifest/job 精确绑定、稳定源快照、规范化请求/响应/expected-output 重建、原子 no-clobber、路径/reparse/所有权及 review/apply 前后摘要复核必须阻断意外损坏、过期、缺失和跨任务串用。删除 HMAC、trust record、外部密钥和 OS 凭据库测试；同一 OS 用户主动或协调修改全部任务文件不在 v1 防御范围内。
+
+补充并发边界回归：同一任务并行执行不受支持，公开操作通过轻量非阻塞每任务保护立即返回 `status=workflow_busy`、退出码 4 且不修改 state；不实现等待、排队、公平性或同任务并行正确性。不同任务保持独立。失败终止只允许持有保护且 revision/token 仍匹配的操作执行。
+
 - [ ] **Step 2: 运行并确认 CLI 缺失**
 
 ~~~powershell
@@ -451,6 +455,10 @@ git commit -m "feat: apply collision-safe editable PDF annotations"
 - [ ] **Step 3: 实现状态机**
 
 workflow 状态固定为 initialized、parsed、translation_requested、translation_validated、review_ready、review_completed、applying、succeeded、failed。每次转换把 state.json 写到同目录临时文件后 replace；恢复时只从最后完整状态继续。翻译中断、上下文不足、额度耗尽或 sub-agent 失败由宿主写 agent-failure.json，工作流保持 translation_requested 并退出 4。
+
+状态及工件仅采用轻量完整性：严格模型和 SHA-256 摘要，不创建 HMAC 签名、外部 trust root、密钥或凭据库依赖。恢复时重建并核对 canonical request/response/expected-output；review 在 `review_ready -> review_completed` 时只快照一次，后续不再依赖外部 review.json，Task 8 调用前后均复核可信 review 摘要。bootstrap 失败仍返回已创建的 job_id/job_dir。临时文件仅由创建者按已捕获身份清理。
+
+`WorkflowResult.state` 只能是上述九种状态或 `None`；`workflow_busy`、恢复等待等结果放在 `status`/`wait_reason`。同任务保护必须非阻塞，busy 路径不得写 state。状态终止操作在保护内使用 revision/token 比较，避免过期调用覆盖较新状态。
 
 CLI 使用 argparse，不提供 skip-review、ignore-hash、force-overlap 或 flatten 参数。--output 必须精确等于源文件 stem 加 “.annotated.pdf”，已存在时返回 output_exists，不能覆盖。
 

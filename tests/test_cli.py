@@ -5,6 +5,7 @@ import pytest
 import techpack_pdf_cli
 from techpack_pdf.errors import TechpackError
 from techpack_pdf_cli import main
+from techpack_pdf.workflow import WorkflowResult
 
 
 @pytest.mark.parametrize("flag", ["--skip-review", "--ignore-hash", "--force-overlap", "--flatten", "--overwrite"])
@@ -47,3 +48,24 @@ def test_cli_catches_unexpected_exception_as_one_safe_json_result(capsys, monkey
     assert json.loads(rendered) == {"code": "internal_error", "status": "failed"}
     assert "SECRET" not in rendered
     assert "Traceback" not in rendered
+
+
+def test_cli_emits_busy_as_status_without_inventing_workflow_state(capsys, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        techpack_pdf_cli,
+        "prepare_review",
+        lambda *_args: WorkflowResult(
+            4, None, tmp_path / "job", status="workflow_busy", wait_reason="concurrent_operation",
+        ),
+    )
+
+    assert main(["prepare-review", "--job", str(tmp_path / "job")]) == 4
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "workflow_busy"
+    assert payload["wait_reason"] == "concurrent_operation"
+    assert "state" not in payload
+
+
+def test_workflow_result_rejects_non_state_status_in_state_field():
+    with pytest.raises(ValueError):
+        WorkflowResult(4, "workflow_busy")

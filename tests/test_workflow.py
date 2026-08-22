@@ -3,6 +3,7 @@ import hashlib
 import os
 import re
 import stat
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -740,7 +741,11 @@ def test_concurrent_apply_has_one_winner_and_never_overwrites_final(tmp_path, mo
         first_result, second_result = first.result(timeout=10), second.result(timeout=10)
 
     assert sum(isinstance(value, workflow.WorkflowResult) and value.exit_code == 0 for value in (first_result, second_result)) == 1
-    assert "output_invalid" in (first_result, second_result)
+    busy = next(
+        value for value in (first_result, second_result)
+        if isinstance(value, workflow.WorkflowResult) and value.status == "workflow_busy"
+    )
+    assert (busy.exit_code, busy.state, busy.wait_reason) == (4, None, "concurrent_operation")
     assert calls == ["winner"]
     assert hashlib.sha256(output.read_bytes()).hexdigest() == hashlib.sha256(source.read_bytes()).hexdigest()
 
@@ -956,6 +961,31 @@ def test_stable_copy_never_deletes_a_replaced_foreign_temp_file(tmp_path, monkey
     assert leftovers[0].read_text(encoding="utf-8") == "foreign-owner"
 
 
+def test_canonical_request_cleanup_never_deletes_replaced_foreign_temp(tmp_path, monkeypatch):
+    source, glossary = tmp_path / "a.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    result = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    job = workflow._load_job(result.job_dir)
+    analysis = workflow._load_model(result.job_dir, "analysis.json", workflow._AnalysisSnapshot)
+    original = workflow.write_translation_request
+
+    def replace_after_write(candidates, path, manifest):
+        payload = original(candidates, path, manifest)
+        Path(path).unlink()
+        Path(path).write_text("foreign-owner", encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(workflow, "write_translation_request", replace_after_write)
+    with pytest.raises(TechpackError) as caught:
+        workflow._canonical_request_bytes(result.job_dir, analysis, job)
+
+    assert caught.value.code == "workflow_binding_mismatch"
+    leftovers = list(result.job_dir.glob(".canonical-request.*.tmp"))
+    assert len(leftovers) == 1
+    assert leftovers[0].read_text(encoding="utf-8") == "foreign-owner"
+
+
 def test_parent_directory_fsync_is_attempted_when_supported_and_ignored_when_unavailable(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(workflow.os, "name", "posix")
@@ -1002,8 +1032,6 @@ def test_busy_job_lock_returns_waiting_without_mutating_state(tmp_path, monkeypa
     job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
     before = (job.job_dir / "state.json").read_bytes()
     acquired, release = Event(), Event()
-    monkeypatch.setattr(workflow, "_LOCK_TIMEOUT_SECONDS", 0.05, raising=False)
-
     def hold_lock():
         with workflow._job_lock(job.job_dir):
             acquired.set()
@@ -1014,12 +1042,18 @@ def test_busy_job_lock_returns_waiting_without_mutating_state(tmp_path, monkeypa
         assert acquired.wait(3)
         try:
             contender = executor.submit(prepare_review, job.job_dir)
+            started = time.monotonic()
             result = contender.result(timeout=2)
+            elapsed = time.monotonic() - started
         finally:
             release.set()
         holder.result(timeout=2)
 
-    assert (result.exit_code, result.state) == (4, "workflow_busy")
+    assert elapsed < 0.5
+    assert (result.exit_code, result.state, result.status, result.wait_reason) == (
+        4, None, "workflow_busy", "concurrent_operation",
+    )
+    assert "state" not in result.to_dict()
     assert (job.job_dir / "state.json").read_bytes() == before
 
 
@@ -1071,7 +1105,9 @@ def test_applying_recovery_rejects_unbound_success_report_even_with_matching_pdf
 
     result = apply(source, review_path, output)
 
-    assert (result.exit_code, result.state) == (5, "recovery_required")
+    assert (result.exit_code, result.state, result.status, result.wait_reason) == (
+        5, "applying", "recovery_required", "apply_recovery",
+    )
     assert json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "applying"
 
 
@@ -1127,29 +1163,77 @@ def test_real_approved_review_applies_editable_freetext_and_writes_bound_success
     assert report["output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()
 
 
-def test_external_trust_root_blocks_coordinated_state_and_request_tampering(tmp_path):
+def test_lightweight_integrity_creates_no_secret_or_external_trust_artifact(tmp_path):
     source, glossary = tmp_path / "a.pdf", tmp_path / "terms.csv"
     _techpack_pdf(source)
     _glossary(glossary)
     result = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
     directory = result.job_dir
 
-    trust = tmp_path / "jobs" / ".techpack-pdf-trust" / f"{directory.name}.trust.json"
-    assert trust.is_file()
-    state_path = directory / "state.json"
-    request_path = directory / "translation-request.json"
-    request = json.loads(request_path.read_text(encoding="utf-8"))
-    request["items"][0]["source_text"] = "coordinated external mutation"
-    request_path.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    state["artifacts"]["request"] = hashlib.sha256(request_path.read_bytes()).hexdigest()
-    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    assert not (tmp_path / "jobs" / ".techpack-pdf-trust").exists()
+    assert not list(tmp_path.rglob("*.trust.json"))
+    state = json.loads((directory / "state.json").read_text(encoding="utf-8"))
+    assert "trust_hmac" not in state
 
+
+def test_review_completed_resume_uses_single_snapshot_without_original_review(tmp_path, monkeypatch):
+    source, glossary = tmp_path / "resume.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job_result = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    request = json.loads((job_result.job_dir / "translation-request.json").read_text(encoding="utf-8"))
+    (job_result.job_dir / "translation-response.json").write_text(
+        json.dumps(_response_for(request), ensure_ascii=False), encoding="utf-8",
+    )
+    assert prepare_review(job_result.job_dir).state == "review_ready"
+    review = _write_approved_review(job_result.job_dir)
+    job = workflow._load_job(job_result.job_dir)
+    ready = workflow._load_state(job_result.job_dir, job)
+    workflow._atomic_binary_write(job_result.job_dir / "trusted-review.json", review.read_bytes())
+    workflow._write_state(
+        job_result.job_dir, job, workflow.WorkflowState.REVIEW_COMPLETED,
+        ready.revision + 1, ready.expected_attempt, None,
+    )
+    review.unlink()
+    output = source.with_name(source.name + ".annotated.pdf")
+
+    def succeed(*_args):
+        output.write_bytes(source.read_bytes())
+        return workflow.ApplyResult(True, output)
+
+    monkeypatch.setattr(workflow, "apply_review", succeed)
+    result = apply(source, review, output)
+
+    assert (result.exit_code, result.state) == (0, "succeeded")
+
+
+def test_apply_detects_trusted_review_change_during_task8(tmp_path, monkeypatch):
+    source, glossary = tmp_path / "mutating.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    request = json.loads((job.job_dir / "translation-request.json").read_text(encoding="utf-8"))
+    (job.job_dir / "translation-response.json").write_text(
+        json.dumps(_response_for(request), ensure_ascii=False), encoding="utf-8",
+    )
+    assert prepare_review(job.job_dir).state == "review_ready"
+    review = _write_approved_review(job.job_dir)
+    output = source.with_name(source.name + ".annotated.pdf")
+
+    def mutate_snapshot(_source, trusted_review, *_args):
+        Path(trusted_review).write_bytes(b"{}")
+        output.write_bytes(source.read_bytes())
+        return workflow.ApplyResult(True, output)
+
+    monkeypatch.setattr(workflow, "apply_review", mutate_snapshot)
     with pytest.raises(TechpackError) as caught:
-        prepare_review(directory)
+        apply(source, review, output)
 
-    assert caught.value.code == "workflow_trust_invalid"
-    assert "coordinated external mutation" not in str(caught.value)
+    assert caught.value.code == "workflow_artifact_invalid"
+    assert json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "failed"
+    report = json.loads((job.job_dir / "apply-result.json").read_text(encoding="utf-8"))
+    assert report["status"] == "failed"
+    assert report["final_output_retained"] is True
 
 
 def _request_hash(payload):
