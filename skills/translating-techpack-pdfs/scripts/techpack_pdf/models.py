@@ -13,22 +13,30 @@ class StrictModel(BaseModel):
 
 
 class PageType(StrEnum):
-    COVER = "cover"
-    CONSTRUCTION = "construction"
+    GENERAL_INFO = "general_info"
+    BOM = "bom"
     MEASUREMENT = "measurement"
-    MATERIALS = "materials"
-    LABEL = "label"
-    PACKAGING = "packaging"
-    ARTWORK = "artwork"
+    TECHNICAL_DRAWING = "technical_drawing"
+    LABEL_PACK = "label_pack"
+    SAMPLE_REVIEW = "sample_review"
+    STYLE_SAMPLE = "style_sample"
+    HOW_TO_MEASURE = "how_to_measure"
+    CONSTRUCTION_DETAIL = "construction_detail"
+    CATEGORY_FIELDS = "category_fields"
     UNKNOWN = "unknown"
 
 
 class DecisionReason(StrEnum):
-    TRANSLATABLE = "translatable"
-    NON_TRANSLATABLE = "non_translatable"
-    GLOSSARY_CONFLICT = "glossary_conflict"
+    PAGE_RULE = "page_rule"
+    FIELD_RULE = "field_rule"
+    GLOSSARY_HIT = "glossary_hit"
+    ACTIONABLE_REVIEW = "actionable_review"
+    MIXED_TEXT = "mixed_text"
+    MANUAL_CANDIDATE = "manual_candidate"
+    SKIPPED_ADMIN = "skipped_admin"
+    SKIPPED_CODE = "skipped_code"
+    SKIPPED_DUPLICATE = "skipped_duplicate"
     LOW_CONFIDENCE = "low_confidence"
-    UNSUPPORTED = "unsupported"
 
 
 class CoordinateConfidence(StrEnum):
