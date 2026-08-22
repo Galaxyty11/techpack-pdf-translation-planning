@@ -297,12 +297,12 @@ git commit -m "feat: select and protect TechPack translation candidates"
 - Test: “tests/test_translation.py”
 
 **Interfaces:**
-- Consumes: list[Candidate]、translation-response.json。
-- Produces: write_translation_request(candidates, path)；validate_translation_response(request, response, glossary) -> list[ValidatedTranslation]；translation_cache_key(...) -> str。
+- Consumes: list[Candidate]、严格绑定的 translation-response.json、JobManifest。
+- Produces: write_translation_request(candidates, path, job) -> request envelope；validate_translation_response(request, response, glossary, job) -> list[ValidatedTranslation]；translation_cache_key(...) -> str。
 
 - [ ] **Step 1: 写契约失败测试**
 
-断言请求按 item_id 排序且只包含 source_text、必要 context、locked_tokens、glossary_terms、page_type、mode。响应测试覆盖 ID 集合不等、重复 ID、空译文、token 丢失/增加、术语不符、缺 translator、model 空值、model=unknown、mode 不一致和一次纠偏后的终止状态。
+断言请求 envelope 严格绑定 schema_version、job_id、source/glossary SHA-256 和规范化 request SHA-256；items 按 item_id 排序且只包含 source_text、必要 context、locked_tokens、glossary_terms、page_type、mode。响应 envelope 必须原样回显全部绑定字段；测试覆盖跨任务/跨请求交换、ID 集合不等、重复 ID、空译文、token 丢失/增加、术语不符、缺 translator、model 空值、model=unknown、mode 不一致和一次纠偏后的终止状态。
 
 ~~~python
 def test_response_is_joined_by_item_id_not_array_position():
@@ -320,7 +320,7 @@ def test_response_is_joined_by_item_id_not_array_position():
 
 - [ ] **Step 3: 实现严格验证与缓存**
 
-响应先由 Pydantic 验证，再比较 item_id 集合和 Counter 锁定 token，最后逐个检查 glossary_terms_used 与译文目标词。任何失败输出 correction-request.json，字段为 attempt=1、failed_item_ids、error_codes、required_fixes；已有 attempt=1 再失败时状态变为 human_review_required，不生成猜测结果。
+请求与响应都先由 `extra=forbid` 的 Pydantic envelope 验证。请求必须与传入 JobManifest 精确一致，`request_sha256` 必须由除自身外的规范化请求 envelope 重新计算；响应必须回显相同 schema_version、job_id、source/glossary SHA-256 和 request_sha256，旧式裸数组一律拒绝。绑定通过后再比较 item_id 集合和 Counter 锁定 token，最后逐个检查 glossary_terms_used 与译文目标词。任何失败输出带相同任务/请求绑定的 correction-request.json，字段还包括 attempt=1、failed_item_ids、error_codes、required_fixes；已有 attempt=1 再失败时状态变为 human_review_required，不生成猜测结果。
 
 缓存 SHA-256 输入依次为规范化请求 JSON、术语表 SHA-256、prompt_version、host、model、execution_mode。model=unknown 时再加入 job_id，禁止跨任务复用。
 

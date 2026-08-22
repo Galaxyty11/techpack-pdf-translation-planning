@@ -1,13 +1,14 @@
 import csv
 import hashlib
 import json
-from dataclasses import replace
 import traceback
+from dataclasses import replace
 
 import pytest
 
+from techpack_pdf.errors import TechpackError
 from techpack_pdf.glossary import Glossary, GlossaryHit, load_glossary
-from techpack_pdf.models import CoordinateConfidence, DecisionReason, PageType
+from techpack_pdf.models import CoordinateConfidence, DecisionReason, FileArtifact, JobManifest, PageType
 from techpack_pdf.selection import Candidate, lock_tokens
 from techpack_pdf.translation import (
     TranslationValidationError,
@@ -17,63 +18,267 @@ from techpack_pdf.translation import (
 )
 
 
-def test_request_is_sorted_minimal_and_uses_page_specific_modes(tmp_path) -> None:
-    direct = _candidate(
-        "p001-i002",
-        PageType.BOM,
-        "TOPSTITCH 0.6 cm FROM EDGE",
-        source_kind="construction note",
-        glossary_hits=(
-            GlossaryHit("topstitch", "明线", "TOPSTITCH", 0, 9, False, 3),
-        ),
-    )
-    digest = _candidate(
-        "p001-i001",
-        PageType.SAMPLE_REVIEW,
-        "Reduce sleeve by 0.6 cm unless approved",
-        source_kind="action",
-    )
-    skipped = replace(_candidate("p001-i003", PageType.BOM, "Header"), should_translate=False)
-    path = tmp_path / "translation-request.json"
+def test_write_request_is_bound_hashed_sorted_and_minimal(tmp_path):
+    job = _job("job-a", "a" * 64, "b" * 64)
+    direct = _candidate("p001-i002", PageType.BOM, "TOPSTITCH 0.6 cm FROM EDGE", source_kind="construction note", glossary_hits=(GlossaryHit("topstitch", "明线", "TOPSTITCH", 0, 9, False, 3),))
+    digest = _candidate("p001-i001", PageType.SAMPLE_REVIEW, "Reduce sleeve by 0.6 cm unless approved", source_kind="action")
+    payload = write_translation_request([direct, replace(_candidate("p001-i003", PageType.BOM, "Header"), should_translate=False), digest], tmp_path / "translation-request.json", job)
 
-    payload = write_translation_request([direct, skipped, digest], path)
-
-    assert payload == json.loads(path.read_text(encoding="utf-8"))
-    assert [item["item_id"] for item in payload] == ["p001-i001", "p001-i002"]
-    assert payload[0] == {
-        "item_id": "p001-i001",
-        "source_text": "Reduce sleeve by 0.6 cm unless approved",
-        "context": "action",
-        "locked_tokens": ["0.6", "cm"],
-        "glossary_terms": [],
-        "page_type": "sample_review",
-        "mode": "faithful_digest",
-    }
-    assert payload[1] == {
-        "item_id": "p001-i002",
-        "source_text": "TOPSTITCH 0.6 cm FROM EDGE",
-        "context": "construction note",
-        "locked_tokens": ["0.6", "cm"],
-        "glossary_terms": [{"source_term": "topstitch", "target_term": "明线"}],
-        "page_type": "bom",
-        "mode": "direct",
-    }
-
-
-def test_response_is_joined_by_item_id_not_array_position() -> None:
-    request = _request(
-        ("p001-i001", "Shell 12 mm", "direct"),
-        ("p001-i002", "Reduce sleeve 0.6 cm", "faithful_digest"),
-    )
-    response = [
-        _response("p001-i002", "袖长减少 0.6 cm", "faithful_digest", ["0.6", "cm"]),
-        _response("p001-i001", "大身 12 mm", "direct", ["12", "mm"]),
+    assert payload == json.loads((tmp_path / "translation-request.json").read_text(encoding="utf-8"))
+    assert {key for key in payload} == {"schema_version", "job_id", "source_sha256", "glossary_sha256", "request_sha256", "attempt", "items"}
+    assert payload["job_id"] == "job-a"
+    assert payload["attempt"] == 0
+    assert [item["item_id"] for item in payload["items"]] == ["p001-i001", "p001-i002"]
+    assert payload["items"] == [
+        {
+            "item_id": "p001-i001",
+            "source_text": "Reduce sleeve by 0.6 cm unless approved",
+            "context": "action",
+            "locked_tokens": ["0.6", "cm"],
+            "glossary_terms": [],
+            "page_type": "sample_review",
+            "mode": "faithful_digest",
+        },
+        {
+            "item_id": "p001-i002",
+            "source_text": "TOPSTITCH 0.6 cm FROM EDGE",
+            "context": "construction note",
+            "locked_tokens": ["0.6", "cm"],
+            "glossary_terms": [{"source_term": "topstitch", "target_term": "明线"}],
+            "page_type": "bom",
+            "mode": "direct",
+        },
     ]
+    assert payload["request_sha256"] == _request_hash(payload)
 
-    validated = validate_translation_response(request, response, _empty_glossary())
+
+def test_response_is_joined_by_item_id_not_array_position():
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct"), ("p001-i002", "Reduce sleeve 0.6 cm", "faithful_digest")), job)
+    response = _bound_response([
+        _item("p001-i002", "袖长减少 0.6 cm", "faithful_digest", ["0.6", "cm"]),
+        _item("p001-i001", "大身 12 mm", "direct", ["12", "mm"]),
+    ], request)
+
+    validated = validate_translation_response(request, response, _empty_glossary(), job)
 
     assert [item.item_id for item in validated] == ["p001-i001", "p001-i002"]
     assert [item.translated_text for item in validated] == ["大身 12 mm", "袖长减少 0.6 cm"]
+
+
+def test_response_with_identical_items_cannot_be_swapped_between_jobs():
+    job_a = _job("job-a", "a" * 64, "b" * 64)
+    job_b = _job("job-b", "c" * 64, "b" * 64)
+    request_a = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job_a)
+    request_b = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job_b)
+    response_a = _bound_response([_item("p001-i001", "大身 12 mm", "direct", ["12", "mm"])], request_a)
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(request_b, response_a, _empty_glossary(), job_b)
+
+    assert caught.value.error_codes == ("response_binding_mismatch",)
+    assert caught.value.failed_item_ids == ("p001-i001",)
+
+
+def test_request_and_response_swapped_to_wrong_job_are_rejected_before_response_is_read():
+    job_a = _job("job-a", "a" * 64, "b" * 64)
+    job_b = _job("job-b", "c" * 64, "b" * 64)
+    request_a = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job_a)
+
+    with pytest.raises(TechpackError) as caught:
+        validate_translation_response(request_a, object(), _empty_glossary(), job_b)
+
+    assert caught.value.code == "translation_request_invalid"
+
+
+def test_response_from_a_different_request_in_the_same_job_is_rejected():
+    job = _job("job-a", "a" * 64, "b" * 64)
+    first = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+    second = _bound_request(_items(("p001-i001", "Lining 12 mm", "direct")), job)
+    response = _bound_response([_item("p001-i001", "大身 12 mm", "direct", ["12", "mm"])], first)
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(second, response, _empty_glossary(), job)
+
+    assert caught.value.error_codes == ("response_binding_mismatch",)
+
+
+def test_tampered_request_items_fail_hash_validation_without_consuming_response():
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+    request["items"][0]["source_text"] = "confidential altered text"
+
+    with pytest.raises(TechpackError) as caught:
+        validate_translation_response(request, object(), _empty_glossary(), job)
+
+    assert caught.value.code == "translation_request_invalid"
+    assert "confidential" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value.pop("job_id"),
+        lambda value: value.update(unexpected="not allowed"),
+        lambda value: value.update(request_sha256="A" * 64),
+        lambda value: value.update(attempt=2),
+    ],
+)
+def test_response_requires_exact_strict_binding_fields(mutation):
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+    response = _bound_response([_item("p001-i001", "大身 12 mm", "direct", ["12", "mm"])], request)
+    mutation(response)
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(request, response, _empty_glossary(), job)
+
+    assert caught.value.error_codes == ("response_schema_invalid",)
+
+
+def test_legacy_bare_response_array_is_rejected():
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(request, [_item("p001-i001", "大身 12 mm", "direct", ["12", "mm"])], _empty_glossary(), job)
+
+    assert caught.value.error_codes == ("response_schema_invalid",)
+
+
+def test_first_failure_writes_a_bound_correction_request(tmp_path):
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+    request_path = tmp_path / "translation-request.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    response = _bound_response([], request)
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(request_path, response, _empty_glossary(), job)
+
+    correction = json.loads((tmp_path / "correction-request.json").read_text(encoding="utf-8"))
+    assert correction == caught.value.result
+    assert correction == {
+        "schema_version": "1.1",
+        "job_id": "job-a",
+        "source_sha256": "a" * 64,
+        "glossary_sha256": "b" * 64,
+        "request_sha256": request["request_sha256"],
+        "attempt": 1,
+        "failed_item_ids": ["p001-i001"],
+        "error_codes": ["item_id_set_mismatch"],
+        "required_fixes": ["Return exactly one item for every requested item_id and no others."],
+    }
+
+
+def test_invalid_second_response_stops_for_human_review_without_guessing(tmp_path):
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+    request_path = tmp_path / "translation-request.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    first = _bound_response([], request)
+    with pytest.raises(TranslationValidationError):
+        validate_translation_response(request_path, first, _empty_glossary(), job)
+    second = _bound_response([], request, attempt=1)
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(request_path, second, _empty_glossary(), job)
+
+    assert caught.value.result == {"status": "human_review_required"}
+    assert caught.value.correction_request is None
+
+
+def test_initial_response_cannot_claim_the_correction_attempt():
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+    response = _bound_response([_item("p001-i001", "大身 12 mm", "direct", ["12", "mm"])], request, attempt=1)
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(request, response, _empty_glossary(), job)
+
+    assert caught.value.error_codes == ("response_attempt_invalid",)
+
+
+def test_schema_failure_does_not_leak_untrusted_translation_or_id():
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+    response = _bound_response([_item("private identifier", "DO-NOT-LEAK-TRANSLATION 12 mm", "direct", ["12", "mm"])], request)
+    response["items"][0]["unexpected"] = "force schema failure"
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(request, response, _empty_glossary(), job)
+
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert "private identifier" not in json.dumps(caught.value.result, ensure_ascii=False)
+    assert "DO-NOT-LEAK-TRANSLATION" not in rendered
+
+
+def test_semantic_validation_keeps_locked_tokens_and_glossary_rules():
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "TOPSTITCH 0.6 cm FROM EDGE", "direct", [{"source_term": "topstitch", "target_term": "明线"}])), job)
+    response = _bound_response([_item("p001-i001", "边缘车缝 0.6 cm", "direct", ["0.6", "cm"], ["topstitch"])], request)
+    glossary = Glossary(entries=(), _terms=())
+
+    with pytest.raises(TranslationValidationError) as caught:
+        validate_translation_response(request, response, glossary, job)
+
+    assert caught.value.error_codes == ("glossary_target_missing",)
+
+
+def test_cache_key_keeps_known_model_identical_content_cross_job_reuse():
+    job_a = _job("job-a", "a" * 64, "b" * 64)
+    job_b = _job("job-b", "c" * 64, "b" * 64)
+    items = _items(("p001-i001", "Shell 12 mm", "direct"))
+    first = translation_cache_key(_bound_request(items, job_a), "b" * 64, "1.0", "codex", "gpt-5", "subagent")
+    second = translation_cache_key(_bound_request(items, job_b), "b" * 64, "1.0", "codex", "gpt-5", "subagent")
+
+    assert first == second
+
+
+def test_cache_key_uses_canonical_request_items_and_known_models_cross_jobs():
+    job_a = _job("job-a", "a" * 64, "b" * 64)
+    job_b = _job("job-b", "c" * 64, "b" * 64)
+    items = _items(("p001-i001", "Shell 12 mm", "direct"))
+    reordered_items = [{key: items[0][key] for key in reversed(items[0])}]
+    material = [
+        ["request", items],
+        ["glossary_sha256", "b" * 64],
+        ["prompt_version", "1.0"],
+        ["host", "codex"],
+        ["model", "gpt-5"],
+        ["execution_mode", "subagent"],
+    ]
+    expected = hashlib.sha256(json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    first = translation_cache_key(_bound_request(items, job_a), "b" * 64, "1.0", "codex", "gpt-5", "subagent", job_id="job-a")
+    second = translation_cache_key(_bound_request(reordered_items, job_b), "b" * 64, "1.0", "codex", "gpt-5", "subagent", job_id="job-b")
+
+    assert first == expected
+    assert second == expected
+
+
+def test_unknown_model_cache_remains_limited_to_the_bound_job():
+    job_a = _job("job-a", "a" * 64, "b" * 64)
+    job_b = _job("job-b", "c" * 64, "b" * 64)
+    items = _items(("p001-i001", "Shell 12 mm", "direct"))
+    first = translation_cache_key(_bound_request(items, job_a), "b" * 64, "1.0", "codex", "unknown", "main_agent", job_id="job-a")
+    second = translation_cache_key(_bound_request(items, job_b), "b" * 64, "1.0", "codex", "unknown", "main_agent", job_id="job-b")
+
+    assert first != second
+    with pytest.raises(ValueError, match="job_id"):
+        translation_cache_key(_bound_request(items, job_a), "b" * 64, "1.0", "codex", "unknown", "main_agent", job_id="job-b")
+
+
+def test_request_attempt_one_is_rejected_by_the_strict_envelope():
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+    request["attempt"] = 1
+    request["request_sha256"] = _request_hash(request)
+
+    with pytest.raises(TechpackError) as caught:
+        validate_translation_response(request, object(), _empty_glossary(), job)
+
+    assert caught.value.code == "translation_request_invalid"
 
 
 @pytest.mark.parametrize(
@@ -85,34 +290,25 @@ def test_response_is_joined_by_item_id_not_array_position() -> None:
         (lambda item: item.update(unexpected="not allowed"), "response_schema_invalid"),
     ],
 )
-def test_response_is_strictly_pydantic_validated_before_semantic_checks(
-    mutation, expected_code
-) -> None:
-    request = _request(("p001-i001", "Shell 12 mm", "direct"))
-    item = _response("p001-i001", "大身 12 mm", "direct", ["12", "mm"])
-    mutation(item)
+def test_response_is_strictly_pydantic_validated_before_semantic_checks(mutation, expected_code):
+    request = _items(("p001-i001", "Shell 12 mm", "direct"))
+    response = _item("p001-i001", "大身 12 mm", "direct", ["12", "mm"])
+    mutation(response)
 
     with pytest.raises(TranslationValidationError) as caught:
-        validate_translation_response(request, [item], _empty_glossary())
+        _validate_items(request, [response], _empty_glossary())
 
     assert caught.value.error_codes == (expected_code,)
 
 
-@pytest.mark.parametrize(
-    "untrusted_id",
-    [
-        "customer confidential measurement notes",
-        "p1-i1",
-        f"p{'1' * 80}-i001",
-    ],
-)
-def test_schema_failure_never_copies_untrusted_item_ids_to_correction(untrusted_id) -> None:
-    request = _request(("p001-i001", "Shell 12 mm", "direct"))
-    item = _response(untrusted_id, "敏感业务译文 12 mm", "direct", ["12", "mm"])
-    item["unexpected"] = "force schema failure"
+@pytest.mark.parametrize("untrusted_id", ["customer confidential measurement notes", "p1-i1", f"p{'1' * 80}-i001"])
+def test_schema_failure_never_copies_untrusted_item_ids_to_correction(untrusted_id):
+    request = _items(("p001-i001", "Shell 12 mm", "direct"))
+    response = _item(untrusted_id, "敏感业务译文 12 mm", "direct", ["12", "mm"])
+    response["unexpected"] = "force schema failure"
 
     with pytest.raises(TranslationValidationError) as caught:
-        validate_translation_response(request, [item], _empty_glossary())
+        _validate_items(request, [response], _empty_glossary())
 
     serialized = json.dumps(caught.value.result, ensure_ascii=False)
     assert caught.value.failed_item_ids == ("p001-i001",)
@@ -120,555 +316,244 @@ def test_schema_failure_never_copies_untrusted_item_ids_to_correction(untrusted_
     assert "敏感业务译文" not in serialized
 
 
-def test_schema_failure_suppresses_pydantic_chain_with_raw_translation() -> None:
-    request = _request(("p001-i001", "Shell 12 mm", "direct"))
-    item = _response(
-        "p001-i001",
-        "DO-NOT-LEAK-FULL-TRANSLATION 12 mm",
-        "direct",
-        ["12", "mm"],
-    )
-    item.pop("translator")
+def test_schema_failure_suppresses_pydantic_chain_with_raw_translation():
+    request = _items(("p001-i001", "Shell 12 mm", "direct"))
+    response = _item("p001-i001", "DO-NOT-LEAK-FULL-TRANSLATION 12 mm", "direct", ["12", "mm"])
+    response.pop("translator")
 
     with pytest.raises(TranslationValidationError) as caught:
-        validate_translation_response(request, [item], _empty_glossary())
+        _validate_items(request, [response], _empty_glossary())
 
-    rendered = "".join(traceback.format_exception(caught.value))
     assert caught.value.__suppress_context__ is True
-    assert "DO-NOT-LEAK-FULL-TRANSLATION" not in rendered
+    assert "DO-NOT-LEAK-FULL-TRANSLATION" not in "".join(traceback.format_exception(caught.value))
 
 
-@pytest.mark.parametrize(
-    "untrusted_id",
-    ["customer measurement notes", f"p{'1' * 80}-i001"],
-)
-def test_request_item_id_is_rejected_by_pydantic_schema(untrusted_id) -> None:
-    request = _request((untrusted_id, "Shell 12 mm", "direct"))
-    response = [_response(untrusted_id, "大身 12 mm", "direct", ["12", "mm"])]
+@pytest.mark.parametrize("untrusted_id", ["customer measurement notes", f"p{'1' * 80}-i001"])
+def test_request_item_id_is_rejected_by_strict_bound_schema(untrusted_id):
+    request = _items((untrusted_id, "Shell 12 mm", "direct"))
 
-    with pytest.raises(ValueError, match="translation request does not match its schema"):
-        validate_translation_response(request, response, _empty_glossary())
+    with pytest.raises(TechpackError) as caught:
+        _validate_items(request, [], _empty_glossary())
+
+    assert caught.value.code == "translation_request_invalid"
 
 
-@pytest.mark.parametrize(
-    "untrusted_id",
-    ["customer measurement notes", f"p{'1' * 80}-i001"],
-)
-def test_response_item_id_schema_failure_cannot_enter_mismatch_result(untrusted_id) -> None:
-    request = _request(("p001-i001", "Shell 12 mm", "direct"))
-    response = [_response(untrusted_id, "大身 12 mm", "direct", ["12", "mm"])]
+@pytest.mark.parametrize("untrusted_id", ["customer measurement notes", f"p{'1' * 80}-i001"])
+def test_response_item_id_schema_failure_cannot_enter_mismatch_result(untrusted_id):
+    request = _items(("p001-i001", "Shell 12 mm", "direct"))
+    response = _item(untrusted_id, "大身 12 mm", "direct", ["12", "mm"])
 
     with pytest.raises(TranslationValidationError) as caught:
-        validate_translation_response(request, response, _empty_glossary())
+        _validate_items(request, [response], _empty_glossary())
 
     assert caught.value.error_codes == ("response_schema_invalid",)
     assert caught.value.failed_item_ids == ("p001-i001",)
     assert untrusted_id not in json.dumps(caught.value.result, ensure_ascii=False)
 
 
-def test_arbitrary_duplicate_response_ids_fail_schema_without_being_reported() -> None:
-    request = _request(("p001-i001", "Shell 12 mm", "direct"))
-    response = [
-        _response("private duplicate text", "大身 12 mm", "direct", ["12", "mm"]),
-        _response("private duplicate text", "大身 12 mm", "direct", ["12", "mm"]),
-    ]
+def test_arbitrary_duplicate_response_ids_fail_schema_without_being_reported():
+    request = _items(("p001-i001", "Shell 12 mm", "direct"))
+    response = [_item("private duplicate text", "大身 12 mm", "direct", ["12", "mm"])] * 2
 
     with pytest.raises(TranslationValidationError) as caught:
-        validate_translation_response(request, response, _empty_glossary())
+        _validate_items(request, response, _empty_glossary())
 
     assert caught.value.error_codes == ("response_schema_invalid",)
     assert caught.value.failed_item_ids == ("p001-i001",)
-    assert "private duplicate text" not in json.dumps(caught.value.result)
+    assert "private duplicate text" not in json.dumps(caught.value.result, ensure_ascii=False)
 
 
-def test_response_rejects_missing_and_unexpected_ids_without_index_guessing() -> None:
-    request = _request(
-        ("p001-i001", "Shell 12 mm", "direct"),
-        ("p001-i002", "Lining 8 mm", "direct"),
-    )
-    response = [
-        _response("p001-i001", "大身 12 mm", "direct", ["12", "mm"]),
-        _response("p999-i999", "里布 8 mm", "direct", ["8", "mm"]),
-    ]
+def test_response_rejects_missing_and_unexpected_ids_without_index_guessing():
+    request = _items(("p001-i001", "Shell 12 mm", "direct"), ("p001-i002", "Lining 8 mm", "direct"))
+    response = [_item("p001-i001", "大身 12 mm", "direct", ["12", "mm"]), _item("p999-i999", "里布 8 mm", "direct", ["8", "mm"])]
 
     with pytest.raises(TranslationValidationError) as caught:
-        validate_translation_response(request, response, _empty_glossary())
+        _validate_items(request, response, _empty_glossary())
 
     assert caught.value.error_codes == ("item_id_set_mismatch",)
     assert caught.value.failed_item_ids == ("p001-i002", "p999-i999")
 
 
-def test_response_rejects_duplicate_ids() -> None:
-    request = _request(("p001-i001", "Shell 12 mm", "direct"))
-    response = [
-        _response("p001-i001", "大身 12 mm", "direct", ["12", "mm"]),
-        _response("p001-i001", "大身 12 mm", "direct", ["12", "mm"]),
-    ]
+def test_response_rejects_duplicate_ids():
+    request = _items(("p001-i001", "Shell 12 mm", "direct"))
+    response = [_item("p001-i001", "大身 12 mm", "direct", ["12", "mm"])] * 2
 
     with pytest.raises(TranslationValidationError) as caught:
-        validate_translation_response(request, response, _empty_glossary())
+        _validate_items(request, response, _empty_glossary())
 
     assert caught.value.error_codes == ("duplicate_item_id",)
     assert caught.value.failed_item_ids == ("p001-i001",)
 
 
-@pytest.mark.parametrize(
-    ("translated_text", "preserved_tokens"),
-    [
-        ("距边 0.6", ["0.6", "cm"]),
-        ("距边 0.6 cm，另加 1 mm", ["0.6", "cm"]),
-        ("距边 6 mm", ["0.6", "cm"]),
-        ("距边 0.6 cm", ["0.6", "cm", "cm"]),
-    ],
-)
-def test_response_reuses_task5_validation_for_missing_added_or_changed_tokens(
-    translated_text, preserved_tokens
-) -> None:
-    request = _request(("p001-i001", "TOPSTITCH 0.6 cm FROM EDGE", "direct"))
-    response = [
-        _response("p001-i001", translated_text, "direct", preserved_tokens),
-    ]
+@pytest.mark.parametrize(("translated_text", "preserved_tokens"), [("距边 0.6", ["0.6", "cm"]), ("距边 0.6 cm，另加 1 mm", ["0.6", "cm"]), ("距边 6 mm", ["0.6", "cm"]), ("距边 0.6 cm", ["0.6", "cm", "cm"])])
+def test_response_reuses_task5_validation_for_missing_added_or_changed_tokens(translated_text, preserved_tokens):
+    request = _items(("p001-i001", "TOPSTITCH 0.6 cm FROM EDGE", "direct"))
+    response = [_item("p001-i001", translated_text, "direct", preserved_tokens)]
 
     with pytest.raises(TranslationValidationError) as caught:
-        validate_translation_response(request, response, _empty_glossary())
+        _validate_items(request, response, _empty_glossary())
 
     assert caught.value.error_codes == ("locked_token_mismatch",)
     assert caught.value.failed_item_ids == ("p001-i001",)
 
 
-def test_response_rejects_glossary_terms_used_mismatch() -> None:
+def test_response_rejects_glossary_terms_used_mismatch():
     request = _request_with_glossary("p001-i001")
-    response = [_response("p001-i001", "边缘明线 0.6 cm", "direct", ["0.6", "cm"])]
+    response = [_item("p001-i001", "边缘明线 0.6 cm", "direct", ["0.6", "cm"])]
 
     with pytest.raises(TranslationValidationError) as caught:
-        validate_translation_response(request, response, _topstitch_glossary())
+        _validate_items(request, response, _topstitch_glossary())
 
     assert caught.value.error_codes == ("glossary_terms_used_mismatch",)
 
 
-def test_response_rejects_translation_without_required_glossary_target() -> None:
+def test_response_rejects_translation_without_required_glossary_target():
     request = _request_with_glossary("p001-i001")
-    response = [
-        _response(
-            "p001-i001",
-            "边缘车缝 0.6 cm",
-            "direct",
-            ["0.6", "cm"],
-            glossary_terms_used=["topstitch"],
-        )
-    ]
+    response = [_item("p001-i001", "边缘车缝 0.6 cm", "direct", ["0.6", "cm"], ["topstitch"])]
 
     with pytest.raises(TranslationValidationError) as caught:
-        validate_translation_response(request, response, _topstitch_glossary())
+        _validate_items(request, response, _topstitch_glossary())
 
     assert caught.value.error_codes == ("glossary_target_missing",)
 
 
-def test_authoritative_glossary_match_overrides_stale_request_target(tmp_path) -> None:
-    glossary = _loaded_glossary(
-        tmp_path,
-        [{"source_term": "topstitch", "target_term": "明线"}],
-    )
+def test_authoritative_glossary_match_overrides_stale_request_target(tmp_path):
+    glossary = _loaded_glossary(tmp_path, [{"source_term": "topstitch", "target_term": "明线"}])
     request = _request_with_glossary("p001-i001")
     request[0]["glossary_terms"][0]["target_term"] = "旧译"
-    response = [
-        _response(
-            "p001-i001",
-            "边缘明线 0.6 cm",
-            "direct",
-            ["0.6", "cm"],
-            glossary_terms_used=["topstitch"],
-        )
-    ]
+    response = [_item("p001-i001", "边缘明线 0.6 cm", "direct", ["0.6", "cm"], ["topstitch"])]
 
-    validated = validate_translation_response(request, response, glossary)
-
-    assert validated[0].translated_text == "边缘明线 0.6 cm"
+    assert _validate_items(request, response, glossary)[0].translated_text == "边缘明线 0.6 cm"
 
 
-def test_authoritative_glossary_match_resolves_alias(tmp_path) -> None:
-    glossary = _loaded_glossary(
-        tmp_path,
-        [
-            {
-                "source_term": "topstitch",
-                "target_term": "明线",
-                "aliases": "edge stitch",
-            }
-        ],
-    )
-    request = _request(("p001-i001", "EDGE STITCH 0.6 cm FROM EDGE", "direct"))
+def test_authoritative_glossary_match_resolves_alias(tmp_path):
+    glossary = _loaded_glossary(tmp_path, [{"source_term": "topstitch", "target_term": "明线", "aliases": "edge stitch"}])
+    request = _items(("p001-i001", "EDGE STITCH 0.6 cm FROM EDGE", "direct"))
     request[0]["glossary_terms"] = [{"source_term": "topstitch", "target_term": "旧译"}]
-    response = [
-        _response(
-            "p001-i001",
-            "边缘明线 0.6 cm",
-            "direct",
-            ["0.6", "cm"],
-            glossary_terms_used=["topstitch"],
-        )
-    ]
+    response = [_item("p001-i001", "边缘明线 0.6 cm", "direct", ["0.6", "cm"], ["topstitch"])]
 
-    validated = validate_translation_response(request, response, glossary)
-
-    assert validated[0].glossary_terms_used == ("topstitch",)
+    assert _validate_items(request, response, glossary)[0].glossary_terms_used == ("topstitch",)
 
 
-def test_authoritative_glossary_prefers_global_canonical_hit_over_earlier_alias(tmp_path) -> None:
-    glossary = _loaded_glossary(
-        tmp_path,
-        [
-            {
-                "source_term": "alpha",
-                "target_term": "甲",
-                "aliases": "beta",
-                "priority": 2,
-            },
-            {
-                "source_term": "beta",
-                "target_term": "乙",
-                "aliases": "gamma",
-                "priority": 1,
-            },
-        ],
-    )
-    request = _request(("p001-i001", "BETA GAMMA 0.6 cm", "direct"))
-    request[0]["glossary_terms"] = [
-        {"source_term": "alpha", "target_term": "过期甲"},
-        {"source_term": "beta", "target_term": "过期乙"},
-    ]
-    response = [
-        _response(
-            "p001-i001",
-            "甲和乙 0.6 cm",
-            "direct",
-            ["0.6", "cm"],
-            glossary_terms_used=["alpha", "beta"],
-        )
-    ]
+def test_authoritative_glossary_prefers_global_canonical_hit_over_earlier_alias(tmp_path):
+    glossary = _loaded_glossary(tmp_path, [{"source_term": "alpha", "target_term": "甲", "aliases": "beta", "priority": 2}, {"source_term": "beta", "target_term": "乙", "aliases": "gamma", "priority": 1}])
+    request = _items(("p001-i001", "BETA GAMMA 0.6 cm", "direct"))
+    request[0]["glossary_terms"] = [{"source_term": "alpha", "target_term": "过期甲"}, {"source_term": "beta", "target_term": "过期乙"}]
+    response = [_item("p001-i001", "甲和乙 0.6 cm", "direct", ["0.6", "cm"], ["alpha", "beta"])]
 
-    validated = validate_translation_response(request, response, glossary)
-
-    assert validated[0].translated_text == "甲和乙 0.6 cm"
+    assert _validate_items(request, response, glossary)[0].translated_text == "甲和乙 0.6 cm"
 
 
-def test_authoritative_glossary_rejects_missing_later_canonical_target(tmp_path) -> None:
-    glossary = _loaded_glossary(
-        tmp_path,
-        [
-            {
-                "source_term": "alpha",
-                "target_term": "甲",
-                "aliases": "beta",
-                "priority": 2,
-            },
-            {
-                "source_term": "beta",
-                "target_term": "乙",
-                "aliases": "gamma",
-                "priority": 1,
-            },
-        ],
-    )
-    request = _request(("p001-i001", "BETA GAMMA 0.6 cm", "direct"))
-    request[0]["glossary_terms"] = [
-        {"source_term": "alpha", "target_term": "过期甲"},
-        {"source_term": "beta", "target_term": "过期乙"},
-    ]
-    response = [
-        _response(
-            "p001-i001",
-            "只有甲 0.6 cm",
-            "direct",
-            ["0.6", "cm"],
-            glossary_terms_used=["alpha", "beta"],
-        )
-    ]
+def test_authoritative_glossary_rejects_missing_later_canonical_target(tmp_path):
+    glossary = _loaded_glossary(tmp_path, [{"source_term": "alpha", "target_term": "甲", "aliases": "beta", "priority": 2}, {"source_term": "beta", "target_term": "乙", "aliases": "gamma", "priority": 1}])
+    request = _items(("p001-i001", "BETA GAMMA 0.6 cm", "direct"))
+    request[0]["glossary_terms"] = [{"source_term": "alpha", "target_term": "过期甲"}, {"source_term": "beta", "target_term": "过期乙"}]
+    response = [_item("p001-i001", "只有甲 0.6 cm", "direct", ["0.6", "cm"], ["alpha", "beta"])]
 
     with pytest.raises(TranslationValidationError) as caught:
-        validate_translation_response(request, response, glossary)
+        _validate_items(request, response, glossary)
 
     assert caught.value.error_codes == ("glossary_target_missing",)
     assert caught.value.failed_item_ids == ("p001-i001",)
 
 
-def test_authoritative_glossary_match_uses_selected_priority(tmp_path) -> None:
-    glossary = _loaded_glossary(
-        tmp_path,
-        [
-            {"source_term": "stitch", "target_term": "低优先", "priority": 1},
-            {"source_term": "stitch", "target_term": "高优先", "priority": 9},
-        ],
-    )
-    request = _request(("p001-i001", "STITCH 0.6 cm", "direct"))
+def test_authoritative_glossary_match_uses_selected_priority(tmp_path):
+    glossary = _loaded_glossary(tmp_path, [{"source_term": "stitch", "target_term": "低优先", "priority": 1}, {"source_term": "stitch", "target_term": "高优先", "priority": 9}])
+    request = _items(("p001-i001", "STITCH 0.6 cm", "direct"))
     request[0]["glossary_terms"] = [{"source_term": "stitch", "target_term": "过期"}]
-    response = [
-        _response(
-            "p001-i001",
-            "高优先 0.6 cm",
-            "direct",
-            ["0.6", "cm"],
-            glossary_terms_used=["stitch"],
-        )
-    ]
+    response = [_item("p001-i001", "高优先 0.6 cm", "direct", ["0.6", "cm"], ["stitch"])]
 
-    validated = validate_translation_response(request, response, glossary)
-
-    assert validated[0].translated_text == "高优先 0.6 cm"
+    assert _validate_items(request, response, glossary)[0].translated_text == "高优先 0.6 cm"
 
 
-def test_authoritative_do_not_translate_match_requires_only_locked_source_token(tmp_path) -> None:
-    glossary = _loaded_glossary(
-        tmp_path,
-        [
-            {
-                "source_term": "AcmeTex",
-                "target_term": "艾克米",
-                "do_not_translate": False,
-                "priority": 99,
-            },
-            {
-                "source_term": "AcmeTex",
-                "target_term": "",
-                "do_not_translate": True,
-                "priority": 0,
-            },
-        ],
-    )
-    request = _request(("p001-i001", "Use AcmeTex fabric", "direct"))
+def test_authoritative_do_not_translate_match_requires_only_locked_source_token(tmp_path):
+    glossary = _loaded_glossary(tmp_path, [{"source_term": "AcmeTex", "target_term": "艾克米", "do_not_translate": False, "priority": 99}, {"source_term": "AcmeTex", "target_term": "", "do_not_translate": True, "priority": 0}])
+    request = _items(("p001-i001", "Use AcmeTex fabric", "direct"))
     request[0]["locked_tokens"] = ["AcmeTex"]
     request[0]["glossary_terms"] = [{"source_term": "AcmeTex", "target_term": "艾克米"}]
-    response = [
-        _response(
-            "p001-i001",
-            "使用AcmeTex面料",
-            "direct",
-            ["AcmeTex"],
-            glossary_terms_used=["AcmeTex"],
-        )
-    ]
+    response = [_item("p001-i001", "使用AcmeTex面料", "direct", ["AcmeTex"], ["AcmeTex"])]
 
-    validated = validate_translation_response(request, response, glossary)
-
-    assert validated[0].translated_text == "使用AcmeTex面料"
+    assert _validate_items(request, response, glossary)[0].translated_text == "使用AcmeTex面料"
 
 
-def test_response_rejects_mode_mismatch() -> None:
-    request = _request(("p001-i001", "Reduce sleeve 0.6 cm", "faithful_digest"))
-    response = [_response("p001-i001", "袖长减少 0.6 cm", "direct", ["0.6", "cm"])]
-
+def test_response_rejects_mode_mismatch():
+    request = _items(("p001-i001", "Reduce sleeve 0.6 cm", "faithful_digest"))
     with pytest.raises(TranslationValidationError) as caught:
-        validate_translation_response(request, response, _empty_glossary())
-
+        _validate_items(request, [_item("p001-i001", "袖长减少 0.6 cm", "direct", ["0.6", "cm"])], _empty_glossary())
     assert caught.value.error_codes == ("mode_mismatch",)
 
 
-def test_unknown_model_is_valid_and_retained() -> None:
-    request = _request(("p001-i001", "Shell 12 mm", "direct"))
-    response = [_response("p001-i001", "大身 12 mm", "direct", ["12", "mm"], model="unknown")]
-
-    validated = validate_translation_response(request, response, _empty_glossary())
-
+def test_unknown_model_is_valid_and_retained():
+    request = _items(("p001-i001", "Shell 12 mm", "direct"))
+    validated = _validate_items(request, [_item("p001-i001", "大身 12 mm", "direct", ["12", "mm"], model="unknown")], _empty_glossary())
     assert validated[0].translator.model == "unknown"
 
 
-def test_first_failure_writes_one_targeted_correction_request(tmp_path) -> None:
-    request_path = tmp_path / "translation-request.json"
-    request_path.write_text(
-        json.dumps(_request(("p001-i001", "Shell 12 mm", "direct"))),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(TranslationValidationError) as caught:
-        validate_translation_response(request_path, [], _empty_glossary())
-
-    correction = json.loads((tmp_path / "correction-request.json").read_text(encoding="utf-8"))
-    assert set(correction) == {"attempt", "failed_item_ids", "error_codes", "required_fixes"}
-    assert correction == caught.value.result
-    assert correction["attempt"] == 1
-    assert correction["failed_item_ids"] == ["p001-i001"]
-    assert correction["error_codes"] == ["item_id_set_mismatch"]
-    assert correction["required_fixes"]
+def test_cache_key_separates_provenance_field_boundaries():
+    job = _job("job-a", "a" * 64, "b" * 64)
+    request = _bound_request(_items(("p001-i001", "Shell 12 mm", "direct")), job)
+    assert translation_cache_key(request, "b" * 64, "ab", "c", "gpt-5", "subagent") != translation_cache_key(request, "b" * 64, "a", "bc", "gpt-5", "subagent")
 
 
-def test_failed_correction_stops_at_human_review_without_guessing() -> None:
-    request = _request(("p001-i001", "Shell 12 mm", "direct"))
-    response = {"attempt": 1, "items": []}
-
-    with pytest.raises(TranslationValidationError) as caught:
-        validate_translation_response(request, response, _empty_glossary())
-
-    assert caught.value.result == {"status": "human_review_required"}
-    assert caught.value.correction_request is None
+def _job(job_id, source_hash, glossary_hash):
+    return JobManifest(schema_version="1.1", job_id=job_id, source=FileArtifact(filename="source.pdf", sha256=source_hash, path="source.pdf", page_count=1), glossary=FileArtifact(filename="terms.csv", sha256=glossary_hash, path="terms.csv"), job_dir="job", created_at="2026-08-22T12:00:00Z")
 
 
-def test_attempt_on_request_envelope_also_stops_after_one_correction() -> None:
-    request = {
-        "attempt": 1,
-        "items": _request(("p001-i001", "Shell 12 mm", "direct")),
-    }
-
-    with pytest.raises(TranslationValidationError) as caught:
-        validate_translation_response(request, [], _empty_glossary())
-
-    assert caught.value.result == {"status": "human_review_required"}
-    assert caught.value.correction_request is None
+def _candidate(item_id, page_type, source_text, *, source_kind="body", glossary_hits=()):
+    return Candidate(item_id=item_id, page_index=0, page_type=page_type, classification_confidence=1.0, classification_evidence=("test",), source_text=source_text, normalized_text=source_text.casefold(), source_bbox=(10.0, 10.0, 90.0, 20.0), source_kind=source_kind, coordinate_confidence=CoordinateConfidence.HIGH, source_auto_approvable=True, auto_approvable=True, should_translate=True, decision_reason=DecisionReason.FIELD_RULE, locked_text=lock_tokens(source_text), glossary_hits=glossary_hits)
 
 
-def test_cache_key_uses_canonical_request_and_known_models_cross_jobs() -> None:
-    request = _request(("p001-i001", "Shell 12 mm", "direct"))
-    reordered = [{key: request[0][key] for key in reversed(request[0])}]
-    cache_material = [
-        ["request", request],
-        ["glossary_sha256", "a" * 64],
-        ["prompt_version", "1.0"],
-        ["host", "codex"],
-        ["model", "gpt-5"],
-        ["execution_mode", "subagent"],
-    ]
-    canonical = json.dumps(
-        cache_material,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    expected = hashlib.sha256(
-        canonical.encode("utf-8")
-    ).hexdigest()
-
-    first = translation_cache_key(
-        request, "a" * 64, "1.0", "codex", "gpt-5", "subagent", job_id="job-a"
-    )
-    second = translation_cache_key(
-        reordered, "a" * 64, "1.0", "codex", "gpt-5", "subagent", job_id="job-b"
-    )
-
-    assert first == expected
-    assert second == expected
+def _items(*values):
+    result = []
+    for item_id, source_text, mode, *terms in values:
+        result.append({"item_id": item_id, "source_text": source_text, "context": "body", "locked_tokens": [token.value for token in lock_tokens(source_text).tokens], "glossary_terms": terms[0] if terms else [], "page_type": "sample_review" if mode == "faithful_digest" else "bom", "mode": mode})
+    return result
 
 
-def test_cache_key_separates_provenance_field_boundaries() -> None:
-    request = _request(("p001-i001", "Shell 12 mm", "direct"))
-
-    first = translation_cache_key(
-        request, "a" * 64, "ab", "c", "gpt-5", "subagent"
-    )
-    second = translation_cache_key(
-        request, "a" * 64, "a", "bc", "gpt-5", "subagent"
-    )
-
-    assert first != second
+def _item(item_id, translated_text, mode, tokens, glossary_terms_used=None, *, model="gpt-5"):
+    return {"item_id": item_id, "translated_text": translated_text, "preserved_tokens": tokens, "glossary_terms_used": glossary_terms_used or [], "mode": mode, "warnings": [], "translator": {"host": "codex", "execution_mode": "subagent", "model": model, "agent_role": "techpack-translator", "prompt_version": "1.0"}}
 
 
-def test_unknown_model_cache_is_scoped_to_job() -> None:
-    request = _request(("p001-i001", "Shell 12 mm", "direct"))
-
-    first = translation_cache_key(
-        request, "a" * 64, "1.0", "codex", "unknown", "main_agent", job_id="job-a"
-    )
-    second = translation_cache_key(
-        request, "a" * 64, "1.0", "codex", "unknown", "main_agent", job_id="job-b"
-    )
-
-    assert first != second
-    with pytest.raises(ValueError, match="job_id"):
-        translation_cache_key(
-            request, "a" * 64, "1.0", "codex", "unknown", "main_agent"
-        )
+def _bound_request(items, job):
+    payload = {"schema_version": "1.1", "job_id": job.job_id, "source_sha256": job.source.sha256, "glossary_sha256": job.glossary.sha256, "attempt": 0, "items": items}
+    payload["request_sha256"] = _request_hash(payload)
+    return payload
 
 
-def _candidate(
-    item_id: str,
-    page_type: PageType,
-    source_text: str,
-    *,
-    source_kind: str = "body",
-    glossary_hits: tuple[GlossaryHit, ...] = (),
-) -> Candidate:
-    return Candidate(
-        item_id=item_id,
-        page_index=0,
-        page_type=page_type,
-        classification_confidence=1.0,
-        classification_evidence=(f"test:{page_type.value}",),
-        source_text=source_text,
-        normalized_text=source_text.casefold(),
-        source_bbox=(10.0, 10.0, 90.0, 20.0),
-        source_kind=source_kind,
-        coordinate_confidence=CoordinateConfidence.HIGH,
-        source_auto_approvable=True,
-        auto_approvable=True,
-        should_translate=True,
-        decision_reason=DecisionReason.FIELD_RULE,
-        locked_text=lock_tokens(source_text),
-        glossary_hits=glossary_hits,
-    )
+def _bound_response(items, request, *, attempt=0):
+    return {"schema_version": request["schema_version"], "job_id": request["job_id"], "source_sha256": request["source_sha256"], "glossary_sha256": request["glossary_sha256"], "request_sha256": request["request_sha256"], "attempt": attempt, "items": items}
 
 
-def _request(*items: tuple[str, str, str]) -> list[dict]:
-    return [
-        {
-            "item_id": item_id,
-            "source_text": source_text,
-            "context": "body",
-            "locked_tokens": [token.value for token in lock_tokens(source_text).tokens],
-            "glossary_terms": [],
-            "page_type": "sample_review" if mode == "faithful_digest" else "bom",
-            "mode": mode,
-        }
-        for item_id, source_text, mode in items
-    ]
+def _request_hash(payload):
+    material = dict(payload)
+    material.pop("request_sha256", None)
+    return hashlib.sha256(json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def _request_with_glossary(item_id: str) -> list[dict]:
-    request = _request((item_id, "TOPSTITCH 0.6 cm FROM EDGE", "direct"))
+def _empty_glossary():
+    return Glossary(entries=(), _terms=())
+
+
+def _topstitch_glossary():
+    return Glossary(entries=(), _terms=())
+
+
+def _request_with_glossary(item_id):
+    request = _items((item_id, "TOPSTITCH 0.6 cm FROM EDGE", "direct"))
     request[0]["glossary_terms"] = [{"source_term": "topstitch", "target_term": "明线"}]
     return request
 
 
-def _response(
-    item_id: str,
-    translated_text: str,
-    mode: str,
-    preserved_tokens: list[str],
-    *,
-    glossary_terms_used: list[str] | None = None,
-    model: str = "gpt-5",
-) -> dict:
-    return {
-        "item_id": item_id,
-        "translated_text": translated_text,
-        "preserved_tokens": preserved_tokens,
-        "glossary_terms_used": glossary_terms_used or [],
-        "mode": mode,
-        "warnings": [],
-        "translator": {
-            "host": "codex",
-            "execution_mode": "subagent",
-            "model": model,
-            "agent_role": "techpack-translator",
-            "prompt_version": "1.0",
-        },
-    }
+def _validate_items(items, response_items, glossary):
+    job = _job("semantic-job", "a" * 64, "b" * 64)
+    request = _bound_request(items, job)
+    response = _bound_response(response_items, request)
+    return validate_translation_response(request, response, glossary, job)
 
 
-def _empty_glossary() -> Glossary:
-    return Glossary(entries=(), _terms=())
-
-
-def _topstitch_glossary() -> Glossary:
-    return Glossary(entries=(), _terms=())
-
-
-def _loaded_glossary(tmp_path, rows: list[dict]) -> Glossary:
+def _loaded_glossary(tmp_path, rows):
     path = tmp_path / "glossary.csv"
-    fieldnames = (
-        "source_term",
-        "target_term",
-        "aliases",
-        "do_not_translate",
-        "priority",
-    )
+    fieldnames = ("source_term", "target_term", "aliases", "do_not_translate", "priority")
     with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fieldnames)
         writer.writeheader()

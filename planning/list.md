@@ -186,6 +186,20 @@ skipped_duplicate | low_confidence
 - 候选筛选完成后，Python 流水线写出 `translation-request.json`；主 Agent 校验并保存 `translation-response.json`，再交回 Python 做确定性验证和后续处理。
 - 每批请求都使用稳定 `item_id`，要求返回 JSON 数组，不依赖行号顺序。sub-agent 只返回翻译结果，不直接修改 PDF、审核状态或任务文件；宿主允许时应禁用其写入和编辑工具。
 
+翻译请求文件必须是严格 envelope；`request_sha256` 是对除 `request_sha256` 字段自身外、按键排序且无多余空白的完整请求 envelope 进行 SHA-256 后得到的小写十六进制值：
+
+```json
+{
+  "schema_version": "1.1",
+  "job_id": "...",
+  "source_sha256": "...",
+  "glossary_sha256": "...",
+  "request_sha256": "...",
+  "attempt": 0,
+  "items": []
+}
+```
+
 翻译请求项：
 
 ```json
@@ -197,6 +211,20 @@ skipped_duplicate | low_confidence
   "locked_tokens": ["0.6", "cm"],
   "glossary_terms": [{"source_term": "topstitch", "target_term": "明线"}],
   "mode": "direct"
+}
+```
+
+翻译响应文件也必须是严格 envelope，并原样回显请求的全部绑定字段。初次响应 `attempt=0`，定向纠偏后的唯一一次响应 `attempt=1`；旧式裸数组不再接受：
+
+```json
+{
+  "schema_version": "1.1",
+  "job_id": "...",
+  "source_sha256": "...",
+  "glossary_sha256": "...",
+  "request_sha256": "...",
+  "attempt": 0,
+  "items": []
 }
 ```
 
@@ -220,9 +248,9 @@ skipped_duplicate | low_confidence
 }
 ```
 
-响应验证：项目 ID 集合必须完全一致；不得重复或漏项；锁定 token 必须完整；术语必须符合；译文不得为空；每项必须包含翻译来源。任何失败都不能按索引猜配。
+响应验证：请求 envelope 必须与传入的 JobManifest 精确一致，并重新计算验证 `request_sha256`；响应 envelope 的 schema_version、job_id、source/glossary SHA-256 和 request_sha256 必须与请求完全一致。跨任务或跨请求交换即使 items 内容相同也必须拒绝。绑定通过后，项目 ID 集合必须完全一致；不得重复或漏项；锁定 token 必须完整；术语必须符合；译文不得为空；每项必须包含翻译来源。任何失败都不能按索引猜配。
 
-无效 JSON、漏项、token 变化或术语不符只允许向翻译 Agent 发起一次定向纠偏，仍失败则转人工审核。宿主任务中断、上下文不足、额度耗尽或 sub-agent 失败时停止翻译阶段并保留断点，不得伪造结果。成功结果按请求内容、术语表、提示词版本、宿主、模型标识和执行方式哈希缓存；模型标识为 `unknown` 时缓存仅限当前任务。
+无效 JSON、绑定不符、漏项、token 变化或术语不符只允许向翻译 Agent 发起一次定向纠偏；纠偏请求必须携带相同 schema/job/source/glossary/request 绑定和 `attempt=1`，仍失败则转人工审核。宿主任务中断、上下文不足、额度耗尽或 sub-agent 失败时停止翻译阶段并保留断点，不得伪造结果。成功结果按请求内容、术语表、提示词版本、宿主、模型标识和执行方式哈希缓存；模型标识为 `unknown` 时缓存仅限当前任务。
 
 ### 5.7 离线审核页
 
