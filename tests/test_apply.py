@@ -492,8 +492,10 @@ def test_apply_review_reports_failed_exact_temp_cleanup_without_deleting_other_f
     assert result.problems[0]["code"] == "temp_cleanup_failed"
     assert unrelated.read_bytes() == b"unrelated"
     retained = list(tmp_path.glob(".cleanup.pdf.*.tmp.pdf"))
-    assert len(retained) == 1
-    assert result.problems[0]["details"]["temp_path"] == str(retained[0])
+    assert len(retained) == 2
+    assert set(result.problems[0]["details"]["retained_paths"]) == {
+        str(path) for path in retained
+    }
 
 
 def test_successful_link_with_failed_temp_unlink_rolls_back_only_its_final_name(
@@ -504,14 +506,24 @@ def test_successful_link_with_failed_temp_unlink_rolls_back_only_its_final_name(
     review_path, job, expected_output = _review_bundle(tmp_path, source)
     final = source.with_name(source.name + ".annotated.pdf")
     real_unlink = Path.unlink
+    real_link = apply_module.os.link
+    linked = False
+
+    def mark_link(source_path, target_path):
+        nonlocal linked
+        result = real_link(source_path, target_path)
+        if Path(target_path) == final:
+            linked = True
+        return result
 
     def fail_temp_only(path, *args, **kwargs):
-        if path.name.startswith(".post-link-cleanup.pdf.") and path.name.endswith(
+        if linked and path.name.startswith(".post-link-cleanup.pdf.") and path.name.endswith(
             ".tmp.pdf"
         ):
             raise PermissionError("locked temp")
         return real_unlink(path, *args, **kwargs)
 
+    monkeypatch.setattr(apply_module.os, "link", mark_link)
     monkeypatch.setattr(Path, "unlink", fail_temp_only)
 
     result = apply_review(source, review_path, job, expected_output)
@@ -598,7 +610,7 @@ def test_final_real_render_collision_is_fed_back_into_the_shared_ten_round_budge
     real_verify = apply_module._verify_temp
     calls = 0
 
-    def collide_once(source_path, temp, baseline, placements, modified_pages):
+    def collide_once(source_path, temp, baseline, placements, modified_pages, *, written=None):
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -615,7 +627,14 @@ def test_final_real_render_collision_is_fed_back_into_the_shared_ten_round_budge
                     ),
                 ),
             )
-        return real_verify(source_path, temp, baseline, placements, modified_pages)
+        return real_verify(
+            source_path,
+            temp,
+            baseline,
+            placements,
+            modified_pages,
+            written=written,
+        )
 
     monkeypatch.setattr(apply_module, "_verify_temp", collide_once)
 
@@ -624,3 +643,286 @@ def test_final_real_render_collision_is_fed_back_into_the_shared_ten_round_budge
     assert result.success is True
     assert calls == 2
     assert result.layout_rounds <= 10
+
+
+def test_layout_fails_closed_when_an_approved_item_has_no_remaining_candidate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "candidate-exhausted.pdf"
+    _make_source(source)
+    approved = tuple(_review(source, include_skipped=False).items)
+    real_rank = apply_module.rank_placements
+
+    def omit_one(item, *args, **kwargs):
+        if item.item_id == approved[0].item_id:
+            return []
+        return real_rank(item, *args, **kwargs)
+
+    monkeypatch.setattr(apply_module, "rank_placements", omit_one)
+    document = pymupdf.open(source)
+    try:
+        layout, _attempted = apply_module._layout_document(document, approved)
+    finally:
+        document.close()
+
+    assert {value.item_id for value in layout.placements} != {
+        value.item_id for value in approved
+    }
+    assert any(
+        value.item_id == approved[0].item_id and value.kind == "candidate_exhausted"
+        for value in layout.collisions
+    )
+
+
+@pytest.mark.parametrize("mode", ["drop", "duplicate"])
+def test_apply_verifies_exact_approved_item_to_new_xref_mapping(
+    tmp_path: Path, monkeypatch, mode: str
+) -> None:
+    source = tmp_path / f"xref-{mode}.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    real_write = apply_module._write_annotations
+
+    def corrupt(document, placements):
+        chosen = placements[:-1] if mode == "drop" else tuple(placements) + (placements[0],)
+        return real_write(document, chosen)
+
+    monkeypatch.setattr(apply_module, "_write_annotations", corrupt)
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is False
+    assert result.problems[0]["code"] == "verification_failed"
+    assert not source.with_name(source.name + ".annotated.pdf").exists()
+
+
+def test_existing_same_tool_title_annotation_is_preserved_and_not_counted_as_new(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "same-title.pdf"
+    _make_source(source)
+    document = pymupdf.open(source)
+    page = document[0]
+    old = page.add_freetext_annot(pymupdf.Rect(210, 240, 285, 270), "old tool title")
+    old.set_info(title="techpack_pdf", subject="old unrelated metadata")
+    old.update()
+    document.saveIncr()
+    old_xref = old.xref
+    old_object = document.xref_object(old_xref, compressed=False)
+    document.close()
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is True
+    output = pymupdf.open(result.output_path)
+    try:
+        assert output.xref_object(old_xref, compressed=False) == old_object
+        assert len(list(output[0].annots())) == len(list(pymupdf.open(source)[0].annots())) + 3
+    finally:
+        output.close()
+
+
+def test_publish_reports_both_retained_paths_when_temp_and_rollback_unlinks_fail(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "double-delete.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    final = source.with_name(source.name + ".annotated.pdf")
+    real_unlink = Path.unlink
+
+    linked = False
+    real_link = apply_module.os.link
+
+    def mark_link(source_path, target_path):
+        nonlocal linked
+        result = real_link(source_path, target_path)
+        if Path(target_path) == final:
+            linked = True
+        return result
+
+    def fail_both(path, *args, **kwargs):
+        if linked and (path == final or (
+            path.name.startswith(".double-delete.pdf.")
+            and path.name.endswith(".tmp.pdf")
+        )):
+            raise PermissionError("locked")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(apply_module.os, "link", mark_link)
+    monkeypatch.setattr(Path, "unlink", fail_both)
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is False
+    assert result.problems[0]["code"] == "publish_rollback_failed"
+    assert result.problems[0]["details"]["final_path"] == str(final)
+    assert final.exists()
+    assert Path(result.problems[0]["details"]["temp_path"]).exists()
+
+
+def test_source_change_after_validation_before_publish_is_rejected(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "source-race.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+    real_verify = apply_module._verify_temp
+
+    def mutate_after_write(*args, **kwargs):
+        outcome = real_verify(*args, **kwargs)
+        with source.open("ab") as stream:
+            stream.write(b"\n% raced")
+        return outcome
+
+    monkeypatch.setattr(apply_module, "_verify_temp", mutate_after_write)
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is False
+    assert result.problems[0]["code"] == "source_mismatch"
+    assert not source.with_name(source.name + ".annotated.pdf").exists()
+
+
+@pytest.mark.parametrize("rotation", [90, 180, 270])
+def test_apply_uses_crop_relative_unrotated_coordinates_on_rotated_cropped_pages(
+    tmp_path: Path, rotation: int
+) -> None:
+    source = tmp_path / f"rotated-{rotation}.pdf"
+    _make_source(source)
+    document = pymupdf.open(source)
+    page = document[0]
+    page.set_cropbox(pymupdf.Rect(10, 10, 300, 300))
+    page.set_rotation(rotation)
+    document.saveIncr()
+    document.close()
+    review_path, job, expected_output = _review_bundle(tmp_path, source)
+
+    result = apply_review(source, review_path, job, expected_output)
+
+    assert result.success is True
+    output = pymupdf.open(result.output_path)
+    try:
+        canonical = pymupdf.Rect(0, 0, output[0].cropbox.width, output[0].cropbox.height)
+        rects = []
+        for annot in output[0].annots():
+            if annot.info.get("title") == "techpack_pdf" and annot.info.get(
+                "subject", ""
+            ).startswith("{"):
+                rects.append(tuple(annot.rect))
+        assert len(rects) == 3
+        assert all(canonical.contains(pymupdf.Rect(rect)) for rect in rects)
+    finally:
+        output.close()
+
+
+def test_unresolved_evidence_is_rendered_from_the_exact_failing_annotated_temp(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "evidence.pdf"
+    _make_source(source)
+    review = _review(source, include_skipped=False)
+    document = pymupdf.open(source)
+    try:
+        placement = apply_module.rank_placements(
+            review.items[0],
+            pymupdf.Rect(0, 0, document[0].cropbox.width, document[0].cropbox.height),
+        )[0]
+    finally:
+        document.close()
+    temp = apply_module._unique_temp_path(source)
+    temp.write_bytes(source.read_bytes())
+    failing = pymupdf.open(temp)
+    apply_module._write_annotations(failing, (placement,))
+    failing[0].draw_rect(
+        pymupdf.Rect(250, 260, 280, 290), color=(0.0, 0.0, 1.0), fill=(0.0, 0.0, 1.0)
+    )
+    failing.saveIncr()
+    failing.close()
+    exact = pymupdf.open(temp)
+    try:
+        expected_png = exact[0].get_pixmap(
+            dpi=300, alpha=False, colorspace=pymupdf.csRGB, annots=True
+        ).tobytes("png")
+    finally:
+        exact.close()
+    layout = apply_module.LayoutResult(
+        (placement,),
+        (
+            apply_module.Collision(
+                0, placement.item_id, "render_overlap", "original_render", 9, 300
+            ),
+        ),
+        10,
+        False,
+    )
+
+    outcome = apply_module._write_unresolved_artifacts(
+        source, layout, {placement.item_id: [placement]}, annotated_temp=temp
+    )
+
+    assert outcome.problem is None
+    evidence = Path(outcome.unresolved[0]["final_render_reference"])
+    assert hashlib.sha256(evidence.read_bytes()).digest() == hashlib.sha256(
+        expected_png
+    ).digest()
+    assert apply_module._remove_exact_temp(temp, source)
+
+
+@pytest.mark.parametrize("fail_at", [2, 3])
+def test_unresolved_artifacts_are_transactional_on_multipage_or_json_failure(
+    tmp_path: Path, monkeypatch, fail_at: int
+) -> None:
+    source = tmp_path / f"artifact-failure-{fail_at}.pdf"
+    _make_source(source)
+    document = pymupdf.open(source)
+    document.new_page(width=320, height=320).insert_text((20, 30), "SECOND")
+    document.saveIncr()
+    document.close()
+    real_write = apply_module._atomic_artifact_write
+    calls = 0
+
+    def fail_selected(path, data):
+        nonlocal calls
+        calls += 1
+        if calls == fail_at:
+            raise OSError("injected artifact failure")
+        return real_write(path, data)
+
+    monkeypatch.setattr(apply_module, "_atomic_artifact_write", fail_selected)
+    layout = apply_module.LayoutResult(
+        (),
+        (
+            apply_module.Collision(0, "item-a", "render_overlap", "original"),
+            apply_module.Collision(1, "item-b", "render_overlap", "original"),
+        ),
+        10,
+        False,
+    )
+    annotated = pymupdf.open(source)
+    try:
+        outcome = apply_module._write_unresolved_artifacts(
+            source, layout, {}, document=annotated
+        )
+    finally:
+        annotated.close()
+
+    assert outcome.problem is not None
+    assert outcome.problem["code"] == "artifact_write_failed"
+    assert not list(tmp_path.glob(f".{source.name}.unresolved.*"))
+
+
+def test_attempted_history_merges_in_first_seen_order_without_duplicates(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "attempts.pdf"
+    _make_source(source)
+    item = _review(source, include_skipped=False).items[0]
+    candidates = apply_module.rank_placements(item, pymupdf.Rect(0, 0, 300, 300))
+
+    merged = apply_module._merge_attempted(
+        {item.item_id: candidates[:2]},
+        {item.item_id: candidates[1:3]},
+    )
+
+    assert [apply_module._placement_signature(value) for value in merged[item.item_id]] == [
+        apply_module._placement_signature(value) for value in candidates[:3]
+    ]

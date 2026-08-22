@@ -180,9 +180,9 @@ def infer_semantic_region(
             blocks.append(region)
     if blocks:
         block = min(blocks, key=lambda rect: rect.get_area())
-        expanded = _expand(block, 18.0) & page.rect
+        expanded = _expand(block, 18.0) & _canonical_page_rect(page)
         return _tuple(expanded)
-    return _tuple(page.rect)
+    return _tuple(_canonical_page_rect(page))
 
 
 def find_same_row_blank_cells(
@@ -245,7 +245,7 @@ def detect_collisions(
     render_check: bool = True,
 ) -> list[Collision]:
     """Detect geometry, clipping, new-new, leader and rendered glyph collisions."""
-    page_rect = pymupdf.Rect(page.rect)
+    page_rect = _canonical_page_rect(page)
     obstacles = list(extract_protected_geometry(page))
     if protected is not None:
         obstacles.extend(protected)
@@ -381,7 +381,7 @@ def detect_rendered_collisions(
 
     collisions: list[Collision] = []
     for placement in placements:
-        expected = _placement_mask(before_page.rect, placement, 300)
+        expected = _placement_mask(before_page, placement, 300)
         pixels = int(np.count_nonzero(collision_300 & expected))
         if pixels > 4:
             collisions.append(
@@ -693,7 +693,7 @@ def _render_collisions(
     protected_200 = cv2.dilate(
         _content_mask(base_200).astype(np.uint8), np.ones((5, 5), np.uint8)
     ).astype(bool)
-    glyph_masks_200 = [_placement_mask(page.rect, placement, 200) for placement in placements]
+    glyph_masks_200 = [_placement_mask(page, placement, 200) for placement in placements]
     potential: set[int] = set()
     for index, mask in enumerate(glyph_masks_200):
         if int(np.count_nonzero(mask & protected_200)) > 4:
@@ -711,7 +711,7 @@ def _render_collisions(
     protected_300 = cv2.dilate(
         _content_mask(base_300).astype(np.uint8), np.ones((5, 5), np.uint8)
     ).astype(bool)
-    glyph_masks_300 = [_placement_mask(page.rect, placement, 300) for placement in placements]
+    glyph_masks_300 = [_placement_mask(page, placement, 300) for placement in placements]
     collisions: list[Collision] = []
     for index in sorted(potential):
         pixels = int(np.count_nonzero(glyph_masks_300[index] & protected_300))
@@ -757,11 +757,13 @@ def _render_diff_mask(
 
 
 def _placement_mask(
-    page_rect: pymupdf.Rect, placement: Placement, dpi: int
+    page: pymupdf.Page, placement: Placement, dpi: int
 ) -> np.ndarray:
     document = pymupdf.open()
     try:
-        blank = document.new_page(width=page_rect.width, height=page_rect.height)
+        canonical = _canonical_page_rect(page)
+        blank = document.new_page(width=canonical.width, height=canonical.height)
+        blank.set_rotation(page.rotation)
         annotation = blank.add_freetext_annot(
             placement.rect,
             placement.text,
@@ -778,6 +780,11 @@ def _placement_mask(
         return _red_mask(pixels)
     finally:
         document.close()
+
+
+def _canonical_page_rect(page: pymupdf.Page) -> pymupdf.Rect:
+    """Return crop-relative unrotated coordinates used by MuPDF page APIs."""
+    return pymupdf.Rect(0, 0, page.cropbox.width, page.cropbox.height)
 
 
 def _page_array(page: pymupdf.Page, dpi: int) -> np.ndarray:

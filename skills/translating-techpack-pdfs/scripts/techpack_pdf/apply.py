@@ -8,7 +8,7 @@ import os
 import shutil
 import tempfile
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -84,6 +84,26 @@ class _VerificationOutcome:
     collisions: tuple[Collision, ...] = ()
 
 
+@dataclass(frozen=True)
+class _WrittenAnnotation:
+    page_index: int
+    item_id: str
+    xref: int
+
+
+@dataclass(frozen=True)
+class _ArtifactOutcome:
+    unresolved: tuple[dict[str, Any], ...] = ()
+    report_path: Path | None = None
+    problem: dict[str, Any] | None = None
+
+
+class _ArtifactWriteError(RuntimeError):
+    def __init__(self, retained: Sequence[Path] = ()) -> None:
+        super().__init__("artifact write failed")
+        self.retained = tuple(retained)
+
+
 def apply_review(
     source_pdf: str | Path,
     review_path: str | Path,
@@ -94,6 +114,7 @@ def apply_review(
     source = Path(source_pdf)
     final_path = source.with_name(source.name + ".annotated.pdf")
     temp_path: Path | None = None
+    snapshot_path: Path | None = None
     try:
         try:
             manifest = JobManifest.model_validate(job)
@@ -119,6 +140,14 @@ def apply_review(
         if validation_problem is not None:
             return _failure(validation_problem)
 
+        source_identity = _source_identity(source)
+        snapshot_path = _unique_temp_path(source)
+        shutil.copyfile(source, snapshot_path)
+        if _sha256(snapshot_path) != review.source.sha256:
+            cleanup = _cleanup_problem(snapshot_path, source)
+            snapshot_path = None if cleanup is None else snapshot_path
+            return _failure(cleanup or _problem("source_mismatch", "Source PDF changed during validation"))
+
         approved = tuple(
             item
             for item in review.items
@@ -127,41 +156,58 @@ def apply_review(
                 ReviewStatus.APPROVED_EDITED,
             }
         )
-        source_document = pymupdf.open(source)
+        identity_problem = _approved_identity_problem(approved)
+        if identity_problem is not None:
+            cleanup = _cleanup_problem(snapshot_path, source)
+            snapshot_path = None if cleanup is None else snapshot_path
+            return _failure(cleanup or identity_problem)
+
+        source_document = pymupdf.open(snapshot_path)
         try:
             baseline = _snapshot_document(source_document)
             layout, attempted = _layout_document(source_document, approved)
             if layout.collisions:
-                unresolved, report_path = _write_unresolved_artifacts(
-                    source, source_document, layout, attempted
+                artifact = _write_unresolved_artifacts(
+                    source, layout, attempted, document=source_document
                 )
+                source_document.close()
+                cleanup = _cleanup_problem(snapshot_path, source)
+                snapshot_path = None if cleanup is None else snapshot_path
+                if artifact.problem is not None or cleanup is not None:
+                    return _failure(artifact.problem or cleanup)
                 return ApplyResult(
                     success=False,
                     output_path=None,
                     problems=(
                         _problem(
-                            "unresolved_overlap",
+                            "candidate_exhausted" if any(value.kind == "candidate_exhausted" for value in layout.collisions) else "unresolved_overlap",
                             "One or more annotations could not be placed safely",
                         ),
                     ),
-                    unresolved_overlaps=unresolved,
+                    unresolved_overlaps=artifact.unresolved,
                     layout_rounds=layout.rounds,
                     modified_pages=tuple(
                         sorted({placement.page_index for placement in layout.placements})
                     ),
-                    failure_report_path=report_path,
+                    failure_report_path=artifact.report_path,
                 )
             placements = layout.placements
             total_rounds = layout.rounds
         finally:
-            source_document.close()
+            if not source_document.is_closed:
+                source_document.close()
+        identity_problem = _placement_identity_problem(approved, placements)
+        if identity_problem is not None:
+            cleanup = _cleanup_problem(snapshot_path, source)
+            snapshot_path = None if cleanup is None else snapshot_path
+            return _failure(cleanup or identity_problem)
         excluded: set[tuple[object, ...]] = set()
         while True:
             temp_path = _unique_temp_path(source)
-            shutil.copy2(source, temp_path)
+            shutil.copyfile(snapshot_path, temp_path)
             output_document = pymupdf.open(temp_path)
             try:
-                _write_annotations(output_document, placements)
+                written = _write_annotations(output_document, placements)
                 output_document.saveIncr()
             finally:
                 output_document.close()
@@ -170,25 +216,40 @@ def apply_review(
                 sorted({placement.page_index for placement in placements})
             )
             verification = _verify_temp(
-                source,
+                snapshot_path,
                 temp_path,
                 baseline,
                 placements,
                 modified_pages,
+                written=written,
             )
             if verification.collisions:
-                if not _remove_exact_temp(temp_path, source):
-                    return _failure(
-                        _problem(
-                            "temp_cleanup_failed",
-                            "Temporary output could not be removed",
-                            temp_path=str(temp_path),
-                        ),
-                        layout_rounds=total_rounds,
-                        modified_pages=modified_pages,
-                    )
-                temp_path = None
                 total_rounds += 1
+                if total_rounds >= 10:
+                    unresolved_layout = LayoutResult(
+                        tuple(placements), verification.collisions, 10, False
+                    )
+                    artifact = _write_unresolved_artifacts(
+                        source, unresolved_layout, attempted, annotated_temp=temp_path
+                    )
+                    cleanup = _cleanup_many((temp_path, snapshot_path), source)
+                    temp_path = None if cleanup is None else temp_path
+                    snapshot_path = None if cleanup is None else snapshot_path
+                    if artifact.problem is not None or cleanup is not None:
+                        return _failure(artifact.problem or cleanup)
+                    return ApplyResult(
+                        success=False,
+                        output_path=None,
+                        problems=(_problem("unresolved_overlap", "One or more annotations could not be placed safely"),),
+                        unresolved_overlaps=artifact.unresolved,
+                        layout_rounds=10,
+                        modified_pages=modified_pages,
+                        failure_report_path=artifact.report_path,
+                    )
+                cleanup = _cleanup_problem(temp_path, source)
+                if cleanup is not None:
+                    return _failure(cleanup, layout_rounds=total_rounds, modified_pages=modified_pages)
+                temp_path = None
                 collided_ids = {
                     collision.item_id for collision in verification.collisions
                 }
@@ -197,32 +258,7 @@ def apply_review(
                     for placement in placements
                     if placement.item_id in collided_ids
                 )
-                if total_rounds >= 10:
-                    unresolved_layout = LayoutResult(
-                        tuple(placements), verification.collisions, 10, False
-                    )
-                    source_document = pymupdf.open(source)
-                    try:
-                        unresolved, report_path = _write_unresolved_artifacts(
-                            source, source_document, unresolved_layout, attempted
-                        )
-                    finally:
-                        source_document.close()
-                    return ApplyResult(
-                        success=False,
-                        output_path=None,
-                        problems=(
-                            _problem(
-                                "unresolved_overlap",
-                                "One or more annotations could not be placed safely",
-                            ),
-                        ),
-                        unresolved_overlaps=unresolved,
-                        layout_rounds=10,
-                        modified_pages=modified_pages,
-                        failure_report_path=report_path,
-                    )
-                source_document = pymupdf.open(source)
+                source_document = pymupdf.open(snapshot_path)
                 try:
                     layout, retry_attempted = _layout_document(
                         source_document,
@@ -230,7 +266,7 @@ def apply_review(
                         excluded=excluded,
                         max_rounds=10 - total_rounds,
                     )
-                    attempted.update(retry_attempted)
+                    attempted = _merge_attempted(attempted, retry_attempted)
                     total_rounds += layout.rounds
                     if layout.collisions:
                         unresolved_layout = LayoutResult(
@@ -239,39 +275,44 @@ def apply_review(
                             min(total_rounds, 10),
                             layout.stable,
                         )
-                        unresolved, report_path = _write_unresolved_artifacts(
-                            source, source_document, unresolved_layout, attempted
+                        artifact = _write_unresolved_artifacts(
+                            source, unresolved_layout, attempted, document=source_document
                         )
+                        source_document.close()
+                        cleanup = _cleanup_problem(snapshot_path, source)
+                        snapshot_path = None if cleanup is None else snapshot_path
+                        if artifact.problem is not None or cleanup is not None:
+                            return _failure(artifact.problem or cleanup)
                         return ApplyResult(
                             success=False,
                             output_path=None,
                             problems=(
                                 _problem(
-                                    "unresolved_overlap",
+                                    "candidate_exhausted" if any(value.kind == "candidate_exhausted" for value in layout.collisions) else "unresolved_overlap",
                                     "One or more annotations could not be placed safely",
                                 ),
                             ),
-                            unresolved_overlaps=unresolved,
+                            unresolved_overlaps=artifact.unresolved,
                             layout_rounds=min(total_rounds, 10),
                             modified_pages=modified_pages,
-                            failure_report_path=report_path,
+                            failure_report_path=artifact.report_path,
                         )
                     placements = layout.placements
                 finally:
-                    source_document.close()
+                    if not source_document.is_closed:
+                        source_document.close()
+                identity_problem = _placement_identity_problem(approved, placements)
+                if identity_problem is not None:
+                    cleanup = _cleanup_problem(snapshot_path, source)
+                    snapshot_path = None if cleanup is None else snapshot_path
+                    return _failure(cleanup or identity_problem)
                 continue
             if verification.problem is not None:
-                if not _remove_exact_temp(temp_path, source):
-                    return _failure(
-                        _problem(
-                            "temp_cleanup_failed",
-                            "Temporary output could not be removed",
-                            temp_path=str(temp_path),
-                        ),
-                        layout_rounds=total_rounds,
-                        modified_pages=modified_pages,
-                    )
+                cleanup = _cleanup_many((temp_path, snapshot_path), source)
+                if cleanup is not None:
+                    return _failure(cleanup, layout_rounds=total_rounds, modified_pages=modified_pages)
                 temp_path = None
+                snapshot_path = None
                 return _failure(
                     verification.problem,
                     layout_rounds=total_rounds,
@@ -279,6 +320,16 @@ def apply_review(
                 )
             break
 
+        if not _source_unchanged(source, source_identity, review.source.sha256):
+            cleanup = _cleanup_many((temp_path, snapshot_path), source)
+            temp_path = None if cleanup is None else temp_path
+            snapshot_path = None if cleanup is None else snapshot_path
+            return _failure(cleanup or _problem("source_mismatch", "Source PDF changed before publication"))
+        cleanup = _cleanup_problem(snapshot_path, source)
+        if cleanup is not None:
+            combined = _cleanup_many((snapshot_path, temp_path), source)
+            return _failure(combined or cleanup)
+        snapshot_path = None
         publish_problem = _publish_no_clobber(temp_path, final_path, source)
         if publish_problem is not None:
             if publish_problem["code"] == "temp_cleanup_failed":
@@ -293,15 +344,9 @@ def apply_review(
             modified_pages=modified_pages,
         )
     except Exception:
-        if temp_path is not None:
-            if not _remove_exact_temp(temp_path, source):
-                return _failure(
-                    _problem(
-                        "temp_cleanup_failed",
-                        "Temporary output could not be removed",
-                        temp_path=str(temp_path),
-                    )
-                )
+        cleanup = _cleanup_many((temp_path, snapshot_path), source)
+        if cleanup is not None:
+            return _failure(cleanup)
         return _failure(
             _problem("apply_failed", "PDF annotations could not be applied safely")
         )
@@ -318,6 +363,8 @@ def _validate_inputs(
         return _problem("output_exists", "Final output already exists")
     if review.blocking_issues or review.review_completed_at is None:
         return _problem("review_blocked", "Review is incomplete or blocked")
+    if any(item.review_status is None for item in review.items):
+        return _problem("review_blocked", "Every review item must have a final status")
     if review.source.filename != source.name or review.source.sha256 != _sha256(source):
         return _problem("source_mismatch", "Source PDF no longer matches the review")
     try:
@@ -343,6 +390,7 @@ def _layout_document(
 ) -> tuple[LayoutResult, dict[str, list[Placement]]]:
     candidates_by_id: dict[str, list[Placement]] = {}
     initial: list[Placement] = []
+    exhausted: list[Collision] = []
     by_page: dict[int, list[ReviewItem]] = defaultdict(list)
     for item in items:
         by_page[item.page_index].append(item)
@@ -353,7 +401,7 @@ def _layout_document(
         for item in sorted(by_page[page_index], key=lambda value: value.item_id):
             candidates = rank_placements(
                 item,
-                page.rect,
+                _canonical_page_rect(page),
                 protected=protected,
                 same_row_cells=find_same_row_blank_cells(page, item.source_bbox),
                 semantic_region=infer_semantic_region(page, item.source_bbox),
@@ -367,6 +415,15 @@ def _layout_document(
             candidates_by_id[item.item_id] = candidates
             if candidates:
                 initial.append(candidates[0])
+            else:
+                exhausted.append(
+                    Collision(
+                        page_index,
+                        item.item_id,
+                        "candidate_exhausted",
+                        "candidate_set",
+                    )
+                )
 
     def collision_detector(placements: Sequence[Placement]) -> Sequence[Collision]:
         collisions: list[Collision] = []
@@ -395,12 +452,20 @@ def _layout_document(
         ],
         max_rounds=max_rounds,
     )
+    if exhausted:
+        result = LayoutResult(
+            result.placements,
+            tuple(sorted((*result.collisions, *exhausted), key=lambda value: (value.page_index, value.item_id, value.kind))),
+            result.rounds,
+            result.stable,
+        )
     return result, candidates_by_id
 
 
 def _write_annotations(
     document: pymupdf.Document, placements: Sequence[Placement]
-) -> None:
+) -> tuple[_WrittenAnnotation, ...]:
+    written: list[_WrittenAnnotation] = []
     for placement in placements:
         page = document[placement.page_index]
         annotation = page.add_freetext_annot(
@@ -424,6 +489,10 @@ def _write_annotations(
             subject=json.dumps(metadata, ensure_ascii=True, separators=(",", ":")),
         )
         annotation.update()
+        written.append(
+            _WrittenAnnotation(placement.page_index, placement.item_id, annotation.xref)
+        )
+    return tuple(written)
 
 
 def _placement_signature(placement: Placement) -> tuple[object, ...]:
@@ -436,12 +505,60 @@ def _placement_signature(placement: Placement) -> tuple[object, ...]:
     )
 
 
+def _approved_identity_problem(
+    approved: Sequence[ReviewItem],
+) -> dict[str, Any] | None:
+    counts = Counter(item.item_id for item in approved)
+    if any(count != 1 for count in counts.values()):
+        return _problem(
+            "review_validation_failed", "Approved review item identifiers are not unique"
+        )
+    return None
+
+
+def _placement_identity_problem(
+    approved: Sequence[ReviewItem], placements: Sequence[Placement]
+) -> dict[str, Any] | None:
+    expected = Counter(item.item_id for item in approved)
+    actual = Counter(placement.item_id for placement in placements)
+    if expected != actual or any(count != 1 for count in actual.values()):
+        return _problem(
+            "placement_identity_mismatch",
+            "Approved items do not map one-to-one to placements",
+        )
+    return None
+
+
+def _merge_attempted(
+    first: Mapping[str, Sequence[Placement]],
+    second: Mapping[str, Sequence[Placement]],
+) -> dict[str, list[Placement]]:
+    merged: dict[str, list[Placement]] = {}
+    for item_id in dict.fromkeys((*first.keys(), *second.keys())):
+        seen: set[tuple[object, ...]] = set()
+        values: list[Placement] = []
+        for placement in (*first.get(item_id, ()), *second.get(item_id, ())):
+            signature = _placement_signature(placement)
+            if signature not in seen:
+                seen.add(signature)
+                values.append(placement)
+        merged[item_id] = values
+    return merged
+
+
+def _canonical_page_rect(page: pymupdf.Page) -> pymupdf.Rect:
+    """Crop-relative, unrotated coordinates used by extraction and annotation APIs."""
+    return pymupdf.Rect(0, 0, page.cropbox.width, page.cropbox.height)
+
+
 def _verify_temp(
     source: Path,
     temp: Path,
     baseline: tuple[_PageSnapshot, ...],
     placements: Sequence[Placement],
     modified_pages: Sequence[int],
+    *,
+    written: Sequence[_WrittenAnnotation] | None = None,
 ) -> _VerificationOutcome:
     original = pymupdf.open(source)
     output = pymupdf.open(temp)
@@ -450,14 +567,23 @@ def _verify_temp(
             return _VerificationOutcome(
                 _problem("verification_failed", "Output page structure changed")
             )
-        current = _snapshot_document(output, original_annotation_xrefs=True)
+        written = tuple(written or ())
+        approved_ids = Counter(placement.item_id for placement in placements)
+        written_ids = Counter(value.item_id for value in written)
+        if (
+            approved_ids != written_ids
+            or any(count != 1 for count in approved_ids.values())
+            or len({(value.page_index, value.xref) for value in written}) != len(written)
+        ):
+            return _VerificationOutcome(
+                _problem("verification_failed", "Approved item annotation mapping is invalid")
+            )
+        excluded = {(value.page_index, value.xref) for value in written}
+        current = _snapshot_document(output, excluded_annotation_xrefs=excluded)
         if len(current) != len(baseline):
             return _VerificationOutcome(
                 _problem("verification_failed", "Output page structure changed")
             )
-        expected_new = defaultdict(int)
-        for placement in placements:
-            expected_new[placement.page_index] += 1
         for page_index, (before, after) in enumerate(zip(baseline, current)):
             if (
                 before.media_box != after.media_box
@@ -478,19 +604,23 @@ def _verify_temp(
                         page_index=page_index,
                     )
                 )
-            free_text_count = sum(
-                annotation.type[1] == "FreeText"
-                and annotation.info.get("title") == "techpack_pdf"
-                for annotation in output[page_index].annots()
-            )
-            if free_text_count != expected_new[page_index]:
-                return _VerificationOutcome(
-                    _problem(
-                        "verification_failed",
-                        "Output annotation count is invalid",
-                        page_index=page_index,
-                    )
-                )
+        actual_ids: Counter[str] = Counter()
+        for record in written:
+            if record.page_index < 0 or record.page_index >= output.page_count:
+                return _VerificationOutcome(_problem("verification_failed", "New annotation page is invalid"))
+            try:
+                page = output[record.page_index]
+                annotation = page.load_annot(record.xref)
+                if annotation is None or annotation.type[1] != "FreeText":
+                    raise ValueError("missing annotation")
+                metadata = json.loads(annotation.info.get("subject") or "{}")
+            except (RuntimeError, ValueError, TypeError, json.JSONDecodeError):
+                return _VerificationOutcome(_problem("verification_failed", "New annotation metadata is invalid"))
+            if metadata.get("item_id") != record.item_id:
+                return _VerificationOutcome(_problem("verification_failed", "New annotation item binding is invalid"))
+            actual_ids[str(metadata["item_id"])] += 1
+        if actual_ids != approved_ids:
+            return _VerificationOutcome(_problem("verification_failed", "Approved item annotation set is incomplete"))
         grouped: dict[int, list[Placement]] = defaultdict(list)
         for placement in placements:
             grouped[placement.page_index].append(placement)
@@ -522,17 +652,13 @@ def _verify_temp(
 def _snapshot_document(
     document: pymupdf.Document,
     *,
-    original_annotation_xrefs: bool = False,
+    excluded_annotation_xrefs: set[tuple[int, int]] | None = None,
 ) -> tuple[_PageSnapshot, ...]:
     snapshots: list[_PageSnapshot] = []
     for page in document:
         annotations = []
         for annotation in page.annots():
-            if (
-                original_annotation_xrefs
-                and annotation.type[1] == "FreeText"
-                and annotation.info.get("title") == "techpack_pdf"
-            ):
+            if excluded_annotation_xrefs and (page.number, annotation.xref) in excluded_annotation_xrefs:
                 continue
             annotation_pixmap = annotation.get_pixmap(alpha=True)
             annotations.append(
@@ -624,36 +750,43 @@ def _unresolved(
 
 def _write_unresolved_artifacts(
     source: Path,
-    document: pymupdf.Document,
     layout: LayoutResult,
     attempted: Mapping[str, Sequence[Placement]],
-) -> tuple[tuple[dict[str, Any], ...], Path]:
+    *,
+    document: pymupdf.Document | None = None,
+    annotated_temp: Path | None = None,
+) -> _ArtifactOutcome:
     artifact_id = uuid.uuid4().hex
     page_indexes = sorted({collision.page_index for collision in layout.collisions})
     render_paths: dict[int, Path] = {}
-    rendered = pymupdf.open(stream=document.tobytes(), filetype="pdf")
-    try:
+    created: list[Path] = []
+    if annotated_temp is not None:
+        rendered = pymupdf.open(annotated_temp)
+    elif document is not None:
+        rendered = pymupdf.open(stream=document.tobytes(), filetype="pdf")
         try:
             _write_annotations(rendered, layout.placements)
         except Exception:
             rendered.close()
             rendered = pymupdf.open(stream=document.tobytes(), filetype="pdf")
+    else:
+        return _ArtifactOutcome(
+            problem=_problem("artifact_write_failed", "Failure evidence source is unavailable")
+        )
+    try:
         for page_index in page_indexes:
             path = source.with_name(
                 f".{source.name}.unresolved.{artifact_id}.page-{page_index + 1}.png"
             )
-            rendered[page_index].get_pixmap(
+            data = rendered[page_index].get_pixmap(
                 dpi=300, alpha=False, colorspace=pymupdf.csRGB, annots=True
-            ).save(path)
+            ).tobytes("png")
+            created.append(path)
+            _atomic_artifact_write(path, data)
             render_paths[page_index] = path
-    finally:
-        rendered.close()
-    unresolved = _unresolved(layout, attempted, render_paths)
-    report_path = source.with_name(
-        f".{source.name}.unresolved.{artifact_id}.json"
-    )
-    report_path.write_text(
-        json.dumps(
+        unresolved = _unresolved(layout, attempted, render_paths)
+        report_path = source.with_name(f".{source.name}.unresolved.{artifact_id}.json")
+        report_data = json.dumps(
             {
                 "code": "unresolved_overlap",
                 "source_filename": source.name,
@@ -662,10 +795,70 @@ def _write_unresolved_artifacts(
             },
             ensure_ascii=False,
             indent=2,
-        ),
-        encoding="utf-8",
-    )
-    return unresolved, report_path
+        ).encode("utf-8")
+        created.append(report_path)
+        _atomic_artifact_write(report_path, report_data)
+        return _ArtifactOutcome(unresolved, report_path)
+    except Exception as error:
+        retained = list(_cleanup_artifacts(created, source))
+        if isinstance(error, _ArtifactWriteError):
+            retained.extend(
+                path
+                for path in error.retained
+                if path.exists() and path not in retained
+            )
+        return _ArtifactOutcome(
+            problem=_problem(
+                "artifact_cleanup_failed" if retained else "artifact_write_failed",
+                "Failure evidence could not be written transactionally",
+                retained_paths=[str(path) for path in retained],
+            )
+        )
+    finally:
+        rendered.close()
+
+
+def _atomic_artifact_write(final_path: Path, data: bytes) -> Path:
+    part = final_path.with_name(f".{final_path.name}.{uuid.uuid4().hex}.part")
+    try:
+        with part.open("xb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(part, final_path)
+        part.unlink()
+    except Exception as error:
+        retained: list[Path] = []
+        for path in (part, final_path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                retained.append(path)
+            else:
+                if path.exists():
+                    retained.append(path)
+        raise _ArtifactWriteError(retained) from error
+    return part
+
+
+def _cleanup_artifacts(paths: Sequence[Path], source: Path) -> tuple[Path, ...]:
+    retained: list[Path] = []
+    expected_prefix = f".{source.name}.unresolved."
+    for path in dict.fromkeys(paths):
+        if (
+            path.parent.resolve(strict=False) != source.parent.resolve(strict=False)
+            or expected_prefix not in path.name
+        ):
+            retained.append(path)
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            retained.append(path)
+        else:
+            if path.exists():
+                retained.append(path)
+    return tuple(retained)
 
 
 def _unique_temp_path(source: Path) -> Path:
@@ -691,6 +884,28 @@ def _remove_exact_temp(path: Path, source: Path) -> bool:
         return False
 
 
+def _cleanup_problem(path: Path | None, source: Path) -> dict[str, Any] | None:
+    if path is None or _remove_exact_temp(path, source):
+        return None
+    return _problem(
+        "temp_cleanup_failed",
+        "Temporary output could not be removed",
+        temp_path=str(path),
+    )
+
+
+def _cleanup_many(
+    paths: Sequence[Path | None], source: Path
+) -> dict[str, Any] | None:
+    retained = [path for path in paths if path is not None and not _remove_exact_temp(path, source)]
+    if not retained:
+        return None
+    return _problem(
+        "temp_cleanup_failed",
+        "Temporary outputs could not be removed",
+        retained_paths=[str(path) for path in retained],
+        temp_path=str(retained[0]),
+    )
 def _publish_no_clobber(
     temp_path: Path, final_path: Path, source: Path
 ) -> dict[str, Any] | None:
@@ -708,7 +923,23 @@ def _publish_no_clobber(
         try:
             final_path.unlink(missing_ok=True)
         except OSError:
-            pass
+            return _problem(
+                "publish_rollback_failed",
+                "Published output and temporary output could not be rolled back",
+                temp_path=str(temp_path),
+                final_path=str(final_path),
+                temp_exists=temp_path.exists(),
+                final_exists=final_path.exists(),
+            )
+        if final_path.exists():
+            return _problem(
+                "publish_rollback_failed",
+                "Published output and temporary output could not be rolled back",
+                temp_path=str(temp_path),
+                final_path=str(final_path),
+                temp_exists=temp_path.exists(),
+                final_exists=True,
+            )
         return _problem(
             "temp_cleanup_failed",
             "Published output exists but temporary output could not be removed",
@@ -729,6 +960,20 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _source_identity(path: Path) -> tuple[int, int, int, int]:
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
+def _source_unchanged(
+    path: Path, identity: tuple[int, int, int, int], expected_sha256: str
+) -> bool:
+    try:
+        return _source_identity(path) == identity and _sha256(path) == expected_sha256
+    except OSError:
+        return False
 
 
 def _problem(code: str, message: str, **details: Any) -> dict[str, Any]:
