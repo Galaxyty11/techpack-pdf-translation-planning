@@ -218,7 +218,7 @@ def _compile_pattern(normalized_term: str) -> re.Pattern[str]:
     pieces = _CONNECTOR.split(normalized_term)
     escaped_pieces = [re.escape(piece).replace(r"\ ", r"\s+") for piece in pieces]
     body = r"[\s\-/]*".join(escaped_pieces)
-    return re.compile(rf"(?<![a-z0-9]){body}(?![a-z0-9])")
+    return re.compile(rf"(?<!\w){body}(?!\w)")
 
 
 def _parse_boolean(row_number: int, value: Any) -> bool:

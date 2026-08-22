@@ -68,6 +68,12 @@ def test_english_terms_require_word_boundaries(tmp_path):
     assert [(hit.matched_text, hit.start, hit.end) for hit in hits] == [("hem", 20, 23)]
 
 
+def test_english_terms_do_not_match_inside_underscore_tokens(tmp_path):
+    path = write_glossary_csv(tmp_path, [{"source_term": "hem", "target_term": "\u4e0b\u6446"}])
+
+    assert load_glossary(path).match("hem_line") == []
+
+
 def test_do_not_translate_wins_for_the_same_span_even_with_lower_priority(tmp_path):
     path = write_glossary_csv(tmp_path, [
         {"source_term": "POM", "target_term": "\u6d4b\u91cf\u70b9", "priority": 100},
