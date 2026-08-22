@@ -210,6 +210,117 @@ def test_candidate_ids_and_duplicate_decisions_are_stable_in_page_order() -> Non
     assert [(item.item_id, item.should_translate, item.decision_reason.value) for item in second] == expected
 
 
+def test_skipped_node_does_not_suppress_a_later_eligible_duplicate() -> None:
+    page = _page(
+        PageType.BOM,
+        [
+            _page_node("Shell fabric", "header_footer"),
+            _page_node("Shell fabric", "material"),
+        ],
+    )
+
+    candidates = select_candidates(page, _empty_glossary())
+
+    assert [(item.should_translate, item.decision_reason.value) for item in candidates] == [
+        (False, "skipped_admin"),
+        (True, "field_rule"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field_role", "text", "expected_reason"),
+    [
+        ("body", "Shell fabric", "page_rule"),
+        ("material", "Use 12 mm elastic", "mixed_text"),
+        ("marketing_copy", "Seasonal inspiration", "manual_candidate"),
+    ],
+)
+def test_candidate_decision_reasons_are_exercised_by_real_selection_behavior(
+    field_role: str,
+    text: str,
+    expected_reason: str,
+) -> None:
+    candidate = select_candidates(
+        _page(PageType.BOM, [_page_node(text, field_role)]),
+        _empty_glossary(),
+    )[0]
+
+    assert candidate.decision_reason.value == expected_reason
+    assert candidate.should_translate is (expected_reason != "manual_candidate")
+
+
+def test_candidate_low_confidence_reason_uses_page_classification_confidence() -> None:
+    page = SelectionPage(
+        page_index=0,
+        classification=PageClassification(
+            page_type=PageType.BOM,
+            confidence=0.79,
+            evidence=("agent:possible material table",),
+        ),
+        nodes=(_page_node("Shell fabric", "material"),),
+    )
+
+    candidate = select_candidates(page, _empty_glossary())[0]
+
+    assert (candidate.should_translate, candidate.decision_reason.value) == (
+        False,
+        "low_confidence",
+    )
+    assert (candidate.classification_confidence, candidate.classification_evidence) == (
+        0.79,
+        ("agent:possible material table",),
+    )
+    assert candidate.auto_approvable is False
+
+
+def test_candidate_retains_classification_and_source_coordinate_provenance() -> None:
+    page = SelectionPage(
+        page_index=2,
+        classification=PageClassification(
+            page_type=PageType.BOM,
+            confidence=0.95,
+            evidence=("table:material+composition", "visual:dense material table"),
+        ),
+        nodes=(_page_node("Shell fabric", "material"),),
+    )
+
+    candidate = select_candidates(page, _empty_glossary())[0]
+
+    assert (
+        candidate.classification_confidence,
+        candidate.classification_evidence,
+        candidate.coordinate_confidence,
+        candidate.source_auto_approvable,
+        candidate.auto_approvable,
+    ) == (
+        0.95,
+        ("table:material+composition", "visual:dense material table"),
+        CoordinateConfidence.HIGH,
+        True,
+        True,
+    )
+
+
+def test_low_coordinate_confidence_blocks_candidate_auto_approval() -> None:
+    page = _page(
+        PageType.BOM,
+        [
+            _page_node(
+                "Shell fabric",
+                "material",
+                coordinate_confidence=CoordinateConfidence.LOW,
+                auto_approvable=True,
+            )
+        ],
+    )
+
+    candidate = select_candidates(page, _empty_glossary())[0]
+
+    assert candidate.source_auto_approvable is True
+    assert candidate.coordinate_confidence is CoordinateConfidence.LOW
+    assert candidate.auto_approvable is False
+
+
 def test_glossary_hits_are_retained_and_do_not_translate_hits_are_locked(tmp_path) -> None:
     glossary_path = tmp_path / "glossary.csv"
     with glossary_path.open("w", newline="", encoding="utf-8") as stream:
@@ -313,6 +424,71 @@ def test_locked_person_remains_valid_when_the_surrounding_label_is_translated() 
     assert validate_locked_tokens(source, "设计师：Jane Doe；公差 0.6 cm") is True
 
 
+def test_locked_token_validation_does_not_count_tokens_inside_longer_tokens() -> None:
+    source = lock_tokens("1 11")
+
+    assert [(token.value, token.kind) for token in source.tokens] == [
+        ("1", "number"),
+        ("11", "number"),
+    ]
+    assert validate_locked_tokens(source, "1 11") is True
+    assert validate_locked_tokens(source, "1 12") is False
+
+
+def test_do_not_translate_glossary_span_supersedes_overlapping_numeric_locks(tmp_path) -> None:
+    glossary_path = tmp_path / "glossary.csv"
+    glossary_path.write_text(
+        "source_term,target_term,do_not_translate\nAcmeTex 220 gsm,,true\n",
+        encoding="utf-8",
+    )
+
+    candidate = select_candidates(
+        _page(PageType.BOM, [_page_node("Use AcmeTex 220 gsm at body", "material")]),
+        load_glossary(glossary_path),
+    )[0]
+
+    assert [(token.value, token.kind) for token in candidate.locked_text.tokens] == [
+        ("AcmeTex 220 gsm", "glossary"),
+    ]
+    assert validate_locked_tokens(candidate.locked_text, "大身使用 AcmeTex 220 gsm") is True
+    assert validate_locked_tokens(candidate.locked_text, "大身使用 AcmeTex 220 GSM") is False
+
+
+def test_undelimited_uppercase_alphanumeric_codes_are_locked() -> None:
+    locked = lock_tokens("Use ABC123 and A12")
+
+    assert [(token.value, token.kind) for token in locked.tokens] == [
+        ("ABC123", "generic_code"),
+        ("A12", "generic_code"),
+    ]
+
+
+def test_undelimited_code_matching_respects_case_and_word_boundaries() -> None:
+    locked = lock_tokens("preABC123post abc123 version2 123ABCdef")
+
+    assert locked.tokens == ()
+
+
+def test_glossary_projection_keeps_combining_marks_in_the_exact_locked_span(tmp_path) -> None:
+    glossary_path = tmp_path / "glossary.csv"
+    glossary_path.write_text(
+        "source_term,target_term,do_not_translate\ncafé,,true\n",
+        encoding="utf-8",
+    )
+    source = "Use Cafe\u0301 fabric"
+
+    candidate = select_candidates(
+        _page(PageType.BOM, [_page_node(source, "material")]),
+        load_glossary(glossary_path),
+    )[0]
+
+    assert [(token.value, token.kind) for token in candidate.locked_text.tokens] == [
+        ("Cafe\u0301", "glossary"),
+    ]
+    assert source[candidate.locked_text.tokens[0].start : candidate.locked_text.tokens[0].end] == "Cafe\u0301"
+    assert validate_locked_tokens(candidate.locked_text, "使用 Cafe\u0301ine 面料") is False
+
+
 def _empty_glossary() -> Glossary:
     return Glossary(entries=(), _terms=())
 
@@ -334,7 +510,13 @@ def _page(
     )
 
 
-def _page_node(text: str, field_role: str) -> PageNode:
+def _page_node(
+    text: str,
+    field_role: str,
+    *,
+    coordinate_confidence: CoordinateConfidence = CoordinateConfidence.HIGH,
+    auto_approvable: bool = True,
+) -> PageNode:
     return PageNode(
         matched_node=MatchedNode(
             mineru_index=0,
@@ -342,10 +524,10 @@ def _page_node(text: str, field_role: str) -> PageNode:
             text=text,
             source_bbox=(10.0, 10.0, 90.0, 20.0),
             mineru_bbox=(10.0, 10.0, 90.0, 20.0),
-            coordinate_confidence=CoordinateConfidence.HIGH,
+            coordinate_confidence=coordinate_confidence,
             similarity=1.0,
             distance_ratio=0.0,
-            auto_approvable=True,
+            auto_approvable=auto_approvable,
         ),
         field_role=field_role,
     )

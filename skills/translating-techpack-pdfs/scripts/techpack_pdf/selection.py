@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Literal
@@ -145,11 +146,15 @@ class Candidate:
     item_id: str
     page_index: int
     page_type: PageType
+    classification_confidence: float
+    classification_evidence: tuple[str, ...]
     source_text: str
     normalized_text: str
     source_bbox: BBox | None
     source_kind: str
     coordinate_confidence: CoordinateConfidence
+    source_auto_approvable: bool
+    auto_approvable: bool
     should_translate: bool
     decision_reason: DecisionReason
     locked_text: LockedText
@@ -222,18 +227,29 @@ def select_candidates(page: SelectionPage, glossary: Glossary) -> list[Candidate
             hits,
             normalized in seen,
         )
-        if normalized:
+        if normalized and should_translate:
             seen.add(normalized)
         selected.append(
             Candidate(
                 item_id=f"p{page.page_index + 1:03d}-i{position:03d}",
                 page_index=page.page_index,
                 page_type=page.classification.page_type,
+                classification_confidence=page.classification.confidence,
+                classification_evidence=page.classification.evidence,
                 source_text=text,
                 normalized_text=normalized,
                 source_bbox=node.source_bbox,
                 source_kind=page_node.field_role,
                 coordinate_confidence=node.coordinate_confidence,
+                source_auto_approvable=node.auto_approvable,
+                auto_approvable=(
+                    should_translate
+                    and page.classification.confidence >= 0.80
+                    and page.classification.page_type is not PageType.UNKNOWN
+                    and node.auto_approvable
+                    and node.coordinate_confidence is CoordinateConfidence.HIGH
+                    and node.source_bbox is not None
+                ),
                 should_translate=should_translate,
                 decision_reason=reason,
                 locked_text=locked,
@@ -261,10 +277,36 @@ def lock_tokens(text: str) -> LockedText:
 def validate_locked_tokens(source: LockedText, translated_text: str) -> bool:
     """Compare the exact case-sensitive multiset of source and returned protected values."""
     expected = Counter(token.value for token in source.tokens)
-    actual = Counter(token.value for token in lock_tokens(translated_text).tokens)
-    for value in expected:
-        actual[value] = max(actual[value], translated_text.count(value))
+    contextual = _contextual_token_occurrences(source, translated_text)
+    detected = [
+        token
+        for token in lock_tokens(translated_text).tokens
+        if not any(_overlaps(token.start, token.end, item.start, item.end) for item in contextual)
+    ]
+    actual = Counter(token.value for token in (*contextual, *detected))
     return actual == expected
+
+
+def _contextual_token_occurrences(source: LockedText, text: str) -> tuple[LockedToken, ...]:
+    contextual: list[LockedToken] = []
+    values = {
+        (token.value, token.kind)
+        for token in source.tokens
+        if token.kind in {"glossary", "person"}
+    }
+    for value, kind in sorted(values, key=lambda item: (-len(item[0]), item[0], item[1])):
+        normalized_value = normalize_term(value)
+        left_boundary = r"(?<!\w)" if normalized_value[0].isalnum() or normalized_value[0] == "_" else ""
+        right_boundary = r"(?!\w)" if normalized_value[-1].isalnum() or normalized_value[-1] == "_" else ""
+        pattern = re.compile(f"{left_boundary}{re.escape(value)}{right_boundary}")
+        for match in pattern.finditer(text):
+            if not any(
+                _overlaps(match.start(), match.end(), token.start, token.end)
+                for token in contextual
+            ):
+                contextual.append(LockedToken(value, match.start(), match.end(), kind))
+    contextual.sort(key=lambda token: (token.start, token.end))
+    return tuple(contextual)
 
 
 def _title_classifications(title: str) -> tuple[list[tuple[PageType, str]], float]:
@@ -401,8 +443,7 @@ def _with_glossary_locks(locked: LockedText, hits: tuple[GlossaryHit, ...]) -> L
         if projected is None:
             continue
         start, end = projected
-        if any(start < token.end and end > token.start for token in tokens):
-            continue
+        tokens = [token for token in tokens if not _overlaps(start, end, token.start, token.end)]
         value = locked.text[start:end]
         tokens.append(LockedToken(value, start, end, "glossary"))
     tokens.sort(key=lambda token: (token.start, token.end))
@@ -422,9 +463,15 @@ def _project_normalized_span(text: str, start: int, end: int) -> tuple[int, int]
         (index for index, length in enumerate(prefix_lengths) if length >= end),
         None,
     )
+    while source_end is not None and source_end < len(text) and unicodedata.combining(text[source_end]):
+        source_end += 1
     if source_start is None or source_end is None or source_start >= source_end:
         return None
     return source_start, source_end
+
+
+def _overlaps(left_start: int, left_end: int, right_start: int, right_end: int) -> bool:
+    return left_start < right_end and left_end > right_start
 
 
 _TOKEN_PATTERNS: tuple[tuple[str, re.Pattern[str], str | None], ...] = (
@@ -469,7 +516,7 @@ _TOKEN_PATTERNS: tuple[tuple[str, re.Pattern[str], str | None], ...] = (
     ),
     (
         "generic_code",
-        re.compile(r"(?<!\w)(?=[A-Z0-9._/-]*[A-Z])(?=[A-Z0-9._/-]*\d)[A-Z0-9]+(?:[-_/][A-Z0-9.]+)+(?!\w)"),
+        re.compile(r"(?<!\w)(?=[A-Z0-9._/-]*[A-Z])(?=[A-Z0-9._/-]*\d)[A-Z0-9]+(?:[-_/][A-Z0-9.]+)*(?!\w)"),
         None,
     ),
     (
