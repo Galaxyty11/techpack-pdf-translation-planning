@@ -206,6 +206,46 @@ def test_load_review_accepts_schema_1_1_and_all_three_explicit_statuses(tmp_path
     assert review.blocking_issues == []
 
 
+def test_load_review_accepts_explicit_null_role_for_main_agent(tmp_path) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    payload = _review_document(job)
+    payload["pipeline"]["execution_mode"] = "main_agent"
+    payload["items"][0].update(
+        translation_execution_mode="main_agent",
+        translation_agent_role=None,
+    )
+    expected_output = _expected_output(payload)
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    review = load_review(review_path, job, expected_output)
+
+    assert review.items[0].translation_agent_role is None
+
+
+@pytest.mark.parametrize("execution_mode", ["subagent", "mixed"])
+@pytest.mark.parametrize("agent_role", [None, "   "])
+def test_load_review_rejects_invalid_delegated_role_as_schema_error(
+    tmp_path,
+    execution_mode,
+    agent_role,
+) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    payload = _review_document(job)
+    expected_output = _expected_output(payload)
+    payload["items"][0].update(
+        translation_execution_mode=execution_mode,
+        translation_agent_role=agent_role,
+    )
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(TechpackError) as caught:
+        load_review(review_path, job, expected_output)
+
+    assert caught.value.code == "review_schema_invalid"
+
+
 @pytest.mark.parametrize(
     ("mutation", "expected_code"),
     [
@@ -263,7 +303,7 @@ def test_load_review_rejects_stale_or_unbound_review(
             "review_item_mismatch",
         ),
         (lambda payload: payload["items"][0].update(translation_model=""), "review_schema_invalid"),
-        (lambda payload: payload["items"][0].update(translation_agent_role=None), "review_item_mismatch"),
+        (lambda payload: payload["items"][0].update(translation_agent_role=None), "review_schema_invalid"),
     ],
 )
 def test_load_review_requires_complete_review_contract(

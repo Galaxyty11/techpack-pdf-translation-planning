@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections import Counter
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -216,8 +215,9 @@ def select_candidates(page: SelectionPage, glossary: Glossary) -> list[Candidate
         node = page_node.matched_node
         text = node.text
         normalized = normalize_term(text)
-        hits = tuple(glossary.match(text))
-        locked = _with_glossary_locks(lock_tokens(text), hits)
+        normalized_hits = tuple(glossary.match(text))
+        locked = _with_glossary_locks(lock_tokens(text), normalized_hits)
+        hits = _restore_glossary_hit_spelling(text, normalized_hits)
         should_translate, reason = _candidate_decision(
             page.classification,
             page_node.field_role,
@@ -292,12 +292,12 @@ def lock_tokens(text: str) -> LockedText:
 
 
 def validate_locked_tokens(source: LockedText, translated_text: str) -> bool:
-    """Compare the exact case-sensitive multiset of source and returned protected values."""
-    expected = Counter(token.value for token in source.tokens)
+    """Compare the exact case-sensitive protected occurrence sequence."""
+    expected = tuple(token.value for token in source.tokens)
     source_occurrences = _source_token_occurrences(source, translated_text)
     detected = lock_tokens(translated_text).tokens
     actual_tokens = _merge_validation_occurrences(source_occurrences, detected)
-    actual = Counter(token.value for token in actual_tokens)
+    actual = tuple(token.value for token in actual_tokens)
     return actual == expected
 
 
@@ -506,6 +506,31 @@ def _with_glossary_locks(locked: LockedText, hits: tuple[GlossaryHit, ...]) -> L
         tokens.append(LockedToken(value, start, end, "glossary"))
     tokens.sort(key=lambda token: (token.start, token.end))
     return LockedText(locked.text, tuple(tokens))
+
+
+def _restore_glossary_hit_spelling(
+    text: str,
+    hits: tuple[GlossaryHit, ...],
+) -> tuple[GlossaryHit, ...]:
+    restored: list[GlossaryHit] = []
+    for hit in hits:
+        projected = _project_normalized_span(text, hit.start, hit.end)
+        if projected is None:
+            restored.append(hit)
+            continue
+        start, end = projected
+        restored.append(
+            GlossaryHit(
+                source_term=hit.source_term,
+                target_term=hit.target_term,
+                matched_text=text[start:end],
+                start=start,
+                end=end,
+                do_not_translate=hit.do_not_translate,
+                priority=hit.priority,
+            )
+        )
+    return tuple(restored)
 
 
 def _project_normalized_span(text: str, start: int, end: int) -> tuple[int, int] | None:

@@ -156,6 +156,10 @@ how_to_measure | construction_detail | category_fields | unknown
 4. 模型分类；必须返回类型、置信度和证据。
 5. 置信度低于 0.80 时归为 `unknown` 并进入审核。
 
+任一页在标题、表头和已有视觉结构规则后仍冲突或未知时，工作流保持 `parsed`，以退出码 4 和 `wait_reason=agent_classification` 写出 `classification-request.json`；不得先生成 `translation-request.json` 或丢弃未知页的候选。请求为 `extra=forbid` 的严格 schema 1.1 envelope，绑定 `job_id`、`source_sha256`、`glossary_sha256` 和规范化 `request_sha256`；项目按 `page_index` 稳定对应，只包含 `reason`、`title`、`table_headers`、`visual_features`、`evidence` 和任务内最小 `thumbnail` 引用。
+
+宿主视觉 Agent 直接分类，或接收只读 sub-agent 仅返回的严格 JSON；只读 sub-agent 不写任务文件。宿主校验后保存同样严格的 `classification-response.json`，原样回显上述五个绑定字段，并对请求中每个页码恰好返回一个 `page_type`、`confidence` 和 `evidence`。外部分类请求/响应类型不做 Pydantic 强制转换：`page_index` 必须是 JSON 整数（不得为数字字符串或布尔值），`confidence` 必须是 0 至 1 的 JSON 数值（可为整数或小数，不得为数字字符串或布尔值），字符串和数组也必须为对应 JSON 类型。重复、缺失、多出、跨任务、过期或绑定不符的响应一律拒绝。只有非 `unknown`、`confidence >= 0.80` 且证据非空的结果才能重建该页候选并继续；低置信、证据为空、仍为 `unknown` 或视觉能力不可用时继续保持 `parsed` 并等待人工分类，不静默跳过。
+
 ### 5.5 候选文本筛选
 
 - BOM：材料、成分、克重、用途、部件和工艺备注。
@@ -173,7 +177,7 @@ mixed_text | manual_candidate | skipped_admin | skipped_code |
 skipped_duplicate | low_confidence
 ```
 
-在发送翻译前，从混合文本中提取并锁定代码、数字、单位、日期、人名、TCX/Pantone 和 POM/物料编号。返回译文必须包含完全相同的锁定 token 集合。
+在发送翻译前，从混合文本中提取并锁定代码、数字、单位、日期、人名、TCX/Pantone 和 POM/物料编号。返回译文必须按原文出现顺序包含完全相同、区分大小写的锁定 token occurrence 序列；边界、数量或顺序任一改变都必须拒绝。
 
 ### 5.6 Agent 翻译任务
 
@@ -248,7 +252,7 @@ skipped_duplicate | low_confidence
 }
 ```
 
-响应验证：请求 envelope 必须与传入的 JobManifest 精确一致，并重新计算验证 `request_sha256`；响应 envelope 的 schema_version、job_id、source/glossary SHA-256 和 request_sha256 必须与请求完全一致。跨任务或跨请求交换即使 items 内容相同也必须拒绝。绑定通过后，项目 ID 集合必须完全一致；不得重复或漏项；锁定 token 必须完整；术语必须符合；译文不得为空；每项必须包含翻译来源。任何失败都不能按索引猜配。
+响应验证：请求 envelope 必须与传入的 JobManifest 精确一致，并重新计算验证 `request_sha256`；响应 envelope 的 schema_version、job_id、source/glossary SHA-256 和 request_sha256 必须与请求完全一致。跨任务或跨请求交换即使 items 内容相同也必须拒绝。绑定通过后，项目 ID 集合必须完全一致；不得重复或漏项；`preserved_tokens` 必须与请求的 `locked_tokens` 精确序列相等，译文中检出的锁定 occurrence 也必须保持同一边界、大小写、数量和顺序；术语必须符合；译文不得为空；每项必须包含翻译来源。`agent_role` 键结构上必填且可为 null：`main_agent` 可显式为 null，`subagent` 和 `mixed` 必须为去除首尾空白后非空的角色；缺键或委派模式 null/空白在本阶段进入同一一次纠偏，不能留到后续 workflow 终止。任何失败都不能按索引猜配。
 
 无效 JSON、绑定不符、漏项、token 变化或术语不符只允许向翻译 Agent 发起一次定向纠偏；纠偏请求必须携带相同 schema/job/source/glossary/request 绑定和 `attempt=1`，仍失败则转人工审核。验证 API 的 `expected_attempt` 必须由可信工作流状态传入，响应自报的 `attempt` 只能与其精确比对，不能决定是否再发起纠偏；`expected_attempt=0` 的任一失败最多写出一次纠偏，`expected_attempt=1` 的任一失败直接转人工审核。宿主任务中断、上下文不足、额度耗尽或 sub-agent 失败时停止翻译阶段并保留断点，不得伪造结果。成功结果按请求内容、术语表、提示词版本、宿主、模型标识和执行方式哈希缓存；模型标识为 `unknown` 时缓存仅限当前任务。
 
@@ -307,11 +311,11 @@ approved | approved_edited | skipped
 
 加载接口固定为 `load_review(path, job, expected_output) -> ReviewDocument`。`job` 必须是带 source/glossary 路径的 `JobManifest`；`expected_output` 必须是生成 `review.html` 时使用的同一份可信输出快照，不能从用户提交的 `review.json` 反推。
 
-加载时必须重新计算当前 source/glossary SHA-256 和 PDF 页数，并要求 `job_id`、source/glossary 文件名与哈希、页数全部与 `JobManifest` 精确一致。实现必须用与生成审核页相同的确定性规则，从 `expected_output` 派生清空审核状态后的可信 items、由全部逐项 provenance 汇总且包含 parser/executor 的完整 pipeline，以及可信 `blocking_issues`。review items 必须与可信 items 数量和 ID 集合完全一致；除 `review_status` 和 `reviewed_translation` 外，每个 `ReviewItem` 字段都必须完全一致。缺失、额外、替换或重复项目立即失败。
+加载时必须重新计算当前 source/glossary SHA-256 和 PDF 页数，并要求 `job_id`、source/glossary 文件名与哈希、页数全部与 `JobManifest` 精确一致。实现必须用与生成审核页相同的确定性规则，从 `expected_output` 派生清空审核状态后的可信 items、由全部逐项 provenance 汇总且包含 parser/executor 的完整 pipeline，以及可信 `blocking_issues`。review items 必须与可信 items 数量和 ID 集合完全一致；除 `review_status` 和 `reviewed_translation` 外，每个 `ReviewItem` 字段都必须完全一致。`translation_agent_role` 在 ReviewItem 中仍是结构必填的可空键，并沿用翻译响应规则：main_agent 可显式 null 或提供无首尾空白的非空角色，subagent/mixed 必须提供非空角色；审核加载不得再对合法 main_agent null 施加更严格门。缺失、额外、替换或重复项目立即失败。
 
 提交的完整 pipeline 和 `blocking_issues` 必须分别与上述可信派生值精确一致；可信阻断项非空时，即使提交 JSON 删除阻断项也仍必须阻止加载。任务级 pipeline 还必须与全部 item 的 `translation_host`、`translation_execution_mode`、`translation_model`、`translation_prompt_version` 确定性汇总完全一致。`schema_version` 是必填字段；`review_completed_at` 只接受带时区的 ISO-8601 字符串。
 
-批准项以 `suggested_translation` 为最终译文，修改后批准项以 `reviewed_translation` 为最终译文；加载时必须重新验证锁定 token 的精确多重集/边界、普通术语的权威目标译法，以及 do-not-translate 命中的原文保留。DNT 校验独立于 `locked_tokens`：必须按可信 hit 的规范化区间/命中文本投影回源文精确子串，并要求最终译文保留完全相同的源文拼写和精确出现次数。
+批准项以 `suggested_translation` 为最终译文，修改后批准项以 `reviewed_translation` 为最终译文；加载时必须重新验证锁定 token 的精确序列/边界（包括大小写、数量和出现顺序）、普通术语的权威目标译法，以及 do-not-translate 命中的原文保留。DNT 校验独立于 `locked_tokens`：必须按可信 hit 的规范化区间/命中文本投影回源文精确子串，并要求最终译文保留完全相同的源文拼写和精确出现次数。
 
 `source.sha256`、`glossary.sha256`、页数、`schema_version`、JobManifest/候选集合绑定或上述确定性约束不匹配时，apply 阶段立即失败，不能提供“忽略并继续”选项。
 
@@ -384,10 +388,17 @@ apply 写入接口固定为 `apply_review(source_pdf, review_path, job, expected
 | 翻译响应漏项、无效 JSON 或 token 被改 | 校验失败；一次定向纠偏后转人工 |
 | sub-agent 尝试修改 PDF、审核状态或任务文件 | 丢弃越权变更，只接受符合契约的 JSON 响应 |
 | review.json 与输入不匹配 | apply 阶段阻断 |
+| `review_ready` 下存在未绑定的 `trusted-review.json` | 仅在 Task 7 严格复验并确认 job/expected-output 全绑定后以 CAS 补全 `review_completed`；无效、不可读、非普通、reparse/link 或不匹配文件保持原样并返回 `recovery_required`，不得覆盖、删除或终止任务 |
+| `<原文件完整文件名>.annotated.pdf` 已存在 | 返回 `output_exists`，绝不覆盖 |
+| 同一任务已有工作流操作正在执行 | 不等待、不排队且不修改 state；返回 `status=workflow_busy`、退出码 4 |
 | FreeText 无法消除重叠 | `unresolved_overlap`，阻止交付 |
 | 最终 PDF 重新打开失败 | 删除临时输出，任务失败 |
 
 数据最小化：默认只向宿主 Agent 或翻译 sub-agent 提供已经入选的短文本、必要上下文、锁定 token 和术语；视觉理解确有必要时仅提供页面裁剪。输入可能由宿主选择的模型供应商处理，使用前必须遵守用户或企业的数据政策。skill 不请求、不持久化、不输出宿主或模型凭据；日志、`review.html` 和错误报告均不得包含凭据，默认日志不记录完整 PDF 文本。
+
+轻量完整性与信任边界：本地操作系统用户、宿主 Agent 和具有工作目录写权限的进程均视为可信；v1 不防御同一用户主动或协调修改任务文件，也不作密码学防篡改承诺，不使用 HMAC、外部密钥、操作系统凭据库或工作目录外 trust record。工作流仍必须使用 SHA-256、严格 schema、`JobManifest`/`job_id` 精确绑定、稳定源文件快照、请求/响应/expected-output 规范化重建、原子 no-clobber、路径/reparse/所有权检查，以及 review/apply 前后摘要复核，检测意外损坏、缺失、过期、跨任务串用和非协调修改。
+
+并发边界：不同任务彼此独立；同一任务不支持并行执行。公开工作流操作使用轻量、非阻塞的每任务互斥保护；检测到同任务正在运行时立即返回 `status=workflow_busy`、退出码 4，且不得改变任务状态。v1 不承诺同任务请求的排队、公平性或并行正确性。终止失败状态只能由持有该任务保护且仍匹配预期 revision/token 的操作写入。
 
 ## 10. 测试清单
 
@@ -408,6 +419,11 @@ apply 写入接口固定为 `apply_review(source_pdf, review_path, job, expected
 - 1802288 只用于 Measurement Sheet 局部测试，不用于整包对照。
 - 覆盖数字原生页、扫描页、混合页、旋转页、密集表格、无空白技术图、重复文字、已有批注、异常字体。
 - 覆盖宿主支持/不支持 sub-agent、主 Agent 回退、sub-agent 失败、上下文不足、额度耗尽、模型未知或切换、无效 JSON、任务中断恢复、过期审核文件和输出重名。
+- 覆盖 `initialized` 与 `parsed` 硬中断后从同一任务目录的最后完整状态恢复；bootstrap 写入失败仍返回已创建任务的安全 job_id、绝对 job_dir 和输入索引。
+- 覆盖 review 候选先以所有权受控 pending 文件验证，验证成功后才 no-clobber 发布并转换为 `review_completed`；无效或中断的 pending 文件不得成为可信审核快照。
+- 覆盖 no-clobber 发布后、`review_completed` 转换前硬崩溃的精确磁盘状态：合法快照可严格复验并绑定恢复，无效或跨任务快照保持不变且进入人工恢复等待。
+- 覆盖轻量完整性边界：意外损坏、缺失、跨任务串用和过期工件必须阻断；同一用户协调重写全部任务文件明确不在防御范围内。
+- 覆盖同一任务并发调用立即返回 `workflow_busy` 且不修改状态；不同任务仍可独立执行。
 - 在 Codex、千问办公和腾讯 WorkBuddy 可用环境中使用同一候选集与术语表验证契约一致性；宿主不提供 sub-agent 时验证主 Agent 回退路径。
 - 对四组完整 TechPack 样本执行盲评，记录锁定 token 保留率、术语符合率、人工修改率、严重语义错误、动作/否定/条件/例外保留情况和译文长度风险；不以模型品牌代替实测结论。
 - 验证目录输入时每个 PDF 独立失败或成功，不让一个文件的状态污染其他文件。

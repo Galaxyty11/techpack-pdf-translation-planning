@@ -3,6 +3,7 @@ import hashlib
 import os
 import re
 import stat
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,6 +77,77 @@ class _SnapshotMutatingMinerUFixture(_MinerUFixture):
         return super().parse_or_degrade(source, manifest)
 
 
+class _UnknownMinerUFixture:
+    def parse_or_degrade(self, _source, _manifest):
+        return {
+            "pages": [
+                {
+                    "page_index": 0,
+                    "title": "",
+                    "nodes": [
+                        {
+                            "text": "Shell 12 mm",
+                            "bbox": [72, 72, 150, 86],
+                            "field_role": "body",
+                        }
+                    ],
+                }
+            ]
+        }
+
+
+class _DntMinerUFixture:
+    def __init__(self, *, title="BOM"):
+        self._title = title
+
+    def parse_or_degrade(self, _source, _manifest):
+        return {
+            "pages": [
+                {
+                    "page_index": 0,
+                    "title": self._title,
+                    "nodes": [
+                        {
+                            "text": "Use AcmeTex fabric",
+                            "bbox": [72, 72, 180, 86],
+                            "field_role": "body",
+                        }
+                    ],
+                }
+            ]
+        }
+
+
+class _MixedClassificationFixture:
+    def parse_or_degrade(self, _source, _manifest):
+        return {
+            "pages": [
+                {
+                    "page_index": 0,
+                    "title": "BOM",
+                    "nodes": [
+                        {
+                            "text": "Shell 12 mm",
+                            "bbox": [72, 72, 150, 86],
+                            "field_role": "body",
+                        }
+                    ],
+                },
+                {
+                    "page_index": 1,
+                    "title": "",
+                    "nodes": [
+                        {
+                            "text": "Collar 5 mm",
+                            "bbox": [72, 72, 150, 86],
+                            "field_role": "body",
+                        }
+                    ],
+                },
+            ]
+        }
+
+
 def _techpack_pdf(path):
     document = pymupdf.open()
     page = document.new_page()
@@ -85,8 +157,36 @@ def _techpack_pdf(path):
     document.close()
 
 
+def _two_page_techpack_pdf(path):
+    document = pymupdf.open()
+    first = document.new_page()
+    first.insert_text((72, 72), "BOM")
+    first.insert_text((72, 86), "Shell 12 mm")
+    second = document.new_page()
+    second.insert_text((72, 72), "Unlabelled details")
+    second.insert_text((72, 86), "Collar 5 mm")
+    document.save(path)
+    document.close()
+
+
+def _dnt_techpack_pdf(path):
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "BOM")
+    page.insert_text((72, 86), "Use AcmeTex fabric")
+    document.save(path)
+    document.close()
+
+
 def _glossary(path):
     path.write_text("source_term,target_term\nShell,大身\n", encoding="utf-8")
+
+
+def _dnt_glossary(path):
+    path.write_text(
+        "source_term,target_term,do_not_translate\nAcmeTex,,true\n",
+        encoding="utf-8",
+    )
 
 
 def _response_for(request, *, attempt=0, translated_text="大身 12 mm"):
@@ -132,6 +232,29 @@ def _response_for_all(request, *, attempt=0):
         for item in request["items"]
     ]
     return payload
+
+
+def _classification_response(request, *, page_type="bom", confidence=0.95, evidence=None):
+    return {
+        key: request[key]
+        for key in (
+            "schema_version",
+            "job_id",
+            "source_sha256",
+            "glossary_sha256",
+            "request_sha256",
+        )
+    } | {
+        "items": [
+            {
+                "page_index": item["page_index"],
+                "page_type": page_type,
+                "confidence": confidence,
+                "evidence": ["agent:visual BOM structure"] if evidence is None else evidence,
+            }
+            for item in request["items"]
+        ]
+    }
 
 
 def _write_approved_review(job_dir):
@@ -184,6 +307,348 @@ def test_analyze_creates_an_isolated_translation_request_and_waits_for_host(tmp_
         }
     ]
     assert not (result.job_dir / "translation-response.json").exists()
+
+
+def test_analysis_accepts_empty_target_only_for_do_not_translate_hit(tmp_path):
+    source, glossary = tmp_path / "dnt.pdf", tmp_path / "terms.csv"
+    _dnt_techpack_pdf(source)
+    _dnt_glossary(glossary)
+
+    result = analyze(
+        source,
+        glossary,
+        tmp_path / "jobs",
+        mineru_client=_DntMinerUFixture(),
+    )
+
+    assert (result.exit_code, result.state) == (4, "translation_requested")
+    analysis = json.loads((result.job_dir / "analysis.json").read_text(encoding="utf-8"))
+    assert analysis["candidates"][0]["glossary_hits"] == [
+        {
+            "source_term": "AcmeTex",
+            "target_term": "",
+            "matched_text": "AcmeTex",
+            "start": 4,
+            "end": 11,
+            "do_not_translate": True,
+            "priority": 0,
+        }
+    ]
+    request = json.loads(
+        (result.job_dir / "translation-request.json").read_text(encoding="utf-8")
+    )
+    assert request["items"][0]["locked_tokens"] == ["AcmeTex"]
+    assert request["items"][0]["glossary_terms"] == [
+        {"source_term": "AcmeTex", "target_term": ""}
+    ]
+
+
+def test_glossary_hit_snapshot_rejects_empty_target_for_ordinary_hit():
+    with pytest.raises(ValidationError):
+        workflow._GlossaryHitSnapshot.model_validate(
+            {
+                "source_term": "Shell",
+                "target_term": "",
+                "matched_text": "Shell",
+                "start": 0,
+                "end": 5,
+                "do_not_translate": False,
+                "priority": 0,
+            }
+        )
+
+
+def test_unknown_page_writes_bound_classification_request_and_waits_in_parsed(tmp_path):
+    source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+
+    result = analyze(
+        source,
+        glossary,
+        tmp_path / "jobs",
+        now=datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc),
+        mineru_client=_UnknownMinerUFixture(),
+    )
+
+    assert (result.exit_code, result.state, result.wait_reason) == (
+        4,
+        "parsed",
+        "agent_classification",
+    )
+    request = json.loads(
+        (result.job_dir / "classification-request.json").read_text(encoding="utf-8")
+    )
+    assert request["request_sha256"] == _request_hash(request)
+    assert [{key: value for key, value in item.items() if key != "thumbnail"} for item in request["items"]] == [
+        {
+            "page_index": 0,
+            "reason": "unknown",
+            "title": "",
+            "table_headers": [],
+            "visual_features": [],
+            "evidence": [],
+        }
+    ]
+    assert Path(request["items"][0]["thumbnail"]) == Path("thumbnails/page-0001.png")
+    assert not (result.job_dir / "translation-request.json").exists()
+    state = json.loads((result.job_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["state"] == "parsed"
+    assert state["wait_reason"] == "agent_classification"
+    assert state["artifacts"]["classification_request"] == hashlib.sha256(
+        (result.job_dir / "classification-request.json").read_bytes()
+    ).hexdigest()
+
+
+def test_valid_classification_response_resumes_same_job_into_translation_request(tmp_path):
+    source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_UnknownMinerUFixture())
+    request = json.loads((job.job_dir / "classification-request.json").read_text(encoding="utf-8"))
+    (job.job_dir / "classification-response.json").write_text(
+        json.dumps(_classification_response(request)), encoding="utf-8"
+    )
+
+    resumed = prepare_review(job.job_dir)
+
+    assert (resumed.exit_code, resumed.state) == (4, "translation_requested")
+    translation_request = json.loads(
+        (job.job_dir / "translation-request.json").read_text(encoding="utf-8")
+    )
+    assert [item["item_id"] for item in translation_request["items"]] == ["p001-i001"]
+    assert translation_request["items"][0]["source_text"] == "Shell 12 mm"
+    assert translation_request["items"][0]["page_type"] == "bom"
+    state = json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["artifacts"]["classification_response"] == hashlib.sha256(
+        (job.job_dir / "classification-response.json").read_bytes()
+    ).hexdigest()
+
+
+def test_classification_rebuild_preserves_empty_target_dnt_hit_binding(tmp_path):
+    source, glossary = tmp_path / "dnt.pdf", tmp_path / "terms.csv"
+    _dnt_techpack_pdf(source)
+    _dnt_glossary(glossary)
+    job = analyze(
+        source,
+        glossary,
+        tmp_path / "jobs",
+        mineru_client=_DntMinerUFixture(title=""),
+    )
+    request = json.loads(
+        (job.job_dir / "classification-request.json").read_text(encoding="utf-8")
+    )
+    (job.job_dir / "classification-response.json").write_text(
+        json.dumps(_classification_response(request)), encoding="utf-8"
+    )
+
+    resumed = prepare_review(job.job_dir)
+
+    assert resumed.state == "translation_requested"
+    translation_request = json.loads(
+        (job.job_dir / "translation-request.json").read_text(encoding="utf-8")
+    )
+    assert translation_request["items"][0]["locked_tokens"] == ["AcmeTex"]
+    assert translation_request["items"][0]["glossary_terms"] == [
+        {"source_term": "AcmeTex", "target_term": ""}
+    ]
+    rebuilt = json.loads((job.job_dir / "analysis.json").read_text(encoding="utf-8"))
+    assert rebuilt["candidates"][0]["glossary_hits"][0]["matched_text"] == "AcmeTex"
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("page_index", "0"),
+        ("page_index", False),
+        ("confidence", "0.95"),
+        ("confidence", True),
+    ],
+)
+def test_classification_response_rejects_coercible_numeric_types(
+    tmp_path,
+    field,
+    invalid_value,
+):
+    source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_UnknownMinerUFixture())
+    request = json.loads(
+        (job.job_dir / "classification-request.json").read_text(encoding="utf-8")
+    )
+    response = _classification_response(request)
+    response["items"][0][field] = invalid_value
+    (job.job_dir / "classification-response.json").write_text(
+        json.dumps(response), encoding="utf-8"
+    )
+
+    with pytest.raises(TechpackError) as caught:
+        prepare_review(job.job_dir)
+
+    assert caught.value.code == "workflow_artifact_invalid"
+    state = json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["state"] == "parsed"
+    assert not (job.job_dir / "translation-request.json").exists()
+
+
+def test_classification_response_accepts_json_integer_confidence(tmp_path):
+    source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_UnknownMinerUFixture())
+    request = json.loads(
+        (job.job_dir / "classification-request.json").read_text(encoding="utf-8")
+    )
+    (job.job_dir / "classification-response.json").write_text(
+        json.dumps(_classification_response(request, confidence=1)), encoding="utf-8"
+    )
+
+    assert prepare_review(job.job_dir).state == "translation_requested"
+
+
+def test_classification_request_rejects_coercible_page_index_type(tmp_path):
+    source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_UnknownMinerUFixture())
+    request_path = job.job_dir / "classification-request.json"
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    request["items"][0]["page_index"] = "0"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    state_path = job.job_dir / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["artifacts"]["classification_request"] = hashlib.sha256(
+        request_path.read_bytes()
+    ).hexdigest()
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    with pytest.raises(TechpackError) as caught:
+        prepare_review(job.job_dir)
+
+    assert caught.value.code == "workflow_artifact_invalid"
+    assert not (job.job_dir / "translation-request.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("page_type", "confidence", "evidence"),
+    [
+        ("bom", 0.79, ["agent:uncertain visual structure"]),
+        ("bom", 0.95, []),
+        ("unknown", 0.95, ["agent:no supported page type"]),
+    ],
+)
+def test_unresolved_agent_classification_waits_without_mutation(
+    tmp_path,
+    page_type,
+    confidence,
+    evidence,
+):
+    source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_UnknownMinerUFixture())
+    before = (job.job_dir / "state.json").read_bytes()
+    request = json.loads((job.job_dir / "classification-request.json").read_text(encoding="utf-8"))
+    (job.job_dir / "classification-response.json").write_text(
+        json.dumps(_classification_response(
+            request,
+            page_type=page_type,
+            confidence=confidence,
+            evidence=evidence,
+        )),
+        encoding="utf-8",
+    )
+
+    resumed = prepare_review(job.job_dir)
+
+    assert (resumed.exit_code, resumed.state, resumed.wait_reason) == (
+        4,
+        "parsed",
+        "agent_classification",
+    )
+    assert (job.job_dir / "state.json").read_bytes() == before
+    assert not (job.job_dir / "translation-request.json").exists()
+
+
+def test_classification_response_with_invalid_binding_fails_closed(tmp_path):
+    source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_UnknownMinerUFixture())
+    request = json.loads((job.job_dir / "classification-request.json").read_text(encoding="utf-8"))
+    response = _classification_response(request)
+    response["request_sha256"] = "0" * 64
+    (job.job_dir / "classification-response.json").write_text(json.dumps(response), encoding="utf-8")
+
+    with pytest.raises(TechpackError) as caught:
+        prepare_review(job.job_dir)
+
+    assert caught.value.code == "workflow_binding_mismatch"
+    assert json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "parsed"
+    assert not (job.job_dir / "translation-request.json").exists()
+
+
+def test_cross_job_classification_response_fails_closed(tmp_path):
+    glossary = tmp_path / "terms.csv"
+    source_a, source_b = tmp_path / "a.pdf", tmp_path / "b.pdf"
+    _techpack_pdf(source_a)
+    _techpack_pdf(source_b)
+    _glossary(glossary)
+    job_a = analyze(source_a, glossary, tmp_path / "jobs-a", mineru_client=_UnknownMinerUFixture())
+    job_b = analyze(source_b, glossary, tmp_path / "jobs-b", mineru_client=_UnknownMinerUFixture())
+    request_a = json.loads((job_a.job_dir / "classification-request.json").read_text(encoding="utf-8"))
+    (job_b.job_dir / "classification-response.json").write_text(
+        json.dumps(_classification_response(request_a)), encoding="utf-8"
+    )
+
+    with pytest.raises(TechpackError) as caught:
+        prepare_review(job_b.job_dir)
+
+    assert caught.value.code == "workflow_binding_mismatch"
+    assert not (job_b.job_dir / "translation-request.json").exists()
+
+
+def test_bound_classification_response_tamper_is_detected_after_resume(tmp_path):
+    source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_UnknownMinerUFixture())
+    request = json.loads((job.job_dir / "classification-request.json").read_text(encoding="utf-8"))
+    response_path = job.job_dir / "classification-response.json"
+    response_path.write_text(json.dumps(_classification_response(request)), encoding="utf-8")
+    assert prepare_review(job.job_dir).state == "translation_requested"
+    response_path.write_text(json.dumps({"tampered": True}), encoding="utf-8")
+
+    with pytest.raises(TechpackError) as caught:
+        prepare_review(job.job_dir)
+
+    assert caught.value.code == "workflow_artifact_invalid"
+
+
+def test_mixed_known_and_unknown_pages_wait_then_keep_every_candidate_on_resume(tmp_path):
+    source, glossary = tmp_path / "mixed.pdf", tmp_path / "terms.csv"
+    _two_page_techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MixedClassificationFixture())
+
+    assert (job.exit_code, job.state, job.wait_reason) == (4, "parsed", "agent_classification")
+    request = json.loads((job.job_dir / "classification-request.json").read_text(encoding="utf-8"))
+    assert [item["page_index"] for item in request["items"]] == [1]
+    (job.job_dir / "classification-response.json").write_text(
+        json.dumps(_classification_response(request)), encoding="utf-8"
+    )
+
+    resumed = prepare_review(job.job_dir)
+
+    assert resumed.state == "translation_requested"
+    translation_request = json.loads(
+        (job.job_dir / "translation-request.json").read_text(encoding="utf-8")
+    )
+    assert [(item["item_id"], item["source_text"]) for item in translation_request["items"]] == [
+        ("p001-i001", "Shell 12 mm"),
+        ("p002-i001", "Collar 5 mm"),
+    ]
 
 
 def test_prepare_review_waits_for_response_then_creates_offline_review(tmp_path):
@@ -267,7 +732,7 @@ def test_apply_rejects_existing_exact_output_without_overwrite(tmp_path):
     expected.write_bytes(b"owned-by-user")
     with pytest.raises(TechpackError) as caught:
         apply(source, review, expected)
-    assert caught.value.code == "output_invalid"
+    assert caught.value.code == "output_exists"
 
 
 def test_prepare_review_rejects_a_corrupt_state_snapshot(tmp_path):
@@ -364,6 +829,32 @@ def test_non_techpack_analysis_exception_marks_its_created_job_failed_without_le
     assert json.loads((job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "failed"
 
 
+@pytest.mark.parametrize("failure_target", ["manifest.json", "state.json"])
+def test_bootstrap_write_failure_retains_owned_job_identity_and_input_index(tmp_path, monkeypatch, failure_target):
+    source, glossary = tmp_path / f"{failure_target}.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    root = tmp_path / "jobs"
+    original = workflow._atomic_json_write
+
+    def fail_bootstrap(path, value):
+        if Path(path).name == failure_target:
+            raise TechpackError("workflow_atomic_write_failed", "safe bootstrap failure", {})
+        return original(path, value)
+
+    monkeypatch.setattr(workflow, "_atomic_json_write", fail_bootstrap)
+    result = analyze(
+        source, glossary, root,
+        now=datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc),
+        mineru_client=_MinerUFixture(),
+    )
+
+    assert (result.exit_code, result.state, result.input_index) == (2, "failed", 0)
+    assert result.job_dir is not None and result.job_dir.is_absolute()
+    assert result.job_dir.parent == root.resolve()
+    assert result.to_dict()["job_dir"] == str(result.job_dir)
+
+
 def test_native_only_bom_uses_native_evidence_and_marks_output_risk(tmp_path):
     source, glossary = tmp_path / "techpack.pdf", tmp_path / "terms.csv"
     _techpack_pdf(source)
@@ -388,7 +879,7 @@ def test_native_only_bom_uses_native_evidence_and_marks_output_risk(tmp_path):
     assert "native_only_degradation" in expected["output"]["items"][0]["warnings"]
 
 
-def test_prepare_blocks_missing_agent_role_before_generating_unapplicable_review(tmp_path):
+def test_prepare_accepts_explicit_null_agent_role_for_main_agent(tmp_path):
     source, glossary = tmp_path / "techpack.pdf", tmp_path / "terms.csv"
     _techpack_pdf(source)
     _glossary(glossary)
@@ -398,13 +889,18 @@ def test_prepare_blocks_missing_agent_role_before_generating_unapplicable_review
     response["items"][0]["translator"]["agent_role"] = None
     (job.job_dir / "translation-response.json").write_text(json.dumps(response), encoding="utf-8")
 
-    with pytest.raises(TechpackError) as caught:
-        prepare_review(job.job_dir)
+    result = prepare_review(job.job_dir)
 
-    assert caught.value.code == "workflow_quality_provenance"
-    assert not (job.job_dir / "expected-output.json").exists()
-    assert not (job.job_dir / "review.html").exists()
-    assert json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "failed"
+    assert result.state == "review_ready"
+    expected = json.loads((job.job_dir / "expected-output.json").read_text(encoding="utf-8"))
+    assert expected["output"]["items"][0]["translation_agent_role"] is None
+    review_path = _write_approved_review(job.job_dir)
+    output = source.with_name(source.name + ".annotated.pdf")
+
+    applied = apply(source, review_path, output)
+
+    assert (applied.exit_code, applied.state) == (0, "succeeded")
+    assert output.is_file()
 
 
 def test_expected_output_promotes_unknown_model_translation_warning_and_nonhigh_coordinate_risk(tmp_path, monkeypatch):
@@ -450,6 +946,8 @@ def test_apply_failure_report_is_strictly_bound_and_redacts_problem_tree_content
     assert report["job_id"] == request["job_id"]
     assert report["problems"] == [{"code": "review_validation_failed", "status": None, "ownership": None, "resource_kind": None, "exists": None, "rollback": None, "nested": []}]
     assert "DO-NOT-LEAK" not in rendered
+    assert not (job.job_dir / "trusted-review.json").exists()
+    assert not list(job.job_dir.glob(".trusted-review.*.pending"))
 
 
 def test_safe_problem_projection_preserves_operational_tree_without_paths_or_text():
@@ -513,10 +1011,16 @@ def test_apply_uses_immutable_bounded_review_snapshot_after_user_review_changes(
     review = _write_approved_review(job.job_dir)
     original_load = workflow.load_review
 
+    calls = []
+
     def load_then_mutate(path, *args):
-        assert os.path.basename(path) == "trusted-review.json"
+        calls.append(os.path.basename(path))
+        if len(calls) == 1:
+            assert calls[0].startswith(".trusted-review.") and calls[0].endswith(".pending")
+            assert not (job.job_dir / "trusted-review.json").exists()
         loaded = original_load(path, *args)
-        review.write_text('{"changed":"untrusted"}', encoding="utf-8")
+        if len(calls) == 1:
+            review.write_text('{"changed":"untrusted"}', encoding="utf-8")
         return loaded
 
     monkeypatch.setattr(workflow, "load_review", load_then_mutate)
@@ -528,6 +1032,163 @@ def test_apply_uses_immutable_bounded_review_snapshot_after_user_review_changes(
     trusted = job.job_dir / "trusted-review.json"
     assert trusted.is_file()
     assert state["artifacts"]["review"] == hashlib.sha256(trusted.read_bytes()).hexdigest()
+    assert len(calls) == 1 and calls[0].startswith(".trusted-review.")
+
+
+def test_review_validation_hard_interruption_never_publishes_pending_as_trusted(tmp_path, monkeypatch):
+    source, glossary = tmp_path / "validation-crash.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    request = json.loads((job.job_dir / "translation-request.json").read_text(encoding="utf-8"))
+    (job.job_dir / "translation-response.json").write_text(json.dumps(_response_for(request)), encoding="utf-8")
+    assert prepare_review(job.job_dir).state == "review_ready"
+    review = _write_approved_review(job.job_dir)
+
+    def interrupt(path, *_args):
+        assert Path(path).name.startswith(".trusted-review.")
+        assert not (job.job_dir / "trusted-review.json").exists()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(workflow, "load_review", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        apply(source, review, source.with_name(source.name + ".annotated.pdf"))
+
+    assert json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "review_ready"
+    assert not (job.job_dir / "trusted-review.json").exists()
+    assert not list(job.job_dir.glob(".trusted-review.*.pending"))
+
+
+def test_review_completed_transition_failure_rolls_back_published_snapshot(tmp_path, monkeypatch):
+    source, glossary = tmp_path / "transition-crash.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    request = json.loads((job.job_dir / "translation-request.json").read_text(encoding="utf-8"))
+    (job.job_dir / "translation-response.json").write_text(json.dumps(_response_for(request)), encoding="utf-8")
+    assert prepare_review(job.job_dir).state == "review_ready"
+    review = _write_approved_review(job.job_dir)
+    original = workflow._write_state
+
+    def interrupt(directory, manifest, state, *args):
+        if state is workflow.WorkflowState.REVIEW_COMPLETED:
+            raise KeyboardInterrupt
+        return original(directory, manifest, state, *args)
+
+    monkeypatch.setattr(workflow, "_write_state", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        apply(source, review, source.with_name(source.name + ".annotated.pdf"))
+
+    assert json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "review_ready"
+    assert not (job.job_dir / "trusted-review.json").exists()
+    assert not list(job.job_dir.glob(".trusted-review.*.pending"))
+
+
+def test_review_ready_recovers_valid_published_snapshot_after_hard_crash(tmp_path, monkeypatch):
+    source, glossary = tmp_path / "published-crash.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    request = json.loads((job.job_dir / "translation-request.json").read_text(encoding="utf-8"))
+    (job.job_dir / "translation-response.json").write_text(json.dumps(_response_for(request)), encoding="utf-8")
+    assert prepare_review(job.job_dir).state == "review_ready"
+    review = _write_approved_review(job.job_dir)
+    pending = job.job_dir / ".trusted-review.0123456789abcdef0123456789abcdef.pending"
+    pending.write_bytes(review.read_bytes())
+    trusted = job.job_dir / "trusted-review.json"
+    os.link(pending, trusted)
+    review.unlink()
+    state_before = json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))
+    assert state_before["state"] == "review_ready" and state_before["artifacts"]["review"] is None
+    output = source.with_name(source.name + ".annotated.pdf")
+    original_load = workflow.load_review
+    validated = []
+
+    def strict_load(path, *args):
+        validated.append(Path(path).name)
+        return original_load(path, *args)
+
+    def succeed(*_args):
+        output.write_bytes(source.read_bytes())
+        return workflow.ApplyResult(True, output)
+
+    monkeypatch.setattr(workflow, "load_review", strict_load)
+    monkeypatch.setattr(workflow, "apply_review", succeed)
+    result = apply(source, review, output)
+
+    assert (result.exit_code, result.state) == (0, "succeeded")
+    assert validated == ["trusted-review.json"]
+    final_state = json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))
+    assert final_state["artifacts"]["review"] == hashlib.sha256(trusted.read_bytes()).hexdigest()
+    assert not pending.exists()
+
+
+@pytest.mark.parametrize("existing_kind", ["invalid", "mismatched"])
+def test_review_ready_preserves_unbound_existing_snapshot_and_waits_for_recovery(tmp_path, existing_kind):
+    source, glossary = tmp_path / f"{existing_kind}.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    request = json.loads((job.job_dir / "translation-request.json").read_text(encoding="utf-8"))
+    (job.job_dir / "translation-response.json").write_text(json.dumps(_response_for(request)), encoding="utf-8")
+    assert prepare_review(job.job_dir).state == "review_ready"
+    review = _write_approved_review(job.job_dir)
+    trusted = job.job_dir / "trusted-review.json"
+    if existing_kind == "invalid":
+        trusted.write_bytes(b"{}")
+    else:
+        payload = json.loads(review.read_text(encoding="utf-8"))
+        payload["job_id"] = "foreign-job"
+        trusted.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    review.unlink()
+    trusted_before = trusted.read_bytes()
+    state_before = (job.job_dir / "state.json").read_bytes()
+
+    result = apply(source, review, source.with_name(source.name + ".annotated.pdf"))
+
+    assert (result.exit_code, result.state, result.status, result.wait_reason) == (
+        5, "review_ready", "recovery_required", "review_recovery",
+    )
+    assert trusted.read_bytes() == trusted_before
+    assert (job.job_dir / "state.json").read_bytes() == state_before
+
+
+def test_review_ready_reserved_reparse_snapshot_waits_without_terminalizing(tmp_path, monkeypatch):
+    source, glossary = tmp_path / "reserved-reparse.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    request = json.loads((job.job_dir / "translation-request.json").read_text(encoding="utf-8"))
+    (job.job_dir / "translation-response.json").write_text(json.dumps(_response_for(request)), encoding="utf-8")
+    assert prepare_review(job.job_dir).state == "review_ready"
+    review = _write_approved_review(job.job_dir)
+    trusted = job.job_dir / "trusted-review.json"
+    trusted.write_bytes(review.read_bytes())
+    trusted_before = trusted.read_bytes()
+    state_before = (job.job_dir / "state.json").read_bytes()
+    original_lstat = Path.lstat
+
+    def reserved_reparse(path):
+        details = original_lstat(path)
+        if Path(path) == trusted:
+            return SimpleNamespace(
+                st_mode=details.st_mode,
+                st_dev=details.st_dev,
+                st_ino=details.st_ino,
+                st_size=details.st_size,
+                st_mtime_ns=details.st_mtime_ns,
+                st_file_attributes=0x0400,
+            )
+        return details
+
+    monkeypatch.setattr(Path, "lstat", reserved_reparse)
+    result = apply(source, review, source.with_name(source.name + ".annotated.pdf"))
+
+    assert (result.exit_code, result.state, result.status, result.wait_reason) == (
+        5, "review_ready", "recovery_required", "review_recovery",
+    )
+    assert trusted.read_bytes() == trusted_before
+    assert (job.job_dir / "state.json").read_bytes() == state_before
 
 
 def test_apply_rejects_review_symlink_before_resolution(tmp_path):
@@ -740,12 +1401,16 @@ def test_concurrent_apply_has_one_winner_and_never_overwrites_final(tmp_path, mo
         first_result, second_result = first.result(timeout=10), second.result(timeout=10)
 
     assert sum(isinstance(value, workflow.WorkflowResult) and value.exit_code == 0 for value in (first_result, second_result)) == 1
-    assert "output_invalid" in (first_result, second_result)
+    busy = next(
+        value for value in (first_result, second_result)
+        if isinstance(value, workflow.WorkflowResult) and value.status == "workflow_busy"
+    )
+    assert (busy.exit_code, busy.state, busy.wait_reason) == (4, None, "concurrent_operation")
     assert calls == ["winner"]
     assert hashlib.sha256(output.read_bytes()).hexdigest() == hashlib.sha256(source.read_bytes()).hexdigest()
 
 
-def test_native_only_non_techpack_still_fails_closed(tmp_path):
+def test_native_only_non_techpack_waits_for_host_visual_classification(tmp_path):
     source, glossary = tmp_path / "unknown.pdf", tmp_path / "terms.csv"
     document = pymupdf.open()
     page = document.new_page()
@@ -759,7 +1424,13 @@ def test_native_only_non_techpack_still_fails_closed(tmp_path):
         now=datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc), mineru_client=_NativeOnlyFixture(),
     )
 
-    assert (result.exit_code, result.state) == (2, "failed")
+    assert (result.exit_code, result.state, result.wait_reason) == (
+        4,
+        "parsed",
+        "agent_classification",
+    )
+    assert (result.job_dir / "classification-request.json").is_file()
+    assert not (result.job_dir / "translation-request.json").exists()
 
 
 def test_batch_exit_priority_and_safe_input_indexes_preserve_independent_jobs(tmp_path, monkeypatch):
@@ -893,6 +1564,71 @@ def test_strict_state_rejects_extra_and_backward_snapshots(tmp_path):
     assert caught.value.code == "workflow_state_invalid"
 
 
+def test_initialized_hard_interruption_resumes_same_job_to_translation_requested(tmp_path, monkeypatch):
+    source, glossary = tmp_path / "initialized.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    original = workflow._snapshot_inputs
+
+    def interrupt(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(workflow, "_snapshot_inputs", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        analyze(
+            source, glossary, tmp_path / "jobs",
+            now=datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc),
+            mineru_client=_MinerUFixture(),
+        )
+    job_dir = next((tmp_path / "jobs").iterdir())
+    assert json.loads((job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "initialized"
+
+    monkeypatch.setattr(workflow, "_snapshot_inputs", original)
+    monkeypatch.setattr(workflow, "MinerUClient", lambda: _MinerUFixture())
+    resumed = prepare_review(job_dir)
+
+    assert (resumed.exit_code, resumed.state, resumed.job_dir) == (4, "translation_requested", job_dir)
+    state = json.loads((job_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["revision"] == 2
+    assert state["artifacts"]["analysis"] == hashlib.sha256((job_dir / "analysis.json").read_bytes()).hexdigest()
+    assert state["artifacts"]["request"] == hashlib.sha256((job_dir / "translation-request.json").read_bytes()).hexdigest()
+
+
+def test_parsed_hard_interruption_resumes_same_job_without_reanalysis(tmp_path, monkeypatch):
+    source, glossary = tmp_path / "parsed.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    original = workflow._atomic_translation_request
+
+    def interrupt(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(workflow, "_atomic_translation_request", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        analyze(
+            source, glossary, tmp_path / "jobs",
+            now=datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc),
+            mineru_client=_MinerUFixture(),
+        )
+    job_dir = next((tmp_path / "jobs").iterdir())
+    before_analysis = (job_dir / "analysis.json").read_bytes()
+    assert json.loads((job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "parsed"
+
+    monkeypatch.setattr(workflow, "_atomic_translation_request", original)
+    monkeypatch.setattr(
+        workflow,
+        "inspect_pdf",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("parsed resume reanalyzed PDF")),
+    )
+    resumed = prepare_review(job_dir)
+
+    assert (resumed.exit_code, resumed.state, resumed.job_dir) == (4, "translation_requested", job_dir)
+    assert (job_dir / "analysis.json").read_bytes() == before_analysis
+    state = json.loads((job_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["revision"] == 2
+    assert state["artifacts"]["request"] == hashlib.sha256((job_dir / "translation-request.json").read_bytes()).hexdigest()
+
+
 def test_atomic_state_write_leaves_complete_previous_snapshot_on_replace_failure(tmp_path, monkeypatch):
     path = tmp_path / "state.json"
     path.write_text('{"complete":true}\n', encoding="utf-8")
@@ -902,6 +1638,18 @@ def test_atomic_state_write_leaves_complete_previous_snapshot_on_replace_failure
     assert caught.value.code == "workflow_atomic_write_failed"
     assert path.read_text(encoding="utf-8") == '{"complete":true}\n'
     assert not list(tmp_path.glob(".state.json.*.tmp"))
+
+
+def test_atomic_binary_mid_fsync_failure_cleans_exact_owned_temp(tmp_path, monkeypatch):
+    path = tmp_path / "artifact.json"
+    monkeypatch.setattr(workflow.os, "fsync", lambda *_args: (_ for _ in ()).throw(OSError("mid-fsync")))
+
+    with pytest.raises(TechpackError) as caught:
+        workflow._atomic_binary_write(path, b"partial")
+
+    assert caught.value.code == "workflow_atomic_write_failed"
+    assert not path.exists()
+    assert not list(tmp_path.glob(".artifact.json.*.tmp"))
 
 
 def test_atomic_replace_and_cleanup_failure_returns_combined_safe_code_without_foreign_delete(tmp_path, monkeypatch):
@@ -956,6 +1704,66 @@ def test_stable_copy_never_deletes_a_replaced_foreign_temp_file(tmp_path, monkey
     assert leftovers[0].read_text(encoding="utf-8") == "foreign-owner"
 
 
+def test_stable_copy_mid_fsync_failure_cleans_exact_owned_temp(tmp_path, monkeypatch):
+    source, target = tmp_path / "source.bin", tmp_path / "snapshot.bin"
+    source.write_bytes(b"original")
+    monkeypatch.setattr(workflow.os, "fsync", lambda *_args: (_ for _ in ()).throw(OSError("mid-fsync")))
+
+    with pytest.raises(TechpackError) as caught:
+        workflow._stable_copy(
+            source, target, hashlib.sha256(source.read_bytes()).hexdigest(), workflow._file_identity(source),
+        )
+
+    assert caught.value.code == "workflow_input_unavailable"
+    assert not target.exists()
+    assert not list(tmp_path.glob(".snapshot.bin.*.tmp"))
+
+
+def test_canonical_request_cleanup_never_deletes_replaced_foreign_temp(tmp_path, monkeypatch):
+    source, glossary = tmp_path / "a.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    result = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    job = workflow._load_job(result.job_dir)
+    analysis = workflow._load_model(result.job_dir, "analysis.json", workflow._AnalysisSnapshot)
+    original = workflow.write_translation_request
+
+    def replace_after_write(candidates, path, manifest):
+        payload = original(candidates, path, manifest)
+        Path(path).unlink()
+        Path(path).write_text("foreign-owner", encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(workflow, "write_translation_request", replace_after_write)
+    with pytest.raises(TechpackError) as caught:
+        workflow._canonical_request_bytes(result.job_dir, analysis, job)
+
+    assert caught.value.code == "workflow_binding_mismatch"
+    leftovers = list(result.job_dir.glob(".canonical-request.*.tmp"))
+    assert len(leftovers) == 1
+    assert leftovers[0].read_text(encoding="utf-8") == "foreign-owner"
+
+
+def test_canonical_request_mid_write_failure_cleans_exact_owned_temp(tmp_path, monkeypatch):
+    source, glossary = tmp_path / "a.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    result = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    job = workflow._load_job(result.job_dir)
+    analysis = workflow._load_model(result.job_dir, "analysis.json", workflow._AnalysisSnapshot)
+
+    def fail_mid_write(_candidates, path, _manifest):
+        Path(path).write_bytes(b"partial")
+        raise TechpackError("translation_request_write_failed", "safe failure", {})
+
+    monkeypatch.setattr(workflow, "write_translation_request", fail_mid_write)
+    with pytest.raises(TechpackError) as caught:
+        workflow._canonical_request_bytes(result.job_dir, analysis, job)
+
+    assert caught.value.code == "workflow_binding_mismatch"
+    assert not list(result.job_dir.glob(".canonical-request.*.tmp"))
+
+
 def test_parent_directory_fsync_is_attempted_when_supported_and_ignored_when_unavailable(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(workflow.os, "name", "posix")
@@ -1002,8 +1810,6 @@ def test_busy_job_lock_returns_waiting_without_mutating_state(tmp_path, monkeypa
     job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
     before = (job.job_dir / "state.json").read_bytes()
     acquired, release = Event(), Event()
-    monkeypatch.setattr(workflow, "_LOCK_TIMEOUT_SECONDS", 0.05, raising=False)
-
     def hold_lock():
         with workflow._job_lock(job.job_dir):
             acquired.set()
@@ -1014,12 +1820,18 @@ def test_busy_job_lock_returns_waiting_without_mutating_state(tmp_path, monkeypa
         assert acquired.wait(3)
         try:
             contender = executor.submit(prepare_review, job.job_dir)
+            started = time.monotonic()
             result = contender.result(timeout=2)
+            elapsed = time.monotonic() - started
         finally:
             release.set()
         holder.result(timeout=2)
 
-    assert (result.exit_code, result.state) == (4, "workflow_busy")
+    assert elapsed < 0.5
+    assert (result.exit_code, result.state, result.status, result.wait_reason) == (
+        4, None, "workflow_busy", "concurrent_operation",
+    )
+    assert "state" not in result.to_dict()
     assert (job.job_dir / "state.json").read_bytes() == before
 
 
@@ -1071,7 +1883,9 @@ def test_applying_recovery_rejects_unbound_success_report_even_with_matching_pdf
 
     result = apply(source, review_path, output)
 
-    assert (result.exit_code, result.state) == (5, "recovery_required")
+    assert (result.exit_code, result.state, result.status, result.wait_reason) == (
+        5, "applying", "recovery_required", "apply_recovery",
+    )
     assert json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "applying"
 
 
@@ -1127,29 +1941,77 @@ def test_real_approved_review_applies_editable_freetext_and_writes_bound_success
     assert report["output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()
 
 
-def test_external_trust_root_blocks_coordinated_state_and_request_tampering(tmp_path):
+def test_lightweight_integrity_creates_no_secret_or_external_trust_artifact(tmp_path):
     source, glossary = tmp_path / "a.pdf", tmp_path / "terms.csv"
     _techpack_pdf(source)
     _glossary(glossary)
     result = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
     directory = result.job_dir
 
-    trust = tmp_path / "jobs" / ".techpack-pdf-trust" / f"{directory.name}.trust.json"
-    assert trust.is_file()
-    state_path = directory / "state.json"
-    request_path = directory / "translation-request.json"
-    request = json.loads(request_path.read_text(encoding="utf-8"))
-    request["items"][0]["source_text"] = "coordinated external mutation"
-    request_path.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    state["artifacts"]["request"] = hashlib.sha256(request_path.read_bytes()).hexdigest()
-    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    assert not (tmp_path / "jobs" / ".techpack-pdf-trust").exists()
+    assert not list(tmp_path.rglob("*.trust.json"))
+    state = json.loads((directory / "state.json").read_text(encoding="utf-8"))
+    assert "trust_hmac" not in state
 
+
+def test_review_completed_resume_uses_single_snapshot_without_original_review(tmp_path, monkeypatch):
+    source, glossary = tmp_path / "resume.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job_result = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    request = json.loads((job_result.job_dir / "translation-request.json").read_text(encoding="utf-8"))
+    (job_result.job_dir / "translation-response.json").write_text(
+        json.dumps(_response_for(request), ensure_ascii=False), encoding="utf-8",
+    )
+    assert prepare_review(job_result.job_dir).state == "review_ready"
+    review = _write_approved_review(job_result.job_dir)
+    job = workflow._load_job(job_result.job_dir)
+    ready = workflow._load_state(job_result.job_dir, job)
+    workflow._atomic_binary_write(job_result.job_dir / "trusted-review.json", review.read_bytes())
+    workflow._write_state(
+        job_result.job_dir, job, workflow.WorkflowState.REVIEW_COMPLETED,
+        ready.revision + 1, ready.expected_attempt, None,
+    )
+    review.unlink()
+    output = source.with_name(source.name + ".annotated.pdf")
+
+    def succeed(*_args):
+        output.write_bytes(source.read_bytes())
+        return workflow.ApplyResult(True, output)
+
+    monkeypatch.setattr(workflow, "apply_review", succeed)
+    result = apply(source, review, output)
+
+    assert (result.exit_code, result.state) == (0, "succeeded")
+
+
+def test_apply_detects_trusted_review_change_during_task8(tmp_path, monkeypatch):
+    source, glossary = tmp_path / "mutating.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(source, glossary, tmp_path / "jobs", mineru_client=_MinerUFixture())
+    request = json.loads((job.job_dir / "translation-request.json").read_text(encoding="utf-8"))
+    (job.job_dir / "translation-response.json").write_text(
+        json.dumps(_response_for(request), ensure_ascii=False), encoding="utf-8",
+    )
+    assert prepare_review(job.job_dir).state == "review_ready"
+    review = _write_approved_review(job.job_dir)
+    output = source.with_name(source.name + ".annotated.pdf")
+
+    def mutate_snapshot(_source, trusted_review, *_args):
+        Path(trusted_review).write_bytes(b"{}")
+        output.write_bytes(source.read_bytes())
+        return workflow.ApplyResult(True, output)
+
+    monkeypatch.setattr(workflow, "apply_review", mutate_snapshot)
     with pytest.raises(TechpackError) as caught:
-        prepare_review(directory)
+        apply(source, review, output)
 
-    assert caught.value.code == "workflow_trust_invalid"
-    assert "coordinated external mutation" not in str(caught.value)
+    assert caught.value.code == "workflow_artifact_invalid"
+    assert json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "failed"
+    report = json.loads((job.job_dir / "apply-result.json").read_text(encoding="utf-8"))
+    assert report["status"] == "failed"
+    assert report["final_output_retained"] is True
 
 
 def _request_hash(payload):

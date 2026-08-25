@@ -263,7 +263,7 @@ git commit -m "feat: add PDF and MinerU structure analysis"
 
 使用表驱动字面量覆盖全部十种页面类型和低于 0.80 归 unknown。覆盖 BOM、Measurement、technical drawing、sample review、label/pack 的 translate 决策；general info、how to measure、category fields、页眉页脚、管理字段的 skip 决策及固定 decision_reason。
 
-锁定测试必须覆盖款号、POM、物料号、日期、人名标记、TCX/Pantone、整数、小数、百分比、正负公差、mm/cm/inch/gsm/oz，并证明 “0.6 cm” 不能改为 “6 mm”。
+锁定测试必须覆盖款号、POM、物料号、日期、人名标记、TCX/Pantone、整数、小数、百分比、正负公差、mm/cm/inch/gsm/oz，并证明 “0.6 cm” 不能改为 “6 mm”，且相同 token/相同多重数换序也必须失败。
 
 - [ ] **Step 2: 运行并确认 selection 模块缺失**
 
@@ -275,7 +275,7 @@ git commit -m "feat: add PDF and MinerU structure analysis"
 
 分类优先级固定为标题、表头/POM/BOM 字段、视觉结构、Agent 分类。selection.py 只为前三层实现确定性结果；冲突或未知时产生 classification_request，等待宿主视觉 Agent 返回 type、confidence、evidence。confidence < 0.80 强制 unknown。
 
-锁定 token 按原文出现顺序记录 value、start、end、kind；回填验证比较 Counter(value)，不做换算、规范化或大小写改写。候选 item_id 使用 p{一基页码三位}-i{页内一基序号三位}，相同输入排序稳定。
+锁定 token 按原文出现顺序记录 value、start、end、kind；回填验证比较通过冲突安全边界检测得到的精确、区分大小写 occurrence 序列，不做换算、规范化、大小写改写或换序。候选 item_id 使用 p{一基页码三位}-i{页内一基序号三位}，相同输入排序稳定。
 
 - [ ] **Step 4: 运行筛选与术语测试**
 
@@ -302,7 +302,7 @@ git commit -m "feat: select and protect TechPack translation candidates"
 
 - [ ] **Step 1: 写契约失败测试**
 
-断言请求 envelope 严格绑定 schema_version、job_id、source/glossary SHA-256 和规范化 request SHA-256；items 按 item_id 排序且只包含 source_text、必要 context、locked_tokens、glossary_terms、page_type、mode。响应 envelope 必须原样回显全部绑定字段；测试覆盖跨任务/跨请求交换、ID 集合不等、重复 ID、空译文、token 丢失/增加、术语不符、缺 translator、model 空值、model=unknown、mode 不一致和一次纠偏后的终止状态。
+断言请求 envelope 严格绑定 schema_version、job_id、source/glossary SHA-256 和规范化 request SHA-256；items 按 item_id 排序且只包含 source_text、必要 context、locked_tokens、glossary_terms、page_type、mode。响应 envelope 必须原样回显全部绑定字段；测试覆盖跨任务/跨请求交换、ID 集合不等、重复 ID、空译文、token 丢失/增加/同多重数换序、`preserved_tokens` 与请求序列不等、术语不符、缺 translator、model 空值、model=unknown、mode 不一致和一次纠偏后的终止状态。`agent_role` 键必须存在但可为 null：main_agent 显式 null 合法，subagent/mixed 的 null、空白及所有模式的缺键必须在 attempt 0 进入一次纠偏、attempt 1 转人工。
 
 ~~~python
 def test_response_is_joined_by_item_id_not_array_position():
@@ -320,7 +320,7 @@ def test_response_is_joined_by_item_id_not_array_position():
 
 - [ ] **Step 3: 实现严格验证与缓存**
 
-  请求与响应都先由 `extra=forbid` 的 Pydantic envelope 验证。请求必须与传入 JobManifest 精确一致，`request_sha256` 必须由除自身外的规范化请求 envelope 重新计算；响应必须回显相同 schema_version、job_id、source/glossary SHA-256 和 request_sha256，旧式裸数组一律拒绝。可信 workflow state 传入 `expected_attempt`：期望 0 时任何失败至多写一个绑定的 correction-request.json，期望 1 时任何失败直接为 human_review_required 且不得写入或覆盖纠偏文件；响应自报 attempt 必须精确匹配该可信值。绑定通过后再比较 item_id 集合和 Counter 锁定 token，最后逐个检查 glossary_terms_used 与译文目标词。纠偏请求字段还包括 attempt=1、failed_item_ids、error_codes、required_fixes，不生成猜测结果。
+  请求与响应都先由 `extra=forbid` 的 Pydantic envelope 验证。请求必须与传入 JobManifest 精确一致，`request_sha256` 必须由除自身外的规范化请求 envelope 重新计算；响应必须回显相同 schema_version、job_id、source/glossary SHA-256 和 request_sha256，旧式裸数组一律拒绝。翻译来源在本层完成全部结构/语义验证：`agent_role` 键必填；main_agent 可显式 null，subagent/mixed 必须为无首尾空白的非空角色，后续 workflow 不重复施加更严格且无法纠偏的 provenance 门。可信 workflow state 传入 `expected_attempt`：期望 0 时任何失败至多写一个绑定的 correction-request.json，期望 1 时任何失败直接为 human_review_required 且不得写入或覆盖纠偏文件；响应自报 attempt 必须精确匹配该可信值。绑定通过后再比较 item_id 集合，要求 `preserved_tokens` 与请求 `locked_tokens` 精确序列相等，并检查译文中冲突安全边界检测得到的区分大小写 occurrence 序列，最后逐个检查 glossary_terms_used 与译文目标词。纠偏请求字段还包括 attempt=1、failed_item_ids、error_codes、required_fixes，不生成猜测结果。
 
 缓存 SHA-256 输入依次为规范化请求 JSON、术语表 SHA-256、prompt_version、host、model、execution_mode。model=unknown 时再加入 job_id，禁止跨任务复用。
 
@@ -352,7 +352,7 @@ git commit -m "feat: validate host Agent translation exchange"
 
 生成含 “</script><script>alert(1)</script>” 的源文和译文，断言输出不产生第二个 script 节点，且模板不包含 http://、https://、CDN、fetch 或 WebSocket。解析内嵌 JSON，验证图片是 data:image/png;base64。
 
-review.json 测试覆盖必填 schema 1.1、精确 JobManifest 与可信完整输出快照绑定、源/术语哈希、页数、三种审核状态、全部项目明确状态、可信 blocking_issues、完整 pipeline、翻译来源字段、最终译文 token/术语重校验、带时区 ISO-8601 时间戳和过期审核拒绝。
+review.json 测试覆盖必填 schema 1.1、精确 JobManifest 与可信完整输出快照绑定、源/术语哈希、页数、三种审核状态、全部项目明确状态、可信 blocking_issues、完整 pipeline、翻译来源字段、最终译文 token/术语重校验、带时区 ISO-8601 时间戳和过期审核拒绝。ReviewItem 的 `translation_agent_role` 缺键必须 schema 失败；main_agent 显式 null 通过完整生成/导出/加载链路，subagent/mixed 的 null 或空白失败且非空角色通过。
 
 - [ ] **Step 2: 运行并确认 review 模块与模板缺失**
 
@@ -364,7 +364,7 @@ review.json 测试覆盖必填 schema 1.1、精确 JobManifest 与可信完整�
 
 模板使用单个 application/json script 节点承载将 “<” 转义为 “\u003c” 的 JSON；所有可见文本用 textContent 写入，不使用 innerHTML。界面提供页面类型、风险、术语、状态、问题筛选；点击项目高亮 bbox；按钮只有批准、修改后批准、跳过。生成页面时无条件清空传入审核状态；导出按钮只有在每项状态有效且阻断数为零时启用。任务级 pipeline 从全部逐项翻译来源确定性汇总，显式矛盾立即失败。
 
-review.py 从 JobManifest 路径重新计算 source/glossary SHA-256 和 PDF 页数，并以生成审核页时的同一 `expected_output` 为完整信任边界：用同一确定性 helper 派生清零 items、包含 parser/executor 的聚合 pipeline 和 blocking_issues，要求提交值及全部不可变 item 字段精确匹配。重新验证最终译文的锁定 token、普通术语及独立于 locked_tokens 的 DNT 精确源文拼写/多重数，并只接受带时区 ISO-8601 完成时间；没有“忽略继续”参数。
+review.py 从 JobManifest 路径重新计算 source/glossary SHA-256 和 PDF 页数，并以生成审核页时的同一 `expected_output` 为完整信任边界：用同一确定性 helper 派生清零 items、包含 parser/executor 的聚合 pipeline 和 blocking_issues，要求提交值及全部不可变 item 字段精确匹配。ReviewItem 保留结构必填、可空的 `translation_agent_role`，并与 Task 6 使用同一条件语义：main_agent 可显式 null 或提供无首尾空白的非空角色，subagent/mixed 必须提供非空角色，不设置冲突的后置 provenance 门。重新验证最终译文的锁定 token、普通术语及独立于 locked_tokens 的 DNT 精确源文拼写/多重数，并只接受带时区 ISO-8601 完成时间；没有“忽略继续”参数。
 
 - [ ] **Step 4: 运行测试**
 
@@ -436,11 +436,15 @@ git commit -m "feat: apply collision-safe editable PDF annotations"
 
 **Interfaces:**
 - Consumes: analyze <pdf-or-directory> --glossary <file> --job-dir <dir>；prepare-review --job <dir>；apply <source.pdf> --review <review.json> --output <source.annotated.pdf>。
-- Produces: 0 成功；2 输入/契约错误；3 外部服务错误；4 等待 Agent 翻译或人工审核；5 质量门失败。
+- Produces: 0 成功；2 输入/契约错误；3 外部服务错误；4 等待 Agent 分类、Agent 翻译或人工审核；5 质量门失败。
 
 - [ ] **Step 1: 写端到端状态机失败测试**
 
-合成 PDF 测试 analyze 生成独立 job、manifest.json、translation-request.json 后以退出码 4 停止，且不会自行创建 translation-response.json。把合法响应放入任务目录后，prepare-review 生成 review.html。apply 在批准 review 下生成最终 PDF；两个目录输入任务中一个失败不会污染另一个。
+合成 PDF 测试 analyze 生成独立 job、manifest.json、translation-request.json 后以退出码 4 停止，且不会自行创建 translation-response.json。冲突/未知页覆盖 `parsed -> classification-request.json -> 宿主视觉 Agent -> classification-response.json -> translation_requested` 断点：请求/响应严格绑定 job/source/glossary/规范化 request SHA-256，页集合不得重复、缺失或多出；外部分类模型严格拒绝可强制转换的数字字符串和布尔值（page_index 仅 JSON 整数，confidence 接受 JSON 整数/小数），字符串/数组也不强制转换；低于 0.80、仍为 unknown 或视觉能力不可用时保持 parsed 并退出 4，不生成翻译请求；合法分类续跑时必须保留全部页和候选。把合法翻译响应放入任务目录后，prepare-review 生成 review.html。apply 在批准 review 下生成最终 PDF；两个目录输入任务中一个失败不会污染另一个。
+
+补充轻量完整性回归：SHA-256、严格 schema、JobManifest/job 精确绑定、稳定源快照、规范化请求/响应/expected-output 重建、原子 no-clobber、路径/reparse/所有权及 review/apply 前后摘要复核必须阻断意外损坏、过期、缺失和跨任务串用。删除 HMAC、trust record、外部密钥和 OS 凭据库测试；同一 OS 用户主动或协调修改全部任务文件不在 v1 防御范围内。
+
+补充并发边界回归：同一任务并行执行不受支持，公开操作通过轻量非阻塞每任务保护立即返回 `status=workflow_busy`、退出码 4 且不修改 state；不实现等待、排队、公平性或同任务并行正确性。不同任务保持独立。失败终止只允许持有保护且 revision/token 仍匹配的操作执行。
 
 - [ ] **Step 2: 运行并确认 CLI 缺失**
 
@@ -450,9 +454,13 @@ git commit -m "feat: apply collision-safe editable PDF annotations"
 
 - [ ] **Step 3: 实现状态机**
 
-workflow 状态固定为 initialized、parsed、translation_requested、translation_validated、review_ready、review_completed、applying、succeeded、failed。每次转换把 state.json 写到同目录临时文件后 replace；恢复时只从最后完整状态继续。翻译中断、上下文不足、额度耗尽或 sub-agent 失败由宿主写 agent-failure.json，工作流保持 translation_requested 并退出 4。
+workflow 状态固定为 initialized、parsed、translation_requested、translation_validated、review_ready、review_completed、applying、succeeded、failed。每次转换把 state.json 写到同目录临时文件后 replace；恢复时只从同一任务目录的最后完整状态继续：`initialized` 可重新完成快照、inspect/MinerU 和 analysis 后进入 `parsed`；`parsed` 若无冲突/未知页则规范化重建翻译请求并进入 `translation_requested`，否则维持原状态与 `wait_reason=agent_classification`，仅在严格绑定的完整分类响应把每页解析为非 unknown、置信度至少 0.80 且有证据后重建候选并继续。两条路径均不得另建任务。翻译中断、上下文不足、额度耗尽或 sub-agent 失败由宿主写 agent-failure.json，工作流保持 translation_requested 并退出 4。
 
-CLI 使用 argparse，不提供 skip-review、ignore-hash、force-overlap 或 flatten 参数。--output 必须精确等于源文件 stem 加 “.annotated.pdf”，已存在时返回 output_exists，不能覆盖。
+状态及工件仅采用轻量完整性：严格模型和 SHA-256 摘要，不创建 HMAC 签名、外部 trust root、密钥或凭据库依赖。恢复时重建并核对 canonical request/response/expected-output；review 候选先写入所有权受控 pending 文件并通过 Task 7 验证，再以 no-clobber 方式发布并完成 `review_ready -> review_completed`，无效或中断 pending 不得作为可信快照；若在发布后、状态转换前硬崩溃，`review_ready` 恢复只能对既有文件执行 Task 7 严格 job/expected-output 复验和前后摘要一致性检查，合法时以 guarded CAS 补全 `review_completed`，无效、不可读、非普通、reparse/link 或不匹配时保持文件与 state 不变并返回 `recovery_required/review_recovery`。该例外只允许词法定位这一保留文件以分类恢复状态，实际读取仍必须通过严格 `_inside`/no-follow 边界；其他路径不放宽。后续不再依赖外部 review.json，Task 8 调用前后均复核可信 review 摘要。bootstrap manifest/初始 state 写入失败仍返回已创建任务的安全 job_id、绝对 job_dir 和 input_index。临时文件在独占创建后、任何写入/读取/fsync 前捕获 descriptor 所有权，且仅由创建者按该身份清理。
+
+`WorkflowResult.state` 只能是上述九种状态或 `None`；`workflow_busy`、恢复等待等结果放在 `status`/`wait_reason`。同任务保护必须非阻塞，busy 路径不得写 state。状态终止操作在保护内使用 revision/token 比较，避免过期调用覆盖较新状态。
+
+CLI 使用 argparse，不提供 skip-review、ignore-hash、force-overlap 或 flatten 参数。--output 必须精确等于原文件完整文件名加 “.annotated.pdf”（例如 `a.pdf.annotated.pdf`），已存在时返回 output_exists，不能覆盖。
 
 - [ ] **Step 4: 运行全部自动测试**
 
