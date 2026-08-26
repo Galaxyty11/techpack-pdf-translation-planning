@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path
@@ -61,6 +62,255 @@ def test_parse_checks_health_and_posts_required_multipart_contract(tmp_path: Pat
     assert client.parse(source) == {"results": [{"page": 0, "text": "COLLAR"}]}
 
 
+def test_parse_normalizes_completed_v2_result_into_internal_pages(tmp_path: Path) -> None:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"%PDF synthetic boundary fixture")
+    middle_json = json.dumps(
+        {
+            "_version_name": "2.5.4",
+            "pdf_info": [
+                {
+                    "page_idx": 0,
+                    "page_size": [841, 595],
+                    "para_blocks": [],
+                    "discarded_blocks": [],
+                    "preproc_blocks": [],
+                }
+            ],
+        }
+    )
+    content_list = json.dumps(
+        [
+            {
+                "type": "text",
+                "text": "MEASUREMENT SHEET",
+                "text_level": 2,
+                "bbox": [100, 100, 900, 200],
+                "page_idx": 0,
+            },
+            {
+                "type": "text",
+                "text": "COLLAR WIDTH",
+                "bbox": [100, 250, 900, 350],
+                "page_idx": 0,
+            },
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy", "protocol_version": 2})
+        return httpx.Response(
+            200,
+            json={
+                "task_id": "00000000-0000-0000-0000-000000000000",
+                "status": "completed",
+                "backend": "hybrid-engine",
+                "file_names": ["source.pdf"],
+                "error": None,
+                "version": "2.5.4",
+                "results": {
+                    "source": {
+                        "md_content": "",
+                        "middle_json": middle_json,
+                        "content_list": content_list,
+                    }
+                },
+            },
+        )
+
+    parsed = MinerUClient(transport=httpx.MockTransport(handler)).parse(source)
+
+    assert parsed == {
+        "pages": [
+            {
+                "page_index": 0,
+                "title": "MEASUREMENT SHEET",
+                "table_headers": [],
+                "visual_features": [],
+                "nodes": [
+                    {
+                        "text": "MEASUREMENT SHEET",
+                        "bbox": [84.1, 59.5, 756.9, 119.0],
+                        "field_role": "title",
+                    },
+                    {
+                        "text": "COLLAR WIDTH",
+                        "bbox": [84.1, 148.75, 756.9, 208.25],
+                        "field_role": "body",
+                    },
+                ],
+            }
+        ]
+    }
+
+
+def test_parse_expands_v2_table_cells_with_spans_into_page_coordinates(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"%PDF synthetic boundary fixture")
+    middle_json = json.dumps(
+        {
+            "pdf_info": [
+                {
+                    "page_idx": 0,
+                    "page_size": [1000, 1000],
+                    "para_blocks": [],
+                    "discarded_blocks": [],
+                    "preproc_blocks": [],
+                }
+            ]
+        }
+    )
+    content_list = json.dumps(
+        [
+            {
+                "type": "table",
+                "bbox": [100, 400, 900, 800],
+                "page_idx": 0,
+                "img_path": "tables/table-0.jpg",
+                "table_caption": [],
+                "table_footnote": [],
+                "table_body": (
+                    "<table>"
+                    '<tr><td colspan="2">MEASUREMENT</td></tr>'
+                    "<tr><td>POINT</td><td>SPEC</td></tr>"
+                    '<tr><td rowspan="2">CHEST</td><td>50 cm</td></tr>'
+                    "<tr><td>51 cm</td></tr>"
+                    "</table>"
+                ),
+            }
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy", "protocol_version": 2})
+        return httpx.Response(
+            200,
+            json={
+                "status": "completed",
+                "error": None,
+                "results": {
+                    "source": {
+                        "md_content": "",
+                        "middle_json": middle_json,
+                        "content_list": content_list,
+                    }
+                },
+            },
+        )
+
+    parsed = MinerUClient(transport=httpx.MockTransport(handler)).parse(source)
+
+    assert parsed == {
+        "pages": [
+            {
+                "page_index": 0,
+                "title": "",
+                "table_headers": ["POINT", "SPEC"],
+                "visual_features": ["table"],
+                "nodes": [
+                    {
+                        "text": "MEASUREMENT",
+                        "bbox": [100.0, 400.0, 900.0, 500.0],
+                        "field_role": "table_cell",
+                    },
+                    {
+                        "text": "POINT",
+                        "bbox": [100.0, 500.0, 500.0, 600.0],
+                        "field_role": "table_header",
+                    },
+                    {
+                        "text": "SPEC",
+                        "bbox": [500.0, 500.0, 900.0, 600.0],
+                        "field_role": "table_header",
+                    },
+                    {
+                        "text": "CHEST",
+                        "bbox": [100.0, 600.0, 500.0, 800.0],
+                        "field_role": "table_cell",
+                    },
+                    {
+                        "text": "50 cm",
+                        "bbox": [500.0, 600.0, 900.0, 700.0],
+                        "field_role": "table_cell",
+                    },
+                    {
+                        "text": "51 cm",
+                        "bbox": [500.0, 700.0, 900.0, 800.0],
+                        "field_role": "table_cell",
+                    },
+                ],
+            }
+        ]
+    }
+
+
+def test_parse_marks_v2_image_blocks_as_visual_evidence(tmp_path: Path) -> None:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"%PDF synthetic boundary fixture")
+    middle_json = json.dumps(
+        {
+            "pdf_info": [
+                {
+                    "page_idx": 0,
+                    "page_size": [841, 595],
+                    "para_blocks": [],
+                    "discarded_blocks": [],
+                    "preproc_blocks": [],
+                }
+            ]
+        }
+    )
+    content_list = json.dumps(
+        [
+            {
+                "type": "image",
+                "bbox": [100, 100, 900, 900],
+                "page_idx": 0,
+                "img_path": "images/image-0.jpg",
+                "content": "",
+                "image_caption": [],
+                "image_footnote": [],
+            }
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy", "protocol_version": 2})
+        return httpx.Response(
+            200,
+            json={
+                "status": "completed",
+                "error": None,
+                "results": {
+                    "source": {
+                        "md_content": "",
+                        "middle_json": middle_json,
+                        "content_list": content_list,
+                    }
+                },
+            },
+        )
+
+    parsed = MinerUClient(transport=httpx.MockTransport(handler)).parse(source)
+
+    assert parsed == {
+        "pages": [
+            {
+                "page_index": 0,
+                "title": "",
+                "table_headers": [],
+                "visual_features": ["image"],
+                "nodes": [],
+            }
+        ]
+    }
+
+
 @pytest.mark.parametrize(
     ("health_payload", "status_code"),
     [
@@ -97,6 +347,22 @@ def test_parse_maps_connection_failures_to_mineru_unavailable(tmp_path: Path) ->
     assert raised.value.code == "mineru_unavailable"
 
 
+def test_default_timeout_allows_observed_mineru_cold_start(tmp_path: Path) -> None:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"pdf")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy", "protocol_version": 2})
+        if request.extensions["timeout"]["read"] <= 50:
+            raise httpx.ReadTimeout("simulated 49 second MinerU cold start", request=request)
+        return httpx.Response(200, json={"pages": []})
+
+    parsed = MinerUClient(transport=httpx.MockTransport(handler)).parse(source)
+
+    assert parsed == {"pages": []}
+
+
 def test_parse_rejects_non_object_json_response(tmp_path: Path) -> None:
     source = tmp_path / "source.pdf"
     source.write_bytes(b"pdf")
@@ -125,6 +391,58 @@ def test_parse_rejects_malformed_json_response(tmp_path: Path) -> None:
         MinerUClient(transport=httpx.MockTransport(handler)).parse(source)
 
     assert raised.value.code == "mineru_invalid_response"
+
+
+def test_parse_rejects_failed_v2_task_before_workflow_processing(tmp_path: Path) -> None:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"pdf")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy", "protocol_version": 2})
+        return httpx.Response(
+            200,
+            json={
+                "task_id": "00000000-0000-0000-0000-000000000000",
+                "status": "failed",
+                "error": "upstream parse failed",
+                "results": None,
+            },
+        )
+
+    with pytest.raises(TechpackError) as raised:
+        MinerUClient(transport=httpx.MockTransport(handler)).parse(source)
+
+    assert raised.value.code == "mineru_invalid_response"
+    assert raised.value.details == {"error_code": "invalid_task_envelope"}
+
+
+def test_parse_rejects_completed_v2_task_with_error_payload(tmp_path: Path) -> None:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"pdf")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy", "protocol_version": 2})
+        return httpx.Response(
+            200,
+            json={
+                "status": "completed",
+                "error": "partial parse failure",
+                "results": {
+                    "source": {
+                        "middle_json": json.dumps({"pdf_info": []}),
+                        "content_list": "[]",
+                    }
+                },
+            },
+        )
+
+    with pytest.raises(TechpackError) as raised:
+        MinerUClient(transport=httpx.MockTransport(handler)).parse(source)
+
+    assert raised.value.code == "mineru_invalid_response"
+    assert raised.value.details == {"error_code": "invalid_task_envelope"}
 
 
 def _native_manifest(tmp_path: Path, *, complete: bool):

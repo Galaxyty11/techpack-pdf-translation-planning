@@ -39,6 +39,26 @@ class _MinerUFixture:
         }
 
 
+class _ManyNodesMinerUFixture:
+    def parse_or_degrade(self, _source, _manifest):
+        return {
+            "pages": [
+                {
+                    "page_index": 0,
+                    "title": "BOM",
+                    "nodes": [
+                        {
+                            "text": f"Component {index} mm",
+                            "bbox": [72, 72, 150, 86],
+                            "field_role": "body",
+                        }
+                        for index in range(1, 1001)
+                    ],
+                }
+            ]
+        }
+
+
 class _NativeOnlyFixture:
     def parse_or_degrade(self, _source, manifest):
         from techpack_pdf.mineru import DegradedPage, NativeOnlyDegradation
@@ -307,6 +327,28 @@ def test_analyze_creates_an_isolated_translation_request_and_waits_for_host(tmp_
         }
     ]
     assert not (result.job_dir / "translation-response.json").exists()
+
+
+def test_analyze_preserves_stable_ids_beyond_999_candidates(tmp_path):
+    source = tmp_path / "techpack.pdf"
+    glossary = tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+
+    result = analyze(
+        source,
+        glossary,
+        tmp_path / "jobs",
+        mineru_client=_ManyNodesMinerUFixture(),
+    )
+
+    assert (result.exit_code, result.state) == (4, "translation_requested")
+    request = json.loads(
+        (result.job_dir / "translation-request.json").read_text(encoding="utf-8")
+    )
+    item_ids = [item["item_id"] for item in request["items"]]
+    assert len(item_ids) == len(set(item_ids)) == 1000
+    assert "p001-i1000" in item_ids
 
 
 def test_analysis_accepts_empty_target_only_for_do_not_translate_hit(tmp_path):

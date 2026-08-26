@@ -219,7 +219,7 @@ class _GlossaryHitSnapshot(_StrictModel):
 
 
 class _CandidateSnapshot(_StrictModel):
-    item_id: str = Field(pattern=r"^p[0-9]{3}-i[0-9]{3}$")
+    item_id: str = Field(pattern=r"^p[0-9]{3}-i[0-9]{3,}$")
     page_index: int = Field(ge=0)
     page_type: PageType
     classification_confidence: float = Field(ge=0, le=1)
