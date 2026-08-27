@@ -1,0 +1,32 @@
+{
+  "code": "unresolved_overlap",
+  "source_filename": "evidence.pdf",
+  "layout_rounds": 10,
+  "issues": [
+    {
+      "code": "unresolved_overlap",
+      "page_index": 0,
+      "item_id": "p001-i001",
+      "collision_object": [
+        {
+          "kind": "render_overlap",
+          "object_id": "original_render"
+        }
+      ],
+      "attempted_placements": [
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            20.0,
+            3.549999999999999,
+            94.25,
+            20.0
+          ],
+          "font_size": 7.0,
+          "leader": false
+        }
+      ],
+      "final_render_reference": "D:\\PDF翻译skill实施\\.superpowers\\pytest-tmp\\task11-candidate-contamination\\test_unresolved_evidence_is_re0\\.evidence.pdf.unresolved.aaf75dda11d140ce831ef56820280251.page-1.png"
+    }
+  ]
+}

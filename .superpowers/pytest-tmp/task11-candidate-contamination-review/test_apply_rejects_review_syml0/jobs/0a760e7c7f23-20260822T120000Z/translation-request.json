@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.1",
+  "job_id": "0a760e7c7f23-20260822T120000Z",
+  "source_sha256": "0a760e7c7f23bb5c54afa99778c2e3b439a530079e163ed83c4acd103a633686",
+  "glossary_sha256": "a3dde385844fb37d12f59bd940fbbce96d81c2ae7f1e00fc426bf92f527f2b36",
+  "request_sha256": "6793a1dd8bd3522842126661d8d134f45a1bcad1d7deb659e20b59980bcf8a63",
+  "attempt": 0,
+  "items": [
+    {
+      "item_id": "p001-i001",
+      "source_text": "Shell 12 mm",
+      "context": "body",
+      "locked_tokens": [
+        "12",
+        "mm"
+      ],
+      "glossary_terms": [
+        {
+          "source_term": "Shell",
+          "target_term": "大身"
+        }
+      ],
+      "page_type": "bom",
+      "mode": "direct"
+    }
+  ]
+}
