@@ -2147,6 +2147,36 @@ def _bounded_binary_read(path: Path) -> bytes:
         raise _workflow_error("workflow_artifact_invalid", "Workflow JSON artifact is invalid") from None
 
 
+def _stable_file_sha256(path: Path) -> str:
+    """Hash a regular file through one stable descriptor without a JSON size limit."""
+    try:
+        before = path.lstat()
+        if _is_reparse_or_link(before) or not stat.S_ISREG(before.st_mode):
+            raise OSError
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if _file_stat_identity(before) != _file_stat_identity(opened):
+                raise OSError
+            digest = hashlib.sha256()
+            size = 0
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                size += len(chunk)
+            after = os.fstat(descriptor)
+            if _file_stat_identity(opened) != _file_stat_identity(after) or size != after.st_size:
+                raise OSError
+            return digest.hexdigest()
+        finally:
+            os.close(descriptor)
+    except OSError:
+        raise _workflow_error("workflow_artifact_invalid", "Workflow artifact is invalid") from None
+
+
 def _file_stat_identity(details: Any) -> tuple[int, int, int, int]:
     return (details.st_dev, details.st_ino, details.st_size, details.st_mtime_ns)
 
@@ -2233,7 +2263,10 @@ def _sha256_bytes(value: bytes) -> str:
 
 
 def _sha256_artifact(directory: Path, name: str) -> str:
-    return _sha256_bytes(_bounded_binary_read(_inside(directory, name)))
+    path = _inside(directory, name)
+    if name == "review.html":
+        return _stable_file_sha256(path)
+    return _sha256_bytes(_bounded_binary_read(path))
 
 
 def _read_json(directory: Path, name: str) -> Any:

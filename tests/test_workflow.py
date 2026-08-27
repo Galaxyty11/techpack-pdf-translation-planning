@@ -1294,6 +1294,44 @@ def test_review_json_is_bounded_and_rejects_descriptor_identity_change(tmp_path,
     assert caught.value.code == "workflow_artifact_invalid"
 
 
+def test_review_html_digest_streams_beyond_the_json_artifact_limit(tmp_path, monkeypatch):
+    job = tmp_path / "job"
+    job.mkdir()
+    monkeypatch.setattr(workflow, "_MAX_JSON_BYTES", 64)
+    review_html = job / "review.html"
+    review_bytes = b"<html>" + (b"x" * 256) + b"</html>"
+    review_html.write_bytes(review_bytes)
+    (job / "analysis.json").write_bytes(b"{" + (b"x" * 256))
+
+    assert workflow._sha256_artifact(job, "review.html") == hashlib.sha256(review_bytes).hexdigest()
+    with pytest.raises(TechpackError) as caught:
+        workflow._sha256_artifact(job, "analysis.json")
+    assert caught.value.code == "workflow_artifact_invalid"
+
+
+def test_streamed_review_html_digest_rejects_descriptor_identity_change(tmp_path, monkeypatch):
+    job = tmp_path / "job"
+    job.mkdir()
+    (job / "review.html").write_text("<html>review</html>", encoding="utf-8")
+    original_fstat = workflow.os.fstat
+    calls = 0
+
+    def changed_identity(descriptor):
+        nonlocal calls
+        details = original_fstat(descriptor)
+        calls += 1
+        if calls == 2:
+            values = {name: getattr(details, name) for name in dir(details) if name.startswith("st_")}
+            values["st_mtime_ns"] += 1
+            return SimpleNamespace(**values)
+        return details
+
+    monkeypatch.setattr(workflow.os, "fstat", changed_identity)
+    with pytest.raises(TechpackError) as caught:
+        workflow._sha256_artifact(job, "review.html")
+    assert caught.value.code == "workflow_artifact_invalid"
+
+
 def test_reparse_attribute_helper_rejects_windows_reparse_points():
     fake = SimpleNamespace(st_mode=stat.S_IFREG, st_file_attributes=0x0400)
     assert workflow._is_reparse_or_link(fake)
