@@ -309,6 +309,7 @@ def _normalize_response(payload: dict[str, Any]) -> dict[str, Any]:
 
     pages: dict[int, dict[str, Any]] = {}
     page_sizes: dict[int, tuple[float, float]] = {}
+    middle_tables: dict[int, list[tuple[str, list[float]]]] = {}
     for raw_page in raw_pages:
         if not isinstance(raw_page, dict):
             raise _invalid_response("invalid_pdf_page")
@@ -335,6 +336,23 @@ def _normalize_response(payload: dict[str, Any]) -> dict[str, Any]:
             "nodes": [],
         }
         page_sizes[page_index] = (width, height)
+        if "preproc_blocks" not in raw_page:
+            continue
+        preproc_blocks = raw_page["preproc_blocks"]
+        if not isinstance(preproc_blocks, list):
+            raise _invalid_response("invalid_preproc_blocks")
+        middle_tables[page_index] = _middle_table_spans(
+            preproc_blocks,
+            page_sizes[page_index],
+        )
+
+    for page_index, tables in middle_tables.items():
+        for table_html, table_bbox in tables:
+            if "table" not in pages[page_index]["visual_features"]:
+                pages[page_index]["visual_features"].append("table")
+            table_nodes, headers = _table_nodes(table_html, table_bbox)
+            pages[page_index]["nodes"].extend(table_nodes)
+            pages[page_index]["table_headers"].extend(headers)
 
     for item in content:
         if not isinstance(item, dict):
@@ -344,6 +362,8 @@ def _normalize_response(payload: dict[str, Any]) -> dict[str, Any]:
         if page_index not in pages:
             continue
         if item_type == "table":
+            if page_index in middle_tables:
+                continue
             if "table" not in pages[page_index]["visual_features"]:
                 pages[page_index]["visual_features"].append("table")
             table_body = item.get("table_body")
@@ -373,6 +393,30 @@ def _normalize_response(payload: dict[str, Any]) -> dict[str, Any]:
         if role == "title" and not pages[page_index]["title"]:
             pages[page_index]["title"] = text
     return {"pages": [pages[index] for index in sorted(pages)]}
+
+
+def _middle_table_spans(
+    preproc_blocks: list[object],
+    page_size: tuple[float, float],
+) -> list[tuple[str, list[float]]]:
+    tables: list[tuple[str, list[float]]] = []
+
+    def visit(value: object) -> None:
+        if isinstance(value, list):
+            for child in value:
+                visit(child)
+            return
+        if not isinstance(value, dict):
+            return
+        if value.get("type") == "table":
+            html = value.get("html")
+            if isinstance(html, str) and html.strip() and "bbox" in value:
+                tables.append((html, _direct_bbox(value["bbox"], page_size)))
+        for child in value.values():
+            visit(child)
+
+    visit(preproc_blocks)
+    return tables
 
 
 def _html_span(raw: str | None) -> int:
@@ -589,6 +633,19 @@ def _scaled_bbox(value: object, page_size: tuple[float, float]) -> list[float]:
         right * width / 1000,
         bottom * height / 1000,
     ]
+
+
+def _direct_bbox(value: object, page_size: tuple[float, float]) -> list[float]:
+    if not isinstance(value, list) or len(value) != 4:
+        raise _invalid_response("invalid_middle_table_bbox")
+    try:
+        left, top, right, bottom = (float(coordinate) for coordinate in value)
+    except (TypeError, ValueError) as exc:
+        raise _invalid_response("invalid_middle_table_bbox") from exc
+    width, height = page_size
+    if not (0 <= left < right <= width and 0 <= top < bottom <= height):
+        raise _invalid_response("invalid_middle_table_bbox")
+    return [left, top, right, bottom]
 
 
 def _invalid_response(error_code: str) -> TechpackError:

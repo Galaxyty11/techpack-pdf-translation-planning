@@ -41,7 +41,6 @@ def _parse_single_v2_table(tmp_path: Path, table_body: str) -> dict[str, object]
                     "page_size": [1000, 1000],
                     "para_blocks": [],
                     "discarded_blocks": [],
-                    "preproc_blocks": [],
                 }
             ]
         }
@@ -76,6 +75,212 @@ def _parse_single_v2_table(tmp_path: Path, table_body: str) -> dict[str, object]
         )
 
     return MinerUClient(transport=httpx.MockTransport(handler)).parse(source)
+
+
+def _parse_v2_tables(
+    tmp_path: Path,
+    raw_pages: list[dict[str, object]],
+    content_list: list[dict[str, object]],
+) -> dict[str, object]:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"%PDF synthetic boundary fixture")
+    middle_json = json.dumps({"pdf_info": raw_pages})
+    content_json = json.dumps(content_list)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy", "protocol_version": 2})
+        return httpx.Response(
+            200,
+            json={
+                "status": "completed",
+                "error": None,
+                "results": {
+                    "source": {
+                        "md_content": "",
+                        "middle_json": middle_json,
+                        "content_list": content_json,
+                    }
+                },
+            },
+        )
+
+    return MinerUClient(transport=httpx.MockTransport(handler)).parse(source)
+
+
+def test_parse_uses_page_scoped_middle_tables_over_merged_content_tables(
+    tmp_path: Path,
+) -> None:
+    parsed = _parse_v2_tables(
+        tmp_path,
+        [
+            {
+                "page_idx": 0,
+                "page_size": [200, 120],
+                "preproc_blocks": [
+                    {
+                        "type": "block",
+                        "spans": [
+                            {
+                                "type": "table",
+                                "bbox": [10, 10, 190, 90],
+                                "html": (
+                                    "<table><tr><td>Placement</td><td>Component</td></tr>"
+                                    "<tr><td>MIDDLE BODY</td><td>Middle shell</td></tr></table>"
+                                ),
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "page_idx": 1,
+                "page_size": [200, 120],
+                "preproc_blocks": [
+                    {
+                        "type": "table",
+                        "bbox": [20, 10, 180, 100],
+                        "html": (
+                            "<table><tr><td colspan=\"2\">Measurement Sheet</td></tr>"
+                            "<tr><td>POM</td><td>Description</td></tr>"
+                            "<tr><td>001</td><td>Back neck width</td></tr></table>"
+                        ),
+                    }
+                ],
+            },
+        ],
+        [
+            {
+                "type": "table",
+                "page_idx": 0,
+                "bbox": [0, 0, 1000, 1000],
+                "table_body": (
+                    "<table><tr><td>Placement</td><td>Component</td></tr>"
+                    "<tr><td>CONTENT BODY</td><td>Content shell</td></tr>"
+                    "<tr><td colspan=\"2\">Measurement Sheet</td></tr>"
+                    "<tr><td>POM</td><td>Description</td></tr>"
+                    "<tr><td>999</td><td>Merged measurement</td></tr></table>"
+                ),
+            },
+            {
+                "type": "table",
+                "page_idx": 1,
+                "bbox": [0, 0, 1000, 1000],
+                "table_body": "",
+            },
+        ],
+    )
+
+    pages = parsed["pages"]
+    assert [node["text"] for node in pages[0]["nodes"]] == [
+        "Placement",
+        "Component",
+        "MIDDLE BODY",
+        "Middle shell",
+    ]
+    assert [node["text"] for node in pages[1]["nodes"]] == [
+        "Measurement Sheet",
+        "POM",
+        "Description",
+        "001",
+        "Back neck width",
+    ]
+    description = pages[1]["nodes"][-1]
+    assert description["bbox"] == [100.0, 70.0, 180.0, 100.0]
+    assert "CONTENT BODY" not in [node["text"] for node in pages[0]["nodes"]]
+    assert "Merged measurement" not in [node["text"] for node in pages[0]["nodes"]]
+
+
+def test_parse_preserves_multiple_middle_tables_in_source_order(tmp_path: Path) -> None:
+    parsed = _parse_v2_tables(
+        tmp_path,
+        [
+            {
+                "page_idx": 0,
+                "page_size": [200, 120],
+                "preproc_blocks": [
+                    {
+                        "children": [
+                            {
+                                "type": "table",
+                                "bbox": [10, 10, 90, 50],
+                                "html": "<table><tr><td>Material</td></tr><tr><td>First fabric</td></tr></table>",
+                            },
+                            {
+                                "type": "table",
+                                "bbox": [110, 10, 190, 50],
+                                "html": "<table><tr><td>Component</td></tr><tr><td>Second trim</td></tr></table>",
+                            },
+                        ]
+                    }
+                ],
+            }
+        ],
+        [
+            {
+                "type": "table",
+                "page_idx": 0,
+                "bbox": [0, 0, 1000, 1000],
+                "table_body": "<table><tr><td>Content fallback</td></tr></table>",
+            }
+        ],
+    )
+
+    assert [node["text"] for node in parsed["pages"][0]["nodes"]] == [
+        "Material",
+        "First fabric",
+        "Component",
+        "Second trim",
+    ]
+
+
+def test_parse_falls_back_to_content_table_when_middle_preproc_blocks_are_absent(
+    tmp_path: Path,
+) -> None:
+    parsed = _parse_v2_tables(
+        tmp_path,
+        [{"page_idx": 0, "page_size": [200, 120]}],
+        [
+            {
+                "type": "table",
+                "page_idx": 0,
+                "bbox": [100, 100, 900, 900],
+                "table_body": "<table><tr><td>Material</td></tr><tr><td>Fallback fabric</td></tr></table>",
+            }
+        ],
+    )
+
+    assert [node["text"] for node in parsed["pages"][0]["nodes"]] == [
+        "Material",
+        "Fallback fabric",
+    ]
+
+
+def test_parse_rejects_invalid_direct_middle_table_bbox_without_raw_content(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(TechpackError) as raised:
+        _parse_v2_tables(
+            tmp_path,
+            [
+                {
+                    "page_idx": 0,
+                    "page_size": [200, 120],
+                    "preproc_blocks": [
+                        {
+                            "type": "table",
+                            "bbox": [0, 0, 201, 100],
+                            "html": "<table><tr><td>SECRET RAW MIDDLE HTML</td></tr></table>",
+                        }
+                    ],
+                }
+            ],
+            [],
+        )
+
+    assert raised.value.code == "mineru_invalid_response"
+    assert raised.value.details == {"error_code": "invalid_middle_table_bbox"}
+    assert "SECRET RAW MIDDLE HTML" not in str(raised.value)
 
 
 def test_parse_checks_health_and_posts_required_multipart_contract(tmp_path: Path) -> None:
@@ -206,7 +411,6 @@ def test_parse_expands_v2_table_cells_with_spans_into_page_coordinates(
                     "page_size": [1000, 1000],
                     "para_blocks": [],
                     "discarded_blocks": [],
-                    "preproc_blocks": [],
                 }
             ]
         }
@@ -332,7 +536,6 @@ def test_parse_maps_bom_columns_to_semantic_and_retained_roles(tmp_path: Path) -
                     "page_size": [1000, 1000],
                     "para_blocks": [],
                     "discarded_blocks": [],
-                    "preproc_blocks": [],
                 }
             ]
         }
@@ -415,7 +618,6 @@ def test_parse_projects_only_first_sibling_table_for_one_table_bbox(
                     "page_size": [1000, 1000],
                     "para_blocks": [],
                     "discarded_blocks": [],
-                    "preproc_blocks": [],
                 }
             ]
         }
@@ -666,7 +868,6 @@ def test_parse_recovers_inline_measurement_roles_without_column_headers(
                     "page_size": [1000, 1000],
                     "para_blocks": [],
                     "discarded_blocks": [],
-                    "preproc_blocks": [],
                 }
             ]
         }
@@ -735,7 +936,6 @@ def test_parse_does_not_treat_page_title_as_an_instruction_column(
                     "page_size": [1000, 1000],
                     "para_blocks": [],
                     "discarded_blocks": [],
-                    "preproc_blocks": [],
                 }
             ]
         }
