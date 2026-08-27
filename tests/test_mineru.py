@@ -174,10 +174,10 @@ def test_parse_expands_v2_table_cells_with_spans_into_page_coordinates(
                 "table_footnote": [],
                 "table_body": (
                     "<table>"
-                    '<tr><td colspan="2">MEASUREMENT</td></tr>'
-                    "<tr><td>POINT</td><td>SPEC</td></tr>"
-                    '<tr><td rowspan="2">CHEST</td><td>50 cm</td></tr>'
-                    "<tr><td>51 cm</td></tr>"
+                    '<tr><td colspan="4">MEASUREMENT</td></tr>'
+                    "<tr><td>POINT</td><td>DESCRIPTION</td><td>SPEC</td><td>FIT NOTES</td></tr>"
+                    '<tr><td rowspan="2">CHEST</td><td>BACK NECK WIDTH</td><td>50 cm</td><td>REDUCE WIDTH</td></tr>'
+                    "<tr><td>FRONT NECK WIDTH</td><td>51 cm</td><td></td></tr>"
                     "</table>"
                 ),
             }
@@ -209,43 +209,279 @@ def test_parse_expands_v2_table_cells_with_spans_into_page_coordinates(
             {
                 "page_index": 0,
                 "title": "",
-                "table_headers": ["POINT", "SPEC"],
+                "table_headers": ["POINT", "DESCRIPTION", "SPEC", "FIT NOTES"],
                 "visual_features": ["table"],
                 "nodes": [
                     {
                         "text": "MEASUREMENT",
                         "bbox": [100.0, 400.0, 900.0, 500.0],
-                        "field_role": "table_cell",
+                        "field_role": "table_header",
                     },
                     {
                         "text": "POINT",
-                        "bbox": [100.0, 500.0, 500.0, 600.0],
+                        "bbox": [100.0, 500.0, 300.0, 600.0],
+                        "field_role": "table_header",
+                    },
+                    {
+                        "text": "DESCRIPTION",
+                        "bbox": [300.0, 500.0, 500.0, 600.0],
                         "field_role": "table_header",
                     },
                     {
                         "text": "SPEC",
-                        "bbox": [500.0, 500.0, 900.0, 600.0],
+                        "bbox": [500.0, 500.0, 700.0, 600.0],
+                        "field_role": "table_header",
+                    },
+                    {
+                        "text": "FIT NOTES",
+                        "bbox": [700.0, 500.0, 900.0, 600.0],
                         "field_role": "table_header",
                     },
                     {
                         "text": "CHEST",
-                        "bbox": [100.0, 600.0, 500.0, 800.0],
-                        "field_role": "table_cell",
+                        "bbox": [100.0, 600.0, 300.0, 800.0],
+                        "field_role": "pom_description",
+                    },
+                    {
+                        "text": "BACK NECK WIDTH",
+                        "bbox": [300.0, 600.0, 500.0, 700.0],
+                        "field_role": "description",
                     },
                     {
                         "text": "50 cm",
-                        "bbox": [500.0, 600.0, 900.0, 700.0],
-                        "field_role": "table_cell",
+                        "bbox": [500.0, 600.0, 700.0, 700.0],
+                        "field_role": "retained_table_value",
+                    },
+                    {
+                        "text": "REDUCE WIDTH",
+                        "bbox": [700.0, 600.0, 900.0, 700.0],
+                        "field_role": "note",
+                    },
+                    {
+                        "text": "FRONT NECK WIDTH",
+                        "bbox": [300.0, 700.0, 500.0, 800.0],
+                        "field_role": "description",
                     },
                     {
                         "text": "51 cm",
-                        "bbox": [500.0, 700.0, 900.0, 800.0],
-                        "field_role": "table_cell",
+                        "bbox": [500.0, 700.0, 700.0, 800.0],
+                        "field_role": "retained_table_value",
                     },
                 ],
             }
         ]
     }
+
+
+def test_parse_maps_bom_columns_to_semantic_and_retained_roles(tmp_path: Path) -> None:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"%PDF synthetic boundary fixture")
+    middle_json = json.dumps(
+        {
+            "pdf_info": [
+                {
+                    "page_idx": 0,
+                    "page_size": [1000, 1000],
+                    "para_blocks": [],
+                    "discarded_blocks": [],
+                    "preproc_blocks": [],
+                }
+            ]
+        }
+    )
+    content_list = json.dumps(
+        [
+            {
+                "type": "table",
+                "bbox": [100, 100, 900, 900],
+                "page_idx": 0,
+                "table_body": (
+                    "<table>"
+                    '<tr><td colspan="5">Bill of Material</td></tr>'
+                    "<tr><td>Style: 1805466</td><td colspan=\"4\">Season: SP26</td></tr>"
+                    "<tr><td>Placement</td><td>Component</td><td>Usage</td><td>UOM</td><td>Supplier</td></tr>"
+                    "<tr><td>BODY</td><td>4 WAY STRETCH FABRIC</td><td>1.0000</td><td>yd</td><td>SUMEC</td></tr>"
+                    "</table>"
+                ),
+            }
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy", "protocol_version": 2})
+        return httpx.Response(
+            200,
+            json={
+                "status": "completed",
+                "error": None,
+                "results": {
+                    "source": {
+                        "md_content": "",
+                        "middle_json": middle_json,
+                        "content_list": content_list,
+                    }
+                },
+            },
+        )
+
+    parsed = MinerUClient(transport=httpx.MockTransport(handler)).parse(source)
+
+    assert parsed["pages"][0]["table_headers"] == [
+        "Placement",
+        "Component",
+        "Usage",
+        "UOM",
+        "Supplier",
+    ]
+    assert [
+        (node["text"], node["field_role"])
+        for node in parsed["pages"][0]["nodes"]
+    ] == [
+        ("Bill of Material", "table_header"),
+        ("Style: 1805466", "table_header"),
+        ("Season: SP26", "table_header"),
+        ("Placement", "table_header"),
+        ("Component", "table_header"),
+        ("Usage", "table_header"),
+        ("UOM", "table_header"),
+        ("Supplier", "table_header"),
+        ("BODY", "placement"),
+        ("4 WAY STRETCH FABRIC", "component"),
+        ("1.0000", "use"),
+        ("yd", "retained_table_value"),
+        ("SUMEC", "retained_table_value"),
+    ]
+
+
+def test_parse_recovers_inline_measurement_roles_without_column_headers(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"%PDF synthetic boundary fixture")
+    middle_json = json.dumps(
+        {
+            "pdf_info": [
+                {
+                    "page_idx": 0,
+                    "page_size": [1000, 1000],
+                    "para_blocks": [],
+                    "discarded_blocks": [],
+                    "preproc_blocks": [],
+                }
+            ]
+        }
+    )
+    content_list = json.dumps(
+        [
+            {
+                "type": "table",
+                "bbox": [100, 100, 900, 900],
+                "page_idx": 0,
+                "table_body": (
+                    "<table>"
+                    '<tr><td colspan="2">Measurement Sheet</td></tr>'
+                    "<tr><td>Style : 1805466</td><td>Description : CSG EVERYDAY SHORT</td></tr>"
+                    "<tr><td>POM : 201A</td><td>Description : BACK NECK WIDTH</td></tr>"
+                    '<tr><td colspan="2">Notes: REDUCE WIDTH</td></tr>'
+                    "</table>"
+                ),
+            }
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy", "protocol_version": 2})
+        return httpx.Response(
+            200,
+            json={
+                "status": "completed",
+                "error": None,
+                "results": {
+                    "source": {
+                        "md_content": "",
+                        "middle_json": middle_json,
+                        "content_list": content_list,
+                    }
+                },
+            },
+        )
+
+    parsed = MinerUClient(transport=httpx.MockTransport(handler)).parse(source)
+
+    assert [
+        (node["text"], node["field_role"])
+        for node in parsed["pages"][0]["nodes"]
+    ] == [
+        ("Measurement Sheet", "table_header"),
+        ("Style : 1805466", "table_header"),
+        ("Description : CSG EVERYDAY SHORT", "table_header"),
+        ("POM : 201A", "retained_table_value"),
+        ("Description : BACK NECK WIDTH", "description"),
+        ("Notes: REDUCE WIDTH", "note"),
+    ]
+
+
+def test_parse_does_not_treat_page_title_as_an_instruction_column(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"%PDF synthetic boundary fixture")
+    middle_json = json.dumps(
+        {
+            "pdf_info": [
+                {
+                    "page_idx": 0,
+                    "page_size": [1000, 1000],
+                    "para_blocks": [],
+                    "discarded_blocks": [],
+                    "preproc_blocks": [],
+                }
+            ]
+        }
+    )
+    content_list = json.dumps(
+        [
+            {
+                "type": "table",
+                "bbox": [100, 100, 900, 900],
+                "page_idx": 0,
+                "table_body": (
+                    "<table>"
+                    '<tr><td colspan="2">Construction Detail</td></tr>'
+                    "<tr><td>Style</td><td>Season</td></tr>"
+                    "<tr><td>1805466</td><td>SP26</td></tr>"
+                    "</table>"
+                ),
+            }
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy", "protocol_version": 2})
+        return httpx.Response(
+            200,
+            json={
+                "status": "completed",
+                "error": None,
+                "results": {
+                    "source": {
+                        "md_content": "",
+                        "middle_json": middle_json,
+                        "content_list": content_list,
+                    }
+                },
+            },
+        )
+
+    parsed = MinerUClient(transport=httpx.MockTransport(handler)).parse(source)
+
+    assert all(
+        node["field_role"] != "instruction"
+        for node in parsed["pages"][0]["nodes"]
+    )
 
 
 def test_parse_marks_v2_image_blocks_as_visual_evidence(tmp_path: Path) -> None:

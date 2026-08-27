@@ -39,14 +39,32 @@ _ADMIN_ROLES = frozenset(
         "header_footer",
         "page_number",
         "system_field",
+        "table_header",
         "template_title",
+        "retained_table_value",
     }
 )
 _BOM_ROLES = frozenset(
-    {"body", "material", "composition", "weight", "use", "component", "process_note"}
+    {
+        "body",
+        "material",
+        "composition",
+        "weight",
+        "use",
+        "component",
+        "process_note",
+        "placement",
+    }
 )
 _MEASUREMENT_ROLES = frozenset(
-    {"body", "pom_description", "measurement_instruction", "style_measurement_instruction"}
+    {
+        "body",
+        "pom_description",
+        "measurement_instruction",
+        "style_measurement_instruction",
+        "description",
+        "note",
+    }
 )
 _TECHNICAL_ROLES = frozenset(
     {"body", "production_instruction", "callout", "construction_instruction"}
@@ -62,10 +80,75 @@ _LABEL_PACK_ROLES = frozenset(
     }
 )
 _REVIEW_ROLES = frozenset(
-    {"body", "issue", "conclusion", "exception", "action", "fit_issue", "correction", "caption"}
+    {
+        "body",
+        "issue",
+        "conclusion",
+        "exception",
+        "action",
+        "fit_issue",
+        "correction",
+        "caption",
+        "description",
+        "note",
+    }
 )
 _ACTIONABLE_REVIEW_ROLES = frozenset(
     {"issue", "conclusion", "exception", "action", "fit_issue", "correction"}
+)
+_ADMIN_TEXT_LABELS = frozenset(
+    {
+        "approval status",
+        "base size",
+        "category",
+        "code",
+        "color",
+        "default",
+        "description",
+        "designer",
+        "dimension",
+        "division",
+        "expiration date",
+        "grade rule",
+        "label",
+        "label and pack",
+        "last location",
+        "last location date",
+        "measurement",
+        "measurement type",
+        "part",
+        "quantity",
+        "received on",
+        "request number",
+        "requested on",
+        "required by",
+        "sample id",
+        "sample type",
+        "season",
+        "shipped on",
+        "size",
+        "size class",
+        "sourcing",
+        "stage",
+        "step",
+        "style",
+        "tech designer",
+        "tracking number",
+        "vendor",
+    }
+)
+_ADMIN_PAGE_TITLES = frozenset(
+    {
+        "bill of material",
+        "construction detail",
+        "how to measure guide",
+        "measurement sheet",
+        "sample style review",
+        "style additional images",
+        "style category fields",
+        "style general information",
+        "style sample",
+    }
 )
 
 
@@ -428,6 +511,8 @@ def _candidate_decision(
         return False, DecisionReason.LOW_CONFIDENCE
     if not normalized or role in _ADMIN_ROLES:
         return False, DecisionReason.SKIPPED_ADMIN
+    if _is_administrative_text(normalized, role):
+        return False, DecisionReason.SKIPPED_ADMIN
     if classification.page_type in {
         PageType.HOW_TO_MEASURE,
         PageType.CATEGORY_FIELDS,
@@ -461,14 +546,39 @@ def _candidate_decision(
             else DecisionReason.PAGE_RULE
         )
     elif page_type is PageType.CONSTRUCTION_DETAIL and role in {
+        "body",
         "production_instruction",
         "actionable_instruction",
+        "instruction",
     }:
-        base_reason = DecisionReason.FIELD_RULE
+        base_reason = DecisionReason.PAGE_RULE if role == "body" else DecisionReason.FIELD_RULE
 
     if base_reason is None:
         return False, DecisionReason.MANUAL_CANDIDATE
     return _translate_reason(base_reason, text, locked, glossary_hits)
+
+
+def _is_administrative_text(normalized: str, role: str) -> bool:
+    if normalized in _ADMIN_PAGE_TITLES:
+        return True
+    if normalized.startswith(":"):
+        return True
+    stripped = normalized.rstrip(":").strip()
+    if stripped in _ADMIN_TEXT_LABELS:
+        return True
+    label, separator, value = normalized.partition(":")
+    label = label.strip()
+    if label == "notes" and not value.strip():
+        return True
+    if label in _ADMIN_TEXT_LABELS:
+        return not (
+            label == "description"
+            and role == "description"
+            and bool(separator and value.strip())
+        )
+    return normalized.endswith(":") and any(
+        normalized.startswith(f"{label} ") for label in {"season"}
+    )
 
 
 def _translate_reason(
@@ -485,6 +595,11 @@ def _translate_reason(
 
 
 def _is_code_only(text: str, locked: LockedText) -> bool:
+    if re.fullmatch(
+        r"(?:img|image)[\\/_-]*[a-z0-9][a-z0-9\\/_-]*\.(?:jpe?g|png|tiff?)",
+        normalize_term(text),
+    ):
+        return True
     characters = list(text)
     for token in locked.tokens:
         characters[token.start : token.end] = " " * (token.end - token.start)

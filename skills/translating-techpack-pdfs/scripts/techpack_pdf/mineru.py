@@ -42,6 +42,72 @@ class _PlacedTableCell:
     rowspan: int
 
 
+_TABLE_COLUMN_ROLES = {
+    "placement": "placement",
+    "location": "placement",
+    "position": "placement",
+    "part": "component",
+    "component": "component",
+    "material": "material",
+    "fabric": "material",
+    "composition": "composition",
+    "fiber content": "composition",
+    "weight": "weight",
+    "usage": "use",
+    "use": "use",
+    "point": "pom_description",
+    "measurement point": "pom_description",
+    "pom description": "pom_description",
+    "description": "description",
+    "fit notes": "note",
+    "notes": "note",
+    "comments": "note",
+    "remarks": "note",
+    "instruction": "instruction",
+    "instructions": "instruction",
+    "action": "action",
+    "issue": "issue",
+    "correction": "correction",
+    "conclusion": "conclusion",
+    "caption": "caption",
+}
+_RETAINED_TABLE_HEADERS = frozenset(
+    {
+        "image",
+        "component size",
+        "size",
+        "pom",
+        "spec",
+        "tolerance",
+        "tol -",
+        "tol +",
+        "target",
+        "factory",
+        "actual",
+        "actual diff",
+        "revised",
+        "uom",
+        "unit",
+        "article number",
+        "supplier",
+        "vendor",
+        "color",
+        "colour",
+        "quantity",
+        "qty",
+        "code",
+        "number",
+        "status",
+        "date",
+        "revision",
+        "request number",
+        "sample id",
+        "dimension",
+        "label",
+    }
+)
+
+
 class _TableHTMLParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -284,23 +350,32 @@ def _table_nodes(
         return [], []
     row_count = max(cell.row + cell.rowspan for cell in placed)
     column_count = max(cell.column + cell.colspan for cell in placed)
-    header_row = next(
-        (
-            row
-            for row in range(row_count)
-            if sum(cell.row == row and bool(cell.text) for cell in placed) > 1
-        ),
-        placed[0].row,
-    )
+    header_row = _table_header_row(placed, row_count)
+    column_roles: dict[int, str] = {}
+    for cell in placed:
+        if cell.row != header_row:
+            continue
+        role = _table_column_role(cell.text)
+        for column in range(cell.column, cell.column + cell.colspan):
+            column_roles[column] = role
     left, top, right, bottom = bbox
     cell_width = (right - left) / column_count
     cell_height = (bottom - top) / row_count
     nodes: list[dict[str, Any]] = []
     headers: list[str] = []
+    previous_text = ""
     for cell in placed:
         if not cell.text:
             continue
-        role = "table_header" if cell.row == header_row else "table_cell"
+        if cell.row <= header_row:
+            role = "table_header"
+        else:
+            inline_role = _inline_table_role(cell.text, previous_text)
+            role = (
+                inline_role
+                if inline_role != "table_cell"
+                else column_roles.get(cell.column, "table_cell")
+            )
         nodes.append(
             {
                 "text": cell.text,
@@ -313,9 +388,83 @@ def _table_nodes(
                 "field_role": role,
             }
         )
-        if role == "table_header":
+        if cell.row == header_row:
             headers.append(cell.text)
+        previous_text = cell.text
     return nodes, headers
+
+
+def _table_header_row(placed: list[_PlacedTableCell], row_count: int) -> int:
+    rows = range(row_count)
+    scored = [
+        (
+            sum(
+                _table_column_role(cell.text) != "table_cell"
+                for cell in placed
+                if cell.row == row and cell.text
+            ),
+            row,
+        )
+        for row in rows
+    ]
+    score, row = max(scored, key=lambda item: (item[0], -item[1]))
+    if score:
+        return row
+    return next(
+        (
+            candidate
+            for candidate in rows
+            if sum(cell.row == candidate and bool(cell.text) for cell in placed) > 1
+        ),
+        placed[0].row,
+    )
+
+
+def _table_column_role(text: str) -> str:
+    header = " ".join(text.casefold().split()).strip(" :")
+    if header in _RETAINED_TABLE_HEADERS:
+        return "retained_table_value"
+    return _TABLE_COLUMN_ROLES.get(header, "table_cell")
+
+
+def _inline_table_role(text: str, previous_text: str) -> str:
+    if ":" not in text:
+        return "table_cell"
+    label = " ".join(text.split(":", 1)[0].casefold().split())
+    previous_label = (
+        " ".join(previous_text.split(":", 1)[0].casefold().split())
+        if ":" in previous_text
+        else ""
+    )
+    if label == "description":
+        return "description" if previous_label == "pom" else "retained_table_value"
+    if label in {"notes", "fit notes", "comments", "remarks"}:
+        return "note"
+    if label in {"instruction", "instructions", "construction detail"}:
+        return "instruction"
+    if label in {"action", "issue", "correction", "conclusion", "caption"}:
+        return label
+    if label in _RETAINED_TABLE_HEADERS or label in {
+        "style",
+        "season",
+        "division",
+        "category",
+        "designer",
+        "tech designer",
+        "sourcing",
+        "stage",
+        "measurement",
+        "measurement type",
+        "size class",
+        "base size",
+        "grade rule",
+        "sample type",
+        "requested on",
+        "required by",
+        "approval status",
+    }:
+        return "retained_table_value"
+    return "table_cell"
 
 
 def _place_table_cells(rows: list[list[_RawTableCell]]) -> list[_PlacedTableCell]:
