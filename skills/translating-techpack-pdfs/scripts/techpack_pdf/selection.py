@@ -137,6 +137,7 @@ _ADMIN_TEXT_LABELS = frozenset(
         "vendor",
     }
 )
+_ADMIN_EXACT_TEXT_LABELS = frozenset({"fit notes"})
 _ADMIN_PAGE_TITLES = frozenset(
     {
         "bill of material",
@@ -524,7 +525,7 @@ def _candidate_decision(
         if role in {"special_note", "production_note", "delivery_note"}:
             return _translate_reason(DecisionReason.FIELD_RULE, text, locked, glossary_hits)
         return False, DecisionReason.SKIPPED_ADMIN
-    if _is_code_only(text, locked):
+    if _is_protected_mark(classification.page_type, role, text) or _is_code_only(text, locked):
         return False, DecisionReason.SKIPPED_CODE
     if duplicate:
         return False, DecisionReason.SKIPPED_DUPLICATE
@@ -561,6 +562,8 @@ def _candidate_decision(
 def _is_administrative_text(normalized: str, role: str) -> bool:
     if normalized in _ADMIN_PAGE_TITLES:
         return True
+    if normalized in _ADMIN_EXACT_TEXT_LABELS:
+        return True
     if normalized.startswith(":"):
         return True
     stripped = normalized.rstrip(":").strip()
@@ -592,6 +595,14 @@ def _translate_reason(
     if locked.tokens and not _is_code_only(text, locked):
         return True, DecisionReason.MIXED_TEXT
     return True, base_reason
+
+
+def _is_protected_mark(page_type: PageType, role: str, text: str) -> bool:
+    return (
+        page_type is PageType.TECHNICAL_DRAWING
+        and role == "body"
+        and bool(re.fullmatch(r"[A-Z]{2,6}\.", text.strip()))
+    )
 
 
 def _is_code_only(text: str, locked: LockedText) -> bool:

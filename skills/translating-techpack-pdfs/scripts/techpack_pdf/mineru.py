@@ -115,8 +115,21 @@ class _TableHTMLParser(HTMLParser):
         self._row: list[_RawTableCell] | None = None
         self._cell_text: list[str] | None = None
         self._cell_spans = (1, 1)
+        self._table_depth = 0
+        self._primary_table_seen = False
+        self._capturing_primary_table = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "table":
+            self._table_depth += 1
+            if self._table_depth == 1:
+                self._capturing_primary_table = not self._primary_table_seen
+                self._primary_table_seen = True
+            return
+        if self._primary_table_seen and (
+            not self._capturing_primary_table or self._table_depth != 1
+        ):
+            return
         if tag == "tr":
             self._row = []
         elif tag in {"td", "th"} and self._row is not None:
@@ -128,10 +141,24 @@ class _TableHTMLParser(HTMLParser):
             )
 
     def handle_data(self, data: str) -> None:
-        if self._cell_text is not None:
+        if (
+            self._cell_text is not None
+            and (not self._primary_table_seen or self._capturing_primary_table)
+            and self._table_depth <= 1
+        ):
             self._cell_text.append(data)
 
     def handle_endtag(self, tag: str) -> None:
+        if tag == "table":
+            if self._table_depth == 1:
+                self._capturing_primary_table = False
+            if self._table_depth:
+                self._table_depth -= 1
+            return
+        if self._primary_table_seen and (
+            not self._capturing_primary_table or self._table_depth != 1
+        ):
+            return
         if tag in {"td", "th"} and self._row is not None and self._cell_text is not None:
             text = " ".join("".join(self._cell_text).split())
             colspan, rowspan = self._cell_spans

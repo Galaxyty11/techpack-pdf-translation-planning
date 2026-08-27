@@ -10,7 +10,7 @@ import pymupdf
 import pytest
 
 from techpack_pdf.errors import TechpackError
-from techpack_pdf.mineru import MinerUClient
+from techpack_pdf.mineru import MinerUClient, _TableHTMLParser
 from techpack_pdf.pdf_analysis import inspect_pdf
 
 
@@ -351,6 +351,96 @@ def test_parse_maps_bom_columns_to_semantic_and_retained_roles(tmp_path: Path) -
         ("1.0000", "use"),
         ("yd", "retained_table_value"),
         ("SUMEC", "retained_table_value"),
+    ]
+
+
+def test_parse_projects_only_first_sibling_table_for_one_table_bbox(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"%PDF synthetic boundary fixture")
+    middle_json = json.dumps(
+        {
+            "pdf_info": [
+                {
+                    "page_idx": 0,
+                    "page_size": [1000, 1000],
+                    "para_blocks": [],
+                    "discarded_blocks": [],
+                    "preproc_blocks": [],
+                }
+            ]
+        }
+    )
+    content_list = json.dumps(
+        [
+            {
+                "type": "table",
+                "bbox": [100, 100, 900, 900],
+                "page_idx": 0,
+                "table_body": (
+                    "<table>"
+                    "<tr><td>Placement</td><td>Component</td></tr>"
+                    "<tr><td>BODY</td><td>Shell fabric</td></tr>"
+                    "</table>"
+                    "<table>"
+                    "<tr><td>POM</td><td>Description</td></tr>"
+                    "<tr><td>001</td><td>Measurement Sheet</td></tr>"
+                    "</table>"
+                ),
+            }
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy", "protocol_version": 2})
+        return httpx.Response(
+            200,
+            json={
+                "status": "completed",
+                "error": None,
+                "results": {
+                    "source": {
+                        "md_content": "",
+                        "middle_json": middle_json,
+                        "content_list": content_list,
+                    }
+                },
+            },
+        )
+
+    parsed = MinerUClient(transport=httpx.MockTransport(handler)).parse(source)
+
+    assert parsed["pages"][0]["table_headers"] == ["Placement", "Component"]
+    assert [node["text"] for node in parsed["pages"][0]["nodes"]] == [
+        "Placement",
+        "Component",
+        "BODY",
+        "Shell fabric",
+    ]
+
+
+def test_table_html_parser_preserves_bare_row_fragments_without_table_tags() -> None:
+    parser = _TableHTMLParser()
+
+    parser.feed("<tr><td>BODY</td><td>Shell fabric</td></tr>")
+
+    assert [[cell.text for cell in row] for row in parser.rows] == [
+        ["BODY", "Shell fabric"]
+    ]
+
+
+def test_table_html_parser_ignores_nested_table_rows_without_corrupting_outer_row() -> None:
+    parser = _TableHTMLParser()
+
+    parser.feed(
+        "<table><tr><td>BODY</td><td>Outer <table><tr><td>inner</td></tr>"
+        "</table> fabric</td></tr></table>"
+    )
+
+    assert [[cell.text for cell in row] for row in parser.rows] == [
+        ["BODY", "Outer fabric"]
     ]
 
 

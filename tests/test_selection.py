@@ -207,6 +207,55 @@ def test_skip_rules_are_deterministic(
     ]
 
 
+@pytest.mark.parametrize(
+    ("page_type", "text", "field_role", "expected_reason"),
+    [
+        (PageType.BOM, "Fit Notes", "body", "skipped_admin"),
+        (PageType.TECHNICAL_DRAWING, "CSG.", "body", "skipped_code"),
+    ],
+)
+def test_exact_administrative_labels_and_period_terminated_marks_are_skipped(
+    page_type: PageType,
+    text: str,
+    field_role: str,
+    expected_reason: str,
+) -> None:
+    candidates = select_candidates(
+        _page(page_type, [_page_node(text, field_role)]),
+        _empty_glossary(),
+    )
+
+    assert [(candidate.should_translate, candidate.decision_reason.value) for candidate in candidates] == [
+        (False, expected_reason)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "field_role"),
+    [
+        ("TAG", "component"),
+        ("THREAD", "material"),
+        ("BODY", "placement"),
+        ("WAISTBAND", "component"),
+        ("TAG.", "component"),
+        ("THREAD.", "material"),
+        ("BODY.", "placement"),
+    ],
+)
+def test_bom_words_remain_translatable_when_in_eligible_roles(
+    text: str,
+    field_role: str,
+) -> None:
+    candidates = select_candidates(
+        _page(PageType.BOM, [_page_node(text, field_role)]),
+        _empty_glossary(),
+    )
+
+    assert [(candidate.should_translate, candidate.decision_reason.value) for candidate in candidates] == [
+        (True, "field_rule")
+    ]
+
+
 def test_candidate_ids_and_duplicate_decisions_are_stable_in_page_order() -> None:
     page = _page(
         PageType.BOM,
