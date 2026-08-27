@@ -428,7 +428,11 @@ def _is_exact_token_occurrence(text: str, start: int, end: int, value: str) -> b
     normalized_value = normalize_term(value)
     if _is_latin_identifier_char(normalized_value[0]):
         left_base = _preceding_grapheme_base(text, start)
-        if left_base is not None and _is_latin_identifier_char(left_base):
+        if (
+            left_base is not None
+            and _is_latin_identifier_char(left_base)
+            and not _is_mineru_escaped_underscore_boundary(text, start)
+        ):
             return False
     if end < len(text) and unicodedata.combining(text[end]):
         return False
@@ -443,6 +447,17 @@ def _preceding_grapheme_base(text: str, start: int) -> str | None:
     while index >= 0 and unicodedata.combining(text[index]):
         index -= 1
     return text[index] if index >= 0 else None
+
+
+def _is_mineru_escaped_underscore_boundary(text: str, start: int) -> bool:
+    if start < 2 or text[start - 1] != "_":
+        return False
+    backslash_count = 0
+    index = start - 2
+    while index >= 0 and text[index] == "\\":
+        backslash_count += 1
+        index -= 1
+    return backslash_count % 2 == 1
 
 
 def _is_latin_identifier_char(character: str) -> bool:
@@ -735,7 +750,11 @@ _TOKEN_PATTERNS: tuple[tuple[str, re.Pattern[str], str | None], ...] = (
     ),
     ("percentage", re.compile(r"(?<![A-Za-z0-9_])[+-]?\d+(?:\.\d+)?%(?![A-Za-z0-9_])"), None),
     ("unit", re.compile(r"(?<![A-Za-z0-9_])(?:mm|cm|inch|gsm|oz)(?![A-Za-z0-9_])", re.IGNORECASE), None),
-    ("number", re.compile(r"(?<![A-Za-z0-9_])[+-]?\d+(?:\.\d+)?(?![A-Za-z0-9_])"), None),
+    (
+        "number",
+        re.compile(r"(?:(?<![A-Za-z0-9_])|(?<=\\_))[+-]?\d+(?:\.\d+)?(?![A-Za-z0-9_])"),
+        None,
+    ),
 )
 
 

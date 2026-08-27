@@ -521,6 +521,20 @@ def test_locked_numeric_occurrences_allow_cjk_adjacency_without_identifier_subst
     assert validate_locked_tokens(source, "数量112件和12件") is False
 
 
+def test_mineru_escaped_markdown_underscore_is_a_numeric_token_boundary() -> None:
+    source = lock_tokens(r"\*STITCHES\_9-10 STITCHES PER INCH")
+
+    assert [(token.value, token.kind) for token in source.tokens] == [
+        ("9", "number"),
+        ("10", "number"),
+        ("INCH", "unit"),
+    ]
+    assert validate_locked_tokens(source, "线迹：9-10 针/INCH") is True
+    assert validate_locked_tokens(source, "线迹：10 针/INCH") is False
+    assert "9" not in [token.value for token in lock_tokens("STITCHES_9").tokens]
+    assert "9" not in [token.value for token in lock_tokens(r"STITCHES\\_9").tokens]
+
+
 def test_dnt_occurrences_allow_cjk_adjacency_but_remain_case_and_identifier_exact(tmp_path) -> None:
     glossary_path = tmp_path / "glossary.csv"
     glossary_path.write_text(
