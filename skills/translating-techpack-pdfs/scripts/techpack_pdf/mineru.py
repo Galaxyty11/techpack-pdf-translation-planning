@@ -11,6 +11,7 @@ from typing import Any, Literal
 import httpx
 
 from .errors import TechpackError
+from .glossary import normalize_term
 from .pdf_analysis import PdfManifest
 
 
@@ -104,6 +105,22 @@ _RETAINED_TABLE_HEADERS = frozenset(
         "sample id",
         "dimension",
         "label",
+    }
+)
+_LOGICAL_TABLE_TITLES = frozenset(
+    {
+        "bill of material",
+        "bill of materials",
+        "construction detail",
+        "how to measure",
+        "how to measure guide",
+        "label and pack",
+        "measurement sheet",
+        "sample style review",
+        "style additional images",
+        "style category fields",
+        "style general information",
+        "style sample",
     }
 )
 
@@ -372,7 +389,7 @@ def _table_nodes(
 ) -> tuple[list[dict[str, Any]], list[str]]:
     parser = _TableHTMLParser()
     parser.feed(html)
-    placed = _place_table_cells(parser.rows)
+    placed = _place_table_cells(_logical_table_rows(parser.rows))
     if not placed:
         return [], []
     row_count = max(cell.row + cell.rowspan for cell in placed)
@@ -419,6 +436,41 @@ def _table_nodes(
             headers.append(cell.text)
         previous_text = cell.text
     return nodes, headers
+
+
+def _logical_table_rows(rows: list[list[_RawTableCell]]) -> list[list[_RawTableCell]]:
+    first_title: str | None = None
+    for index, row in enumerate(rows):
+        row_titles = [
+            normalize_term(cell.text)
+            for cell in row
+            if normalize_term(cell.text) in _LOGICAL_TABLE_TITLES
+        ]
+        if not row_titles:
+            continue
+        if first_title is None:
+            if any(title != row_titles[0] for title in row_titles):
+                return []
+            first_title = row_titles[0]
+            continue
+        if any(title != first_title for title in row_titles):
+            return _clip_rowspans_at_boundary(rows[:index])
+    return rows
+
+
+def _clip_rowspans_at_boundary(
+    rows: list[list[_RawTableCell]],
+) -> list[list[_RawTableCell]]:
+    row_count = len(rows)
+    return [
+        [
+            cell
+            if cell.rowspan <= row_count - row_index
+            else _RawTableCell(cell.text, cell.colspan, row_count - row_index)
+            for cell in row
+        ]
+        for row_index, row in enumerate(rows)
+    ]
 
 
 def _table_header_row(placed: list[_PlacedTableCell], row_count: int) -> int:

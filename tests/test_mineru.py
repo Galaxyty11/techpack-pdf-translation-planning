@@ -10,7 +10,7 @@ import pymupdf
 import pytest
 
 from techpack_pdf.errors import TechpackError
-from techpack_pdf.mineru import MinerUClient, _TableHTMLParser
+from techpack_pdf.mineru import MinerUClient, _TableHTMLParser, _table_nodes
 from techpack_pdf.pdf_analysis import inspect_pdf
 
 
@@ -28,6 +28,54 @@ def _multipart_parts(request: httpx.Request) -> dict[str, tuple[str | None, byte
         )
         for part in message.iter_parts()
     }
+
+
+def _parse_single_v2_table(tmp_path: Path, table_body: str) -> dict[str, object]:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"%PDF synthetic boundary fixture")
+    middle_json = json.dumps(
+        {
+            "pdf_info": [
+                {
+                    "page_idx": 0,
+                    "page_size": [1000, 1000],
+                    "para_blocks": [],
+                    "discarded_blocks": [],
+                    "preproc_blocks": [],
+                }
+            ]
+        }
+    )
+    content_list = json.dumps(
+        [
+            {
+                "type": "table",
+                "bbox": [100, 100, 900, 900],
+                "page_idx": 0,
+                "table_body": table_body,
+            }
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy", "protocol_version": 2})
+        return httpx.Response(
+            200,
+            json={
+                "status": "completed",
+                "error": None,
+                "results": {
+                    "source": {
+                        "md_content": "",
+                        "middle_json": middle_json,
+                        "content_list": content_list,
+                    }
+                },
+            },
+        )
+
+    return MinerUClient(transport=httpx.MockTransport(handler)).parse(source)
 
 
 def test_parse_checks_health_and_posts_required_multipart_contract(tmp_path: Path) -> None:
@@ -441,6 +489,167 @@ def test_table_html_parser_ignores_nested_table_rows_without_corrupting_outer_ro
 
     assert [[cell.text for cell in row] for row in parser.rows] == [
         ["BODY", "Outer fabric"]
+    ]
+
+
+def test_parse_truncates_a_logical_measurement_table_after_bom_rows(tmp_path: Path) -> None:
+    parsed = _parse_single_v2_table(
+        tmp_path,
+        (
+            "<table>"
+            '<tr><td colspan="2">Bill of Material</td></tr>'
+            "<tr><td>Placement</td><td>Component</td></tr>"
+            "<tr><td>BODY</td><td>Shell fabric</td></tr>"
+            '<tr><td colspan="2">Measurement Sheet</td></tr>'
+            "<tr><td>POM</td><td>Description</td></tr>"
+            "<tr><td>001</td><td>Back neck width</td></tr>"
+            "</table>"
+        ),
+    )
+
+    page = parsed["pages"][0]
+    assert page["table_headers"] == ["Placement", "Component"]
+    assert [node["text"] for node in page["nodes"]] == [
+        "Bill of Material",
+        "Placement",
+        "Component",
+        "BODY",
+        "Shell fabric",
+    ]
+
+
+def test_table_nodes_truncate_a_later_how_to_measure_logical_title() -> None:
+    nodes, headers = _table_nodes(
+        (
+            "<table>"
+            '<tr><td colspan="2">Measurement Sheet</td></tr>'
+            "<tr><td>POM</td><td>Description</td></tr>"
+            "<tr><td>001</td><td>Back neck width</td></tr>"
+            '<tr><td colspan="2">How To Measure Guide</td></tr>'
+            "<tr><td>Instruction</td><td>Measure straight across</td></tr>"
+            "</table>"
+        ),
+        [0, 0, 100, 100],
+    )
+
+    assert headers == ["POM", "Description"]
+    assert [node["text"] for node in nodes] == [
+        "Measurement Sheet",
+        "POM",
+        "Description",
+        "001",
+        "Back neck width",
+    ]
+
+
+def test_table_nodes_preserve_repeated_same_logical_title() -> None:
+    nodes, _ = _table_nodes(
+        (
+            "<table>"
+            '<tr><td colspan="2">Sample Style Review</td></tr>'
+            "<tr><td>Action</td><td>Issue</td></tr>"
+            "<tr><td>Reduce</td><td>Sleeve length</td></tr>"
+            '<tr><td colspan="2">Sample Style Review</td></tr>'
+            "<tr><td>Continue</td><td>Review</td></tr>"
+            "</table>"
+        ),
+        [0, 0, 100, 100],
+    )
+
+    assert [node["text"] for node in nodes] == [
+        "Sample Style Review",
+        "Action",
+        "Issue",
+        "Reduce",
+        "Sleeve length",
+        "Sample Style Review",
+        "Continue",
+        "Review",
+    ]
+
+
+def test_table_nodes_preserve_non_exact_logical_title_reference() -> None:
+    nodes, _ = _table_nodes(
+        (
+            "<table>"
+            '<tr><td colspan="2">Bill of Material</td></tr>'
+            "<tr><td>Placement</td><td>Component</td></tr>"
+            "<tr><td>BODY</td><td>Shell fabric</td></tr>"
+            '<tr><td colspan="2">SEE MEASUREMENT SHEET</td></tr>'
+            "<tr><td>TAG</td><td>Hang tag</td></tr>"
+            "</table>"
+        ),
+        [0, 0, 100, 100],
+    )
+
+    assert [node["text"] for node in nodes] == [
+        "Bill of Material",
+        "Placement",
+        "Component",
+        "BODY",
+        "Shell fabric",
+        "SEE MEASUREMENT SHEET",
+        "TAG",
+        "Hang tag",
+    ]
+
+
+def test_table_nodes_clip_retained_rowspan_at_logical_title_boundary() -> None:
+    nodes, _ = _table_nodes(
+        (
+            "<table>"
+            '<tr><td colspan="2">Bill of Material</td></tr>'
+            '<tr><td rowspan="3">BODY</td><td>Shell fabric</td></tr>'
+            "<tr><td>Shell fabric continued</td></tr>"
+            '<tr><td colspan="2">Measurement Sheet</td></tr>'
+            "<tr><td>POM</td><td>Description</td></tr>"
+            "</table>"
+        ),
+        [0, 0, 2, 3],
+    )
+
+    by_text = {node["text"]: node["bbox"] for node in nodes}
+    assert by_text["Bill of Material"] == [0.0, 0.0, 2.0, 1.0]
+    assert by_text["BODY"] == [0.0, 1.0, 1.0, 3.0]
+    assert "Measurement Sheet" not in by_text
+
+
+def test_table_nodes_fail_closed_for_ambiguous_first_logical_title_row() -> None:
+    nodes, headers = _table_nodes(
+        (
+            "<table>"
+            "<tr><td>Bill of Material</td><td>Measurement Sheet</td></tr>"
+            "<tr><td>Placement</td><td>Component</td></tr>"
+            "<tr><td>BODY</td><td>Shell fabric</td></tr>"
+            "</table>"
+        ),
+        [0, 0, 100, 100],
+    )
+
+    assert nodes == []
+    assert headers == []
+
+
+def test_table_nodes_normalize_full_width_logical_titles_before_boundary_check() -> None:
+    nodes, _ = _table_nodes(
+        (
+            "<table>"
+            '<tr><td colspan="2">Ｂｉｌｌ　ｏｆ　Ｍａｔｅｒｉａｌ</td></tr>'
+            "<tr><td>Placement</td><td>Component</td></tr>"
+            "<tr><td>BODY</td><td>Shell fabric</td></tr>"
+            '<tr><td colspan="2">Measurement Sheet</td></tr>'
+            "<tr><td>POM</td><td>Description</td></tr>"
+            "</table>"
+        ),
+        [0, 0, 100, 100],
+    )
+
+    assert [node["text"] for node in nodes] == [
+        "Ｂｉｌｌ ｏｆ Ｍａｔｅｒｉａｌ",
+        "Placement",
+        "Component",
+        "BODY",
+        "Shell fabric",
     ]
 
 
