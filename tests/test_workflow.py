@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 from techpack_pdf.errors import TechpackError
 import techpack_pdf.workflow as workflow
-from techpack_pdf.workflow import analyze, apply, prepare_review
+from techpack_pdf.workflow import analyze, apply, prepare_review, refresh_review
 from techpack_pdf.models import CoordinateConfidence
 
 
@@ -282,6 +282,7 @@ def _write_approved_review(job_dir):
     assert match is not None
     review = json.loads(match.group(1))
     review.pop("pages")
+    review.pop("business_explanations")
     for item in review["items"]:
         item["review_status"] = "approved"
         item["reviewed_translation"] = None
@@ -719,6 +720,56 @@ def test_prepare_review_waits_for_response_then_creates_offline_review(tmp_path)
     assert (prepared.exit_code, prepared.state) == (4, "review_ready")
     assert "__TECHPACK_REVIEW_DATA__" not in (analyzed.job_dir / "review.html").read_text(encoding="utf-8")
     assert json.loads((analyzed.job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "review_ready"
+
+
+def test_refresh_review_rebuilds_bound_html_and_updates_its_state_digest(
+    tmp_path, monkeypatch
+):
+    source, glossary = tmp_path / "techpack.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(
+        source,
+        glossary,
+        tmp_path / "jobs",
+        now=datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc),
+        mineru_client=_MinerUFixture(),
+    )
+    request = json.loads(
+        (job.job_dir / "translation-request.json").read_text(encoding="utf-8")
+    )
+    (job.job_dir / "translation-response.json").write_text(
+        json.dumps(_response_for(request), ensure_ascii=False), encoding="utf-8"
+    )
+    assert prepare_review(job.job_dir).state == "review_ready"
+    before_state = json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))
+    before_expected = (job.job_dir / "expected-output.json").read_bytes()
+
+    import techpack_pdf.review as review_module
+
+    refreshed_template = tmp_path / "review-template.html"
+    refreshed_template.write_text(
+        review_module._TEMPLATE_PATH.read_text(encoding="utf-8").replace(
+            "<title>TechPack 翻译审核</title>",
+            "<title>TechPack 翻译审核 · 已刷新</title>",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(review_module, "_TEMPLATE_PATH", refreshed_template)
+
+    result = refresh_review(job.job_dir)
+
+    refreshed = (job.job_dir / "review.html").read_bytes()
+    after_state = json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))
+    assert (result.exit_code, result.state, result.wait_reason) == (
+        4,
+        "review_ready",
+        "human_review",
+    )
+    assert "已刷新" in refreshed.decode("utf-8")
+    assert (job.job_dir / "expected-output.json").read_bytes() == before_expected
+    assert after_state["revision"] == before_state["revision"] + 1
+    assert after_state["artifacts"]["review_html"] == hashlib.sha256(refreshed).hexdigest()
 
 
 def test_invalid_initial_response_creates_one_correction_then_attempt_one_can_recover(tmp_path):
