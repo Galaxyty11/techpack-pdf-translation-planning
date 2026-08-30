@@ -283,6 +283,7 @@ def _write_approved_review(job_dir):
     review = json.loads(match.group(1))
     review.pop("pages")
     review.pop("business_explanations")
+    review.pop("review_navigation")
     for item in review["items"]:
         item["review_status"] = "approved"
         item["reviewed_translation"] = None

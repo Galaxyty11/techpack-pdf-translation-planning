@@ -53,6 +53,20 @@ _WARNING_EXPLANATIONS = {
     "coordinate_confidence": "原文位置可能不够准确，请检查左侧红框。",
     "unknown_model": "翻译模型信息不完整，请人工核对译文。",
 }
+_PAGE_TYPE_LABELS = {
+    "general_info": "基本信息",
+    "bom": "物料表",
+    "measurement": "尺寸表",
+    "technical_drawing": "技术图",
+    "label_pack": "标签与包装",
+    "sample_review": "样衣评审",
+    "style_sample": "款式样衣",
+    "how_to_measure": "测量方法",
+    "category_fields": "分类字段",
+    "construction_detail": "结构细节",
+    "unknown": "未分类",
+}
+_RISK_ORDER = {"high": 0, "medium": 1, "low": 2}
 
 
 def build_review_html(job: JobManifest, output: Any) -> str:
@@ -80,6 +94,7 @@ def build_review_html(job: JobManifest, output: Any) -> str:
             "pipeline": pipeline,
             "items": items,
             "business_explanations": _business_explanations(items),
+            "review_navigation": _review_navigation(items),
             "blocking_issues": blocking_issues,
             "review_completed_at": None,
             "pages": pages,
@@ -98,6 +113,61 @@ def build_review_html(job: JobManifest, output: Any) -> str:
             "Offline review page data is invalid",
             {"error_code": "review_page_invalid"},
         ) from None
+
+
+def _review_navigation(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    grouped: dict[int, list[tuple[int, Mapping[str, Any]]]] = {}
+    for original_index, item in enumerate(items):
+        page_index = int(item.get("page_index", 0))
+        grouped.setdefault(page_index, []).append((original_index, item))
+
+    groups: list[dict[str, Any]] = []
+    for page_index, indexed_items in grouped.items():
+        ordered = sorted(
+            indexed_items,
+            key=lambda value: (
+                1 if value[1].get("review_status") else 0,
+                _RISK_ORDER.get(str(value[1].get("risk_level", "")), 3),
+                value[0],
+            ),
+        )
+        page_items = [item for _index, item in ordered]
+        risk_counts = {
+            risk: sum(item.get("risk_level") == risk for item in page_items)
+            for risk in ("high", "medium", "low")
+        }
+        highest_risk = min(
+            (str(item.get("risk_level", "")) for item in page_items),
+            key=lambda risk: _RISK_ORDER.get(risk, 3),
+            default="low",
+        )
+        page_type = str(page_items[0].get("page_type", "unknown"))
+        groups.append(
+            {
+                "page_index": page_index,
+                "page_number": page_index + 1,
+                "page_type": page_type,
+                "page_type_label": _PAGE_TYPE_LABELS.get(page_type, page_type),
+                "item_ids": [str(item.get("item_id", "")) for item in page_items],
+                "unreviewed_count": sum(
+                    not item.get("review_status") for item in page_items
+                ),
+                "risk_counts": risk_counts,
+                "highest_risk": highest_risk,
+            }
+        )
+
+    groups.sort(
+        key=lambda group: (
+            _RISK_ORDER.get(str(group["highest_risk"]), 3),
+            group["page_index"],
+        )
+    )
+    return {
+        "default_open_page_index": groups[0]["page_index"] if groups else None,
+        "page_type_labels": _PAGE_TYPE_LABELS,
+        "groups": groups,
+    }
 
 
 def _business_explanations(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

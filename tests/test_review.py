@@ -160,6 +160,66 @@ def test_build_review_html_turns_layout_warnings_into_plain_chinese(tmp_path) ->
     }
 
 
+def test_build_review_html_groups_items_by_page_and_prioritizes_risk(tmp_path) -> None:
+    job, _source, _glossary = _job(tmp_path, page_count=4)
+    output = _review_output("Low risk on page 1")
+    output["items"][0].update(risk_level="low", page_type="bom")
+    output["items"].extend(
+        [
+            {
+                **_item(1, "approved", text="Low risk on page 2"),
+                "item_id": "p002-i002",
+                "risk_level": "low",
+                "page_type": "construction_detail",
+            },
+            {
+                **_item(1, "approved", text="High risk on page 2"),
+                "item_id": "p002-i001",
+                "risk_level": "high",
+                "page_type": "construction_detail",
+            },
+            {
+                **_item(2, "approved", text="Medium risk on page 3"),
+                "item_id": "p003-i001",
+                "risk_level": "medium",
+                "page_type": "measurement",
+            },
+            {
+                **_item(3, "approved", text="High risk on page 4"),
+                "item_id": "p004-i001",
+                "risk_level": "high",
+                "page_type": "technical_drawing",
+            },
+        ]
+    )
+    output["pages"] = [
+        {
+            "page_index": page_index,
+            "width": 200,
+            "height": 300,
+            "thumbnail": _PNG_DATA_URI,
+        }
+        for page_index in range(4)
+    ]
+    output["pipeline"]["model"] = "unknown"
+
+    embedded = _embedded_payload(build_review_html(job, output))
+
+    navigation = embedded["review_navigation"]
+    assert navigation["default_open_page_index"] == 1
+    assert [group["page_index"] for group in navigation["groups"]] == [1, 3, 2, 0]
+    assert navigation["groups"][0] == {
+        "page_index": 1,
+        "page_number": 2,
+        "page_type": "construction_detail",
+        "page_type_label": "结构细节",
+        "item_ids": ["p002-i001", "p002-i002"],
+        "unreviewed_count": 2,
+        "risk_counts": {"high": 1, "medium": 0, "low": 1},
+        "highest_risk": "high",
+    }
+
+
 def test_build_review_html_rejects_non_png_or_remote_thumbnail(tmp_path) -> None:
     job, _source, _glossary = _job(tmp_path)
     output = _review_output("Shell 12 mm")
