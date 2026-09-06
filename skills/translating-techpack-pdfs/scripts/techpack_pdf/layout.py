@@ -75,6 +75,7 @@ def rank_placements(
     same_row_cells: Sequence[pymupdf.Rect | Sequence[float]] = (),
     semantic_region: pymupdf.Rect | Sequence[float] | None = None,
     candidates: Sequence[Placement] | None = None,
+    page_blank_fallback: bool = False,
 ) -> list[Placement]:
     """Generate and rank placements using the contract's exact priority chain."""
     page_rect = _rect(crop_box)
@@ -85,6 +86,7 @@ def rank_placements(
             protected=protected,
             same_row_cells=same_row_cells,
             semantic_region=_rect(semantic_region) if semantic_region is not None else page_rect,
+            page_blank_fallback=page_blank_fallback,
         )
     else:
         generated = list(candidates)
@@ -221,7 +223,7 @@ def find_same_row_blank_cells(
     page: pymupdf.Page,
     source_bbox: pymupdf.Rect | Sequence[float],
 ) -> list[RectTuple]:
-    """Find blank Placement / Notes cells in the source text's table row."""
+    """Find a safe unused area in the source text's table row."""
     source = pymupdf.Rect(source_bbox)
     matches: list[RectTuple] = []
     try:
@@ -238,8 +240,6 @@ def find_same_row_blank_cells(
             for index, header in enumerate(headers)
             if any(label in header for label in ("placement", "note", "remark"))
         }
-        if not preferred_columns:
-            continue
         for row_index, row in enumerate(table.rows):
             row_cells = row.cells
             if not any(
@@ -248,25 +248,75 @@ def find_same_row_blank_cells(
             ):
                 continue
             row_values = values[row_index] if row_index < len(values) else []
-            for column in sorted(preferred_columns):
-                if column >= len(row_cells) or row_cells[column] is None:
+            preferred_matches = _blank_cells(
+                row_cells, row_values, sorted(preferred_columns)
+            )
+            if preferred_matches:
+                matches.extend(preferred_matches)
+                continue
+
+            source_remainders: list[RectTuple] = []
+            for cell in row_cells:
+                if cell is None or not _overlaps(source, pymupdf.Rect(cell)):
                     continue
-                value = row_values[column] if column < len(row_values) else None
-                if str(value or "").strip():
-                    continue
-                cell = pymupdf.Rect(row_cells[column])
-                inset_amount = MIN_CLEARANCE_PT + 1.0
-                inset = pymupdf.Rect(
-                    cell.x0 + inset_amount,
-                    cell.y0 + inset_amount,
-                    cell.x1 - inset_amount,
-                    cell.y1 - inset_amount,
-                )
-                if _nonempty(inset):
-                    candidate = _tuple(inset)
-                    if candidate not in matches:
-                        matches.append(candidate)
-    return sorted(matches)
+                remainder = _unused_cell_remainder(page, pymupdf.Rect(cell))
+                if remainder is not None:
+                    source_remainders.append(remainder)
+            if source_remainders:
+                matches.extend(source_remainders)
+                continue
+
+            matches.extend(
+                _blank_cells(row_cells, row_values, range(len(row_cells)))
+            )
+    return sorted(dict.fromkeys(matches))
+
+
+def _blank_cells(
+    row_cells: Sequence[Sequence[float] | None],
+    row_values: Sequence[object],
+    columns: Iterable[int],
+) -> list[RectTuple]:
+    matches: list[RectTuple] = []
+    for column in columns:
+        if column >= len(row_cells) or row_cells[column] is None:
+            continue
+        value = row_values[column] if column < len(row_values) else None
+        if str(value or "").strip():
+            continue
+        cell = pymupdf.Rect(row_cells[column])
+        inset_amount = MIN_CLEARANCE_PT + 1.0
+        inset = pymupdf.Rect(
+            cell.x0 + inset_amount,
+            cell.y0 + inset_amount,
+            cell.x1 - inset_amount,
+            cell.y1 - inset_amount,
+        )
+        if _nonempty(inset) and inset.width >= 24.0 and inset.height >= 9.5:
+            matches.append(_tuple(inset))
+    return matches
+
+
+def _unused_cell_remainder(
+    page: pymupdf.Page, cell: pymupdf.Rect
+) -> RectTuple | None:
+    occupied = [
+        pymupdf.Rect(word[:4])
+        for word in page.get_text("words")
+        if _overlaps(pymupdf.Rect(word[:4]), cell)
+    ]
+    if not occupied:
+        return None
+    inset = MIN_CLEARANCE_PT + 0.5
+    remainder = pymupdf.Rect(
+        max(rect.x1 for rect in occupied) + inset,
+        cell.y0 + inset,
+        cell.x1 - inset,
+        cell.y1 - inset,
+    )
+    if _nonempty(remainder) and remainder.width >= 24.0 and remainder.height >= 9.5:
+        return _tuple(remainder)
+    return None
 
 
 def detect_collisions(
@@ -315,6 +365,8 @@ def detect_collisions(
                 Collision(page.number, placement.item_id, "text_clipped", "annotation_rect")
             )
         for obstacle in obstacles:
+            if obstacle.kind == "image":
+                continue
             if _overlaps(body, _expand(pymupdf.Rect(obstacle.rect), MIN_CLEARANCE_PT)):
                 collisions.append(
                     Collision(
@@ -417,15 +469,33 @@ def detect_rendered_collisions(
             )
             for placement in placements
         ]
-    collision_200 = _render_diff_mask(before_page, after_page, 200)
-    newly_red_200 = _new_red_mask(before_page, after_page, 200)
+    collision_200, newly_red_200 = _render_difference_masks(
+        before_page, after_page, 200
+    )
+    placement_masks: dict[tuple[int, int, bool], np.ndarray] = {}
+
+    def placement_mask(
+        index: int, dpi: int, *, include_leader: bool = True
+    ) -> np.ndarray:
+        placement = placements[index]
+        effective_leader = include_leader and placement.leader_line is not None
+        key = (index, dpi, effective_leader)
+        if key not in placement_masks:
+            placement_masks[key] = _placement_mask(
+                before_page,
+                placement,
+                dpi,
+                include_leader=effective_leader,
+            )
+        return placement_masks[key]
+
     missing_at_200 = {
         index
         for index, placement in enumerate(placements)
         if int(
             np.count_nonzero(
                 newly_red_200
-                & _placement_mask(before_page, placement, 200, include_leader=False)
+                & placement_mask(index, 200, include_leader=False)
             )
         )
         <= 4
@@ -433,17 +503,16 @@ def detect_rendered_collisions(
     collision_at_200 = int(np.count_nonzero(collision_200)) > 4
     if not collision_at_200 and not missing_at_200:
         return []
-    collision_300 = _render_diff_mask(before_page, after_page, 300)
-    newly_red_300 = _new_red_mask(before_page, after_page, 300)
+    collision_300, newly_red_300 = _render_difference_masks(
+        before_page, after_page, 300
+    )
 
     collisions: list[Collision] = []
     for index in sorted(missing_at_200):
         visible_pixels = int(
             np.count_nonzero(
                 newly_red_300
-                & _placement_mask(
-                    before_page, placements[index], 300, include_leader=False
-                )
+                & placement_mask(index, 300, include_leader=False)
             )
         )
         if visible_pixels <= 4:
@@ -459,8 +528,8 @@ def detect_rendered_collisions(
             )
     if int(np.count_nonzero(collision_300)) <= 4:
         return _deduplicate_collisions(collisions)
-    for placement in placements:
-        expected = _placement_mask(before_page, placement, 300)
+    for index, placement in enumerate(placements):
+        expected = placement_mask(index, 300)
         pixels = int(np.count_nonzero(collision_300 & expected))
         if pixels > 4:
             collisions.append(
@@ -583,7 +652,7 @@ def optimize_layout(
                             trial_collisions,
                         )
                     )
-                    if own_count == 0 and not trial_collisions:
+                    if own_count == 0:
                         break
                 _score, selected, selected_collisions = min(
                     evaluated, key=lambda value: value[0]
@@ -627,6 +696,7 @@ def _generate_candidates(
     protected: Sequence[ProtectedGeometry],
     same_row_cells: Sequence[pymupdf.Rect | Sequence[float]],
     semantic_region: pymupdf.Rect,
+    page_blank_fallback: bool,
 ) -> list[Placement]:
     text = _final_text(item)
     source = pymupdf.Rect(item.source_bbox)
@@ -744,6 +814,44 @@ def _generate_candidates(
             )
         )
 
+    # A stale low-confidence box can point at a footer, border, or another
+    # unrelated object. Keep a small set of page-level blank-area candidates
+    # as a safe last resort. They deliberately have no leader line: the item
+    # remains linked by its review id, while the text is kept off page content.
+    if page_blank_fallback:
+        fallback_width = min(
+            max(base_width, 96.0),
+            max(96.0, page_rect.width * 0.36),
+        )
+        fallback_font = 5.0
+        fallback_lines = wrap_text(text, fallback_width - 4.0, fallback_font)
+        fallback_height = max(
+            fallback_font * 1.35 * max(len(fallback_lines), 1) + 3.0,
+            fallback_font + 4.0,
+        )
+        safe_page = _inset(page_rect, MIN_CLEARANCE_PT + 1.0)
+        x_positions = (
+            safe_page.x0,
+            safe_page.x0 + max((safe_page.width - fallback_width) / 2.0, 0.0),
+            safe_page.x1 - fallback_width,
+        )
+        y_bottom = safe_page.y1 - fallback_height
+        y_positions = tuple(
+            max(safe_page.y0, y_bottom - offset)
+            for offset in (0.0, 36.0, 72.0, 108.0, 144.0, 180.0, 216.0, 252.0)
+        )
+        for y in y_positions:
+            for x in x_positions:
+                raw.append(
+                    (
+                        "page_blank_fallback",
+                        pymupdf.Rect(x, y, x + fallback_width, y + fallback_height),
+                        fallback_font,
+                        False,
+                        None,
+                    )
+                )
+
     placements: list[Placement] = []
     for strategy, rect, font_size, intended_same_region, leader in raw:
         lines = wrap_text(text, max(rect.width - 4.0, 1.0), font_size)
@@ -756,6 +864,7 @@ def _generate_candidates(
         collision_count = sum(
             _overlaps(rect, _expand(pymupdf.Rect(obstacle.rect), MIN_CLEARANCE_PT))
             for obstacle in protected
+            if obstacle.kind != "image"
         )
         placements.append(
             Placement(
@@ -855,6 +964,18 @@ def _render_collisions(
 def _render_diff_mask(
     before_page: pymupdf.Page, after_page: pymupdf.Page, dpi: int
 ) -> np.ndarray:
+    return _render_difference_masks(before_page, after_page, dpi)[0]
+
+
+def _new_red_mask(
+    before_page: pymupdf.Page, after_page: pymupdf.Page, dpi: int
+) -> np.ndarray:
+    return _render_difference_masks(before_page, after_page, dpi)[1]
+
+
+def _render_difference_masks(
+    before_page: pymupdf.Page, after_page: pymupdf.Page, dpi: int
+) -> tuple[np.ndarray, np.ndarray]:
     before_pixels = _page_array(before_page, dpi)
     after_pixels = _page_array(after_page, dpi)
     newly_red = _red_mask(after_pixels) & ~_red_mask(before_pixels)
@@ -862,15 +983,7 @@ def _render_diff_mask(
         _content_mask(before_pixels).astype(np.uint8),
         np.ones((5, 5), np.uint8),
     ).astype(bool)
-    return newly_red & protected
-
-
-def _new_red_mask(
-    before_page: pymupdf.Page, after_page: pymupdf.Page, dpi: int
-) -> np.ndarray:
-    before_pixels = _page_array(before_page, dpi)
-    after_pixels = _page_array(after_page, dpi)
-    return _red_mask(after_pixels) & ~_red_mask(before_pixels)
+    return newly_red & protected, newly_red
 
 
 def _placement_mask(
@@ -918,7 +1031,7 @@ def _page_array(page: pymupdf.Page, dpi: int) -> np.ndarray:
 
 
 def _content_mask(pixels: np.ndarray) -> np.ndarray:
-    return np.any(pixels < 245, axis=2)
+    return np.any(pixels < 220, axis=2)
 
 
 def _red_mask(pixels: np.ndarray) -> np.ndarray:
@@ -1001,7 +1114,9 @@ def _drawing_geometries(
     geometries: list[ProtectedGeometry] = []
     stroke_width = max(float(drawing.get("width") or 0.0), 0.1)
     half = stroke_width / 2.0
-    if drawing.get("fill") is not None:
+    if drawing.get("fill") is not None and not _is_light_neutral_fill(
+        drawing["fill"]
+    ):
         fill_rect = pymupdf.Rect(drawing["rect"])
         if _nonempty(fill_rect):
             geometries.append(
@@ -1054,6 +1169,13 @@ def _drawing_geometries(
                     )
                 )
     return geometries
+
+
+def _is_light_neutral_fill(value: object) -> bool:
+    if not isinstance(value, (tuple, list)) or len(value) < 3:
+        return False
+    channels = tuple(float(channel) for channel in value[:3])
+    return min(channels) >= 0.85 and max(channels) - min(channels) <= 0.04
 
 
 def _points_rect(points: Sequence[pymupdf.Point], padding: float) -> pymupdf.Rect:

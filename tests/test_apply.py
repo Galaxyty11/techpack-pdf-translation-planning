@@ -617,6 +617,51 @@ def test_layout_reflows_a_render_only_collision_inside_the_bounded_search(
     assert tuple((value.item_id, value.rect) for value in layout.placements) != first_signature
 
 
+def test_layout_reuses_render_results_for_unchanged_page_layouts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "render-cache.pdf"
+    _make_source(source)
+    approved = tuple(_review(source, include_skipped=False).items)
+    first_signature = None
+    calls: list[tuple[object, ...]] = []
+
+    def render_gate(page, placements):
+        nonlocal first_signature
+        signature = (
+            page.number,
+            tuple(
+                (value.item_id, value.rect, value.font_size, value.strategy)
+                for value in placements
+            ),
+        )
+        calls.append(signature)
+        if first_signature is None:
+            first_signature = signature
+        if signature == first_signature:
+            return [
+                apply_module.Collision(
+                    page.number,
+                    placements[0].item_id,
+                    "render_overlap",
+                    "original_render",
+                    9,
+                    300,
+                )
+            ]
+        return []
+
+    monkeypatch.setattr(apply_module, "detect_candidate_collisions", render_gate)
+    document = pymupdf.open(source)
+    try:
+        layout, _attempted = apply_module._layout_document(document, approved)
+    finally:
+        document.close()
+
+    assert layout.collisions == ()
+    assert len(calls) == len(set(calls))
+
+
 def test_final_real_render_collision_is_fed_back_into_the_shared_ten_round_budget(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -923,6 +968,41 @@ def test_unresolved_artifacts_are_transactional_on_multipage_or_json_failure(
     assert outcome.problem is not None
     assert outcome.problem["code"] == "artifact_write_failed"
     assert not list(tmp_path.glob(f".{source.name}.unresolved.*"))
+
+
+def test_unresolved_evidence_falls_back_when_300_dpi_render_runs_out_of_memory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "artifact-memory-pressure.pdf"
+    _make_source(source)
+    document = pymupdf.open(source)
+    layout = apply_module.LayoutResult(
+        (),
+        (apply_module.Collision(0, "item-a", "render_overlap", "original"),),
+        10,
+        False,
+    )
+    real_get_pixmap = pymupdf.Page.get_pixmap
+    attempted_dpis: list[int | None] = []
+
+    def fail_300_dpi(page, *args, **kwargs):
+        attempted_dpis.append(kwargs.get("dpi"))
+        if kwargs.get("dpi") == 300:
+            raise MemoryError("injected 300 DPI memory pressure")
+        return real_get_pixmap(page, *args, **kwargs)
+
+    monkeypatch.setattr(pymupdf.Page, "get_pixmap", fail_300_dpi)
+    try:
+        outcome = apply_module._write_unresolved_artifacts(
+            source, layout, {}, document=document
+        )
+    finally:
+        document.close()
+
+    assert outcome.problem is None
+    assert attempted_dpis[:2] == [300, 200]
+    evidence = Path(outcome.unresolved[0]["final_render_reference"])
+    assert evidence.is_file()
 
 
 def test_attempted_history_merges_in_first_seen_order_without_duplicates(
@@ -1796,7 +1876,14 @@ def test_new_freetext_requires_visible_cjk_glyphs_and_a_real_scoped_cjk_font(
     assert result.problems[0]["code"] == "verification_failed"
 
 
-@pytest.mark.parametrize("text", ["中", "中文可编辑长文本中文可编辑长文本"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "中",
+        "中文可编辑长文本中文可编辑长文本",
+        "L/G含84%涤纶，16%氨纶；产地：中国，货号 RN 69778 / CA 40393",
+    ],
+)
 def test_final_render_accepts_visible_short_and_long_cjk_text(
     tmp_path: Path, text: str
 ) -> None:
@@ -1836,7 +1923,7 @@ def test_final_render_accepts_visible_short_and_long_cjk_text(
     assert outcome.collisions == ()
 
 
-def test_unresolved_artifacts_fail_if_annotated_evidence_cannot_be_built(
+def test_unresolved_artifacts_keep_readable_evidence_if_one_annotation_cannot_be_built(
     tmp_path: Path, monkeypatch
 ) -> None:
     source = tmp_path / "artifact-annotation-failure.pdf"
@@ -1875,8 +1962,8 @@ def test_unresolved_artifacts_fail_if_annotated_evidence_cannot_be_built(
     )
     document.close()
 
-    assert outcome.problem is not None
-    assert outcome.problem["code"] == "artifact_write_failed"
-    assert outcome.report_path is None
-    assert outcome.unresolved == ()
-    assert not list(tmp_path.glob(".artifact-annotation-failure.pdf.unresolved.*"))
+    assert outcome.problem is None
+    assert outcome.report_path is not None
+    assert outcome.report_path.is_file()
+    assert len(outcome.unresolved) == 1
+    assert Path(outcome.unresolved[0]["final_render_reference"]).is_file()
