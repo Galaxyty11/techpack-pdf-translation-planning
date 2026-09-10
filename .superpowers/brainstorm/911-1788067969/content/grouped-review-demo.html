@@ -1,0 +1,175 @@
+<style>
+  .demo-note { display:flex; gap:10px; align-items:center; margin:0 0 18px; padding:10px 14px; border:1px solid #bfdbfe; border-radius:10px; background:#eff6ff; color:#1e3a8a; }
+  .review-shell { overflow:hidden; border:1px solid #d0d5dd; border-radius:14px; background:#f7f8fa; box-shadow:0 18px 50px rgba(16,24,40,.10); }
+  .review-top { display:flex; align-items:center; gap:16px; padding:14px 18px; background:#17202a; color:white; }
+  .review-top strong { font-size:17px; }
+  .review-top .progress { margin-left:auto; color:#d0d5dd; font-size:13px; }
+  .filters-demo { display:flex; gap:8px; padding:10px 14px; border-bottom:1px solid #e4e7ec; background:white; }
+  .filter-pill { padding:6px 10px; border:1px solid #d0d5dd; border-radius:999px; background:#fff; color:#475467; font-size:12px; }
+  .filter-pill.active { border-color:#f04438; background:#fff1f0; color:#b42318; font-weight:700; }
+  .review-grid { display:grid; grid-template-columns:300px minmax(330px,1fr) 300px; min-height:620px; }
+  .page-list { padding:12px; overflow:auto; border-right:1px solid #e4e7ec; background:#fff; }
+  .list-title { display:flex; align-items:end; justify-content:space-between; margin:0 0 10px; }
+  .list-title strong { font-size:14px; }
+  .list-title span { color:#667085; font-size:11px; }
+  .page-group { margin-bottom:9px; border:1px solid #d0d5dd; border-radius:10px; overflow:hidden; background:#fff; }
+  .page-group[open] { border-color:#98a2b3; box-shadow:0 3px 12px rgba(16,24,40,.07); }
+  .page-group.high { border-left:5px solid #d92d20; }
+  .page-group.medium { border-left:5px solid #f79009; }
+  .page-group.low { border-left:5px solid #12b76a; }
+  .page-group summary { display:flex; align-items:center; gap:8px; padding:11px; cursor:pointer; list-style:none; background:#f9fafb; }
+  .page-group summary::-webkit-details-marker { display:none; }
+  .page-main { min-width:0; flex:1; }
+  .page-number { display:block; font-weight:800; color:#101828; }
+  .page-summary { display:block; margin-top:3px; color:#667085; font-size:11px; }
+  .caret { color:#667085; font-size:12px; }
+  details[open] .caret { transform:rotate(90deg); }
+  .count-badge { flex:none; padding:3px 7px; border-radius:999px; font-size:10px; font-weight:800; }
+  .count-badge.high { background:#fee4e2; color:#b42318; }
+  .count-badge.medium { background:#fef0c7; color:#b54708; }
+  .count-badge.low { background:#d1fadf; color:#027a48; }
+  .group-items { padding:7px; border-top:1px solid #eaecf0; }
+  .review-row { display:block; width:100%; margin:0 0 6px; padding:9px 10px; border:1px solid #eaecf0; border-radius:8px; background:#fff; text-align:left; }
+  .review-row:last-child { margin-bottom:0; }
+  .review-row.active { border-color:#2e90fa; background:#eff8ff; box-shadow:0 0 0 2px #d1e9ff; }
+  .row-top { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  .row-risk { font-size:11px; font-weight:800; }
+  .row-risk.high { color:#b42318; }
+  .row-risk.medium { color:#b54708; }
+  .row-risk.low { color:#027a48; }
+  .row-status { color:#667085; font-size:10px; }
+  .row-text { display:block; margin-top:4px; color:#344054; font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .page-preview { display:flex; align-items:center; justify-content:center; padding:24px; background:#eef1f5; }
+  .paper { position:relative; width:330px; height:480px; padding:28px; background:white; box-shadow:0 6px 24px rgba(16,24,40,.16); color:#667085; }
+  .paper-title { color:#101828; font-size:18px; font-weight:800; }
+  .paper-rule { height:8px; margin:18px 0 8px; border-radius:4px; background:#e4e7ec; }
+  .paper-rule.short { width:62%; }
+  .paper-table { display:grid; grid-template-columns:1fr 1fr 1fr; margin-top:26px; border:1px solid #d0d5dd; }
+  .paper-cell { min-height:46px; padding:8px; border-right:1px solid #d0d5dd; border-bottom:1px solid #d0d5dd; font-size:9px; }
+  .red-box { position:absolute; left:42px; top:250px; width:232px; height:54px; border:3px solid #d92d20; background:rgba(217,45,32,.08); }
+  .red-label { position:absolute; left:42px; top:226px; padding:3px 7px; border-radius:5px; background:#d92d20; color:white; font-size:10px; font-weight:800; }
+  .details-panel { padding:16px; border-left:1px solid #e4e7ec; background:white; }
+  .details-panel h3 { margin:0 0 4px; color:#101828; }
+  .detail-meta { margin-bottom:14px; color:#667085; font-size:12px; }
+  .risk-callout { margin-bottom:16px; padding:11px; border:1px solid #fda29b; border-radius:9px; background:#fef3f2; }
+  .risk-callout strong { display:block; color:#b42318; }
+  .risk-callout span { display:block; margin-top:4px; color:#7a271a; font-size:12px; }
+  .field { margin-top:13px; }
+  .field label { display:block; margin-bottom:4px; color:#667085; font-size:11px; font-weight:800; }
+  .field p, .translation-box { margin:0; color:#101828; font-size:13px; line-height:1.55; }
+  .translation-box { min-height:62px; padding:9px; border:1px solid #98a2b3; border-radius:7px; background:white; }
+  .actions-demo { display:grid; grid-template-columns:1fr 1fr; gap:7px; margin-top:18px; }
+  .actions-demo button { padding:8px; border:1px solid #98a2b3; border-radius:7px; background:white; color:#344054; }
+  .actions-demo .approve { border-color:#12b76a; background:#ecfdf3; color:#027a48; font-weight:800; }
+  .priority-legend { display:flex; gap:14px; margin-top:14px; color:#667085; font-size:12px; }
+  .dot { display:inline-block; width:8px; height:8px; margin-right:5px; border-radius:50%; }
+  @media (max-width:1050px) { .review-grid { grid-template-columns:280px 1fr; } .details-panel { grid-column:1 / -1; border-left:0; border-top:1px solid #e4e7ec; } }
+</style>
+
+<h2>离线审核页 Demo：按页审核，高风险优先</h2>
+<p class="subtitle">这是虚构数据的交互原型。点击左侧页标题可展开或折叠，页面与项目都按待审核风险优先排列。</p>
+
+<div class="demo-note"><strong>演示重点</strong><span>第 28 页因含 2 个未审核高风险项目排在最前，并默认展开。</span></div>
+
+<div class="review-shell">
+  <div class="review-top">
+    <strong>TechPack 翻译审核</strong>
+    <span class="progress">未审核 8 · 已批准 4 · 已跳过 1</span>
+  </div>
+  <div class="filters-demo">
+    <span class="filter-pill active">优先：未审核高风险</span>
+    <span class="filter-pill">全部页面类型</span>
+    <span class="filter-pill">全部审核状态</span>
+  </div>
+  <div class="review-grid">
+    <aside class="page-list">
+      <div class="list-title"><strong>按页查看</strong><span>3 页 · 13 项</span></div>
+
+      <details class="page-group high" open>
+        <summary>
+          <span class="caret">▶</span>
+          <span class="page-main"><span class="page-number">第 28 页</span><span class="page-summary">5 项待审核 · 结构细节</span></span>
+          <span class="count-badge high">高风险 2</span>
+        </summary>
+        <div class="group-items">
+          <button class="review-row active">
+            <span class="row-top"><span class="row-risk high">高风险</span><span class="row-status">未审核</span></span>
+            <span class="row-text">GUSSET WIDTH TOTAL</span>
+          </button>
+          <button class="review-row">
+            <span class="row-top"><span class="row-risk high">高风险</span><span class="row-status">未审核</span></span>
+            <span class="row-text">STITCHES 9-10 PER INCH</span>
+          </button>
+          <button class="review-row">
+            <span class="row-top"><span class="row-risk medium">需要留意</span><span class="row-status">未审核</span></span>
+            <span class="row-text">BACK RISE SEAM</span>
+          </button>
+          <button class="review-row">
+            <span class="row-top"><span class="row-risk low">低风险</span><span class="row-status">未审核</span></span>
+            <span class="row-text">HEM WIDTH</span>
+          </button>
+        </div>
+      </details>
+
+      <details class="page-group medium">
+        <summary>
+          <span class="caret">▶</span>
+          <span class="page-main"><span class="page-number">第 12 页</span><span class="page-summary">2 项待审核 · 尺寸表</span></span>
+          <span class="count-badge medium">留意 1</span>
+        </summary>
+        <div class="group-items">
+          <button class="review-row"><span class="row-top"><span class="row-risk medium">需要留意</span><span class="row-status">未审核</span></span><span class="row-text">FRONT BODY LENGTH</span></button>
+          <button class="review-row"><span class="row-top"><span class="row-risk low">低风险</span><span class="row-status">已批准</span></span><span class="row-text">CHEST WIDTH</span></button>
+        </div>
+      </details>
+
+      <details class="page-group low">
+        <summary>
+          <span class="caret">▶</span>
+          <span class="page-main"><span class="page-number">第 3 页</span><span class="page-summary">1 项待审核 · 基本信息</span></span>
+          <span class="count-badge low">低风险</span>
+        </summary>
+        <div class="group-items">
+          <button class="review-row"><span class="row-top"><span class="row-risk low">低风险</span><span class="row-status">未审核</span></span><span class="row-text">SHELL FABRIC</span></button>
+        </div>
+      </details>
+    </aside>
+
+    <section class="page-preview">
+      <div class="paper">
+        <div class="paper-title">PAGE 28 · CONSTRUCTION</div>
+        <div class="paper-rule"></div><div class="paper-rule short"></div>
+        <div class="paper-table">
+          <div class="paper-cell">LOCATION</div><div class="paper-cell">DESCRIPTION</div><div class="paper-cell">SPEC</div>
+          <div class="paper-cell">GUSSET</div><div class="paper-cell">GUSSET WIDTH TOTAL</div><div class="paper-cell">12 CM</div>
+          <div class="paper-cell">SEAM</div><div class="paper-cell">STITCHES PER INCH</div><div class="paper-cell">9-10</div>
+        </div>
+        <span class="red-label">当前高风险意见</span><div class="red-box"></div>
+      </div>
+    </section>
+
+    <aside class="details-panel">
+      <h3>第 28 页 · 第 1 项</h3>
+      <div class="detail-meta">结构细节 · 未审核</div>
+      <div class="risk-callout"><strong>请重点检查</strong><span>原文位置可能不够准确，请检查左侧红框。</span></div>
+      <div class="field"><label>原文</label><p>GUSSET WIDTH TOTAL</p></div>
+      <div class="field"><label>建议译文</label><p>裆片总宽</p></div>
+      <div class="field"><label>审核译文</label><div class="translation-box">裆片总宽</div></div>
+      <div class="field"><label>为什么需要翻译</label><p>这段文字属于本页需要翻译的内容。</p></div>
+      <div class="actions-demo"><button class="approve">批准</button><button>修改后批准</button></div>
+    </aside>
+  </div>
+</div>
+
+<div class="priority-legend">
+  <span><i class="dot" style="background:#d92d20"></i>未审核高风险优先</span>
+  <span><i class="dot" style="background:#f79009"></i>需要留意</span>
+  <span><i class="dot" style="background:#12b76a"></i>低风险</span>
+</div>
+
+<div class="options" style="margin-top:24px">
+  <div class="option" data-choice="approve-grouped-review" onclick="toggleSelect(this)">
+    <div class="letter">✓</div>
+    <div class="content"><h3>按此方案正式修改</h3><p>确认分页分组、风险排序和默认展开方式。</p></div>
+  </div>
+</div>

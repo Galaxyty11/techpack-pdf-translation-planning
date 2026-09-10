@@ -1,0 +1,3024 @@
+{
+  "code": "unresolved_overlap",
+  "source_filename": "1805466-representative-5-page-test.pdf",
+  "layout_rounds": 3,
+  "issues": [
+    {
+      "code": "unresolved_overlap",
+      "page_index": 0,
+      "item_id": "p001-i012",
+      "collision_object": [
+        {
+          "kind": "protected_drawing",
+          "object_id": "drawing-8-0-0"
+        }
+      ],
+      "attempted_placements": [
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            551.5422485351562,
+            818.3953559875488,
+            563.9922485351562
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            552.2172485351563,
+            818.3953559875488,
+            563.9922485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            552.8922485351562,
+            818.3953559875488,
+            563.9922485351562
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            553.5672485351563,
+            818.3953559875488,
+            563.9922485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            554.2422485351562,
+            818.3953559875488,
+            563.9922485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            537.5422485351562,
+            818.3953559875488,
+            549.9922485351562
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            538.2172485351563,
+            818.3953559875488,
+            549.9922485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            538.8922485351562,
+            818.3953559875488,
+            549.9922485351562
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            539.5672485351563,
+            818.3953559875488,
+            549.9922485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            540.2422485351562,
+            818.3953559875488,
+            549.9922485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            523.5422485351562,
+            818.3953559875488,
+            535.9922485351562
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            524.2172485351563,
+            818.3953559875488,
+            535.9922485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            524.8922485351562,
+            818.3953559875488,
+            535.9922485351562
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            525.5672485351563,
+            818.3953559875488,
+            535.9922485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            526.2422485351562,
+            818.3953559875488,
+            535.9922485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            509.5422485351562,
+            818.3953559875488,
+            521.9922485351562
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            510.2172485351563,
+            818.3953559875488,
+            521.9922485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            510.8922485351562,
+            818.3953559875488,
+            521.9922485351562
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            511.5672485351563,
+            818.3953559875488,
+            521.9922485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            512.2422485351562,
+            818.3953559875488,
+            521.9922485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            563.1084991455078,
+            581.9922485351562,
+            706.7009887695312,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            563.1084991455078,
+            581.9922485351562,
+            706.7009887695312,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            563.1084991455078,
+            581.9922485351562,
+            706.7009887695312,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            563.1084991455078,
+            581.9922485351562,
+            706.7009887695312,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            563.1084991455078,
+            581.9922485351562,
+            706.7009887695312,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            484.13262985229494,
+            581.9922485351562,
+            677.9824908447266,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            484.13262985229494,
+            581.9922485351562,
+            677.9824908447266,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            484.13262985229494,
+            581.9922485351562,
+            677.9824908447266,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            484.13262985229494,
+            581.9922485351562,
+            677.9824908447266,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            484.13262985229494,
+            581.9922485351562,
+            677.9824908447266,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            484.13262985229494,
+            581.9922485351562,
+            627.7251194763184,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            484.13262985229494,
+            581.9922485351562,
+            627.7251194763184,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            484.13262985229494,
+            581.9922485351562,
+            627.7251194763184,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            484.13262985229494,
+            581.9922485351562,
+            627.7251194763184,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            484.13262985229494,
+            581.9922485351562,
+            627.7251194763184,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            405.15676055908204,
+            581.9922485351562,
+            599.0066215515137,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            405.15676055908204,
+            581.9922485351562,
+            599.0066215515137,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            405.15676055908204,
+            581.9922485351562,
+            599.0066215515137,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            405.15676055908204,
+            581.9922485351562,
+            599.0066215515137,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            405.15676055908204,
+            581.9922485351562,
+            599.0066215515137,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            484.13262985229494,
+            581.9922485351562,
+            591.8269970703125,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            484.13262985229494,
+            581.9922485351562,
+            591.8269970703125,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            484.13262985229494,
+            581.9922485351562,
+            591.8269970703125,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            484.13262985229494,
+            581.9922485351562,
+            591.8269970703125,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            484.13262985229494,
+            581.9922485351562,
+            591.8269970703125,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            405.15676055908204,
+            581.9922485351562,
+            548.7492501831055,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            405.15676055908204,
+            581.9922485351562,
+            548.7492501831055,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            405.15676055908204,
+            581.9922485351562,
+            548.7492501831055,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            405.15676055908204,
+            581.9922485351562,
+            548.7492501831055,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            405.15676055908204,
+            581.9922485351562,
+            548.7492501831055,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            405.15676055908204,
+            581.9922485351562,
+            512.8511277770997,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            405.15676055908204,
+            581.9922485351562,
+            512.8511277770997,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            405.15676055908204,
+            581.9922485351562,
+            512.8511277770997,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            405.15676055908204,
+            581.9922485351562,
+            512.8511277770997,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            405.15676055908204,
+            581.9922485351562,
+            512.8511277770997,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            565.5422485351562,
+            854.2934783935547,
+            581.9922485351562
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            566.2172485351563,
+            854.2934783935547,
+            581.9922485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            566.8922485351562,
+            854.2934783935547,
+            581.9922485351562
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            567.5672485351563,
+            854.2934783935547,
+            581.9922485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            568.2422485351562,
+            854.2934783935547,
+            581.9922485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            590.9922485351562,
+            854.2934783935547,
+            603.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_narrow_wrap",
+          "rect": [
+            821.0657958984375,
+            581.9922485351562,
+            924.4523884277344,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            821.0657958984375,
+            581.9922485351562,
+            964.6582855224609,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_wide_wrap",
+          "rect": [
+            821.0657958984375,
+            581.9922485351562,
+            1036.4545303344726,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            590.9922485351562,
+            854.2934783935547,
+            602.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_narrow_wrap",
+          "rect": [
+            821.0657958984375,
+            581.9922485351562,
+            924.4523884277344,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            821.0657958984375,
+            581.9922485351562,
+            964.6582855224609,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_wide_wrap",
+          "rect": [
+            821.0657958984375,
+            581.9922485351562,
+            1036.4545303344726,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            590.9922485351562,
+            854.2934783935547,
+            602.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_narrow_wrap",
+          "rect": [
+            821.0657958984375,
+            581.9922485351562,
+            924.4523884277344,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            821.0657958984375,
+            581.9922485351562,
+            964.6582855224609,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_wide_wrap",
+          "rect": [
+            821.0657958984375,
+            581.9922485351562,
+            1036.4545303344726,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            590.9922485351562,
+            854.2934783935547,
+            601.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_narrow_wrap",
+          "rect": [
+            821.0657958984375,
+            581.9922485351562,
+            924.4523884277344,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            821.0657958984375,
+            581.9922485351562,
+            964.6582855224609,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_wide_wrap",
+          "rect": [
+            821.0657958984375,
+            581.9922485351562,
+            1036.4545303344726,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            590.9922485351562,
+            854.2934783935547,
+            600.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_narrow_wrap",
+          "rect": [
+            821.0657958984375,
+            581.9922485351562,
+            924.4523884277344,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            821.0657958984375,
+            581.9922485351562,
+            964.6582855224609,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_wide_wrap",
+          "rect": [
+            821.0657958984375,
+            581.9922485351562,
+            1036.4545303344726,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            551.5422485351562,
+            854.2934783935547,
+            567.9922485351562
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            552.2172485351563,
+            854.2934783935547,
+            567.9922485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            552.8922485351562,
+            854.2934783935547,
+            567.9922485351562
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            553.5672485351563,
+            854.2934783935547,
+            567.9922485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            554.2422485351562,
+            854.2934783935547,
+            567.9922485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            604.9922485351562,
+            818.3953559875488,
+            617.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            604.9922485351562,
+            854.2934783935547,
+            617.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            551.5422485351562,
+            904.5508497619629,
+            563.9922485351562
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            604.9922485351562,
+            904.5508497619629,
+            617.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            604.9922485351562,
+            818.3953559875488,
+            616.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            604.9922485351562,
+            854.2934783935547,
+            616.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            552.2172485351563,
+            904.5508497619629,
+            563.9922485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            604.9922485351562,
+            904.5508497619629,
+            616.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            604.9922485351562,
+            818.3953559875488,
+            616.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            604.9922485351562,
+            854.2934783935547,
+            616.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            552.8922485351562,
+            904.5508497619629,
+            563.9922485351562
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            604.9922485351562,
+            904.5508497619629,
+            616.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            604.9922485351562,
+            818.3953559875488,
+            615.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            604.9922485351562,
+            854.2934783935547,
+            615.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            553.5672485351563,
+            904.5508497619629,
+            563.9922485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            604.9922485351562,
+            904.5508497619629,
+            615.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            604.9922485351562,
+            818.3953559875488,
+            614.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            604.9922485351562,
+            854.2934783935547,
+            614.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            554.2422485351562,
+            904.5508497619629,
+            563.9922485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            604.9922485351562,
+            904.5508497619629,
+            614.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            537.5422485351562,
+            854.2934783935547,
+            553.9922485351562
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            538.2172485351563,
+            854.2934783935547,
+            553.9922485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            538.8922485351562,
+            854.2934783935547,
+            553.9922485351562
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            539.5672485351563,
+            854.2934783935547,
+            553.9922485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            540.2422485351562,
+            854.2934783935547,
+            553.9922485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            618.9922485351562,
+            818.3953559875488,
+            631.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            618.9922485351562,
+            854.2934783935547,
+            631.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            537.5422485351562,
+            904.5508497619629,
+            549.9922485351562
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            618.9922485351562,
+            904.5508497619629,
+            631.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            618.9922485351562,
+            818.3953559875488,
+            630.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            618.9922485351562,
+            854.2934783935547,
+            630.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            538.2172485351563,
+            904.5508497619629,
+            549.9922485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            618.9922485351562,
+            904.5508497619629,
+            630.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            618.9922485351562,
+            818.3953559875488,
+            630.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            618.9922485351562,
+            854.2934783935547,
+            630.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            538.8922485351562,
+            904.5508497619629,
+            549.9922485351562
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            618.9922485351562,
+            904.5508497619629,
+            630.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            618.9922485351562,
+            818.3953559875488,
+            629.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            618.9922485351562,
+            854.2934783935547,
+            629.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            539.5672485351563,
+            904.5508497619629,
+            549.9922485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            618.9922485351562,
+            904.5508497619629,
+            629.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            618.9922485351562,
+            818.3953559875488,
+            628.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            618.9922485351562,
+            854.2934783935547,
+            628.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            540.2422485351562,
+            904.5508497619629,
+            549.9922485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            618.9922485351562,
+            904.5508497619629,
+            628.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            523.5422485351562,
+            854.2934783935547,
+            539.9922485351562
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            524.2172485351563,
+            854.2934783935547,
+            539.9922485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            524.8922485351562,
+            854.2934783935547,
+            539.9922485351562
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            525.5672485351563,
+            854.2934783935547,
+            539.9922485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            526.2422485351562,
+            854.2934783935547,
+            539.9922485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            632.9922485351562,
+            818.3953559875488,
+            645.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            632.9922485351562,
+            854.2934783935547,
+            645.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            523.5422485351562,
+            904.5508497619629,
+            535.9922485351562
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            632.9922485351562,
+            904.5508497619629,
+            645.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            632.9922485351562,
+            818.3953559875488,
+            644.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            632.9922485351562,
+            854.2934783935547,
+            644.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            524.2172485351563,
+            904.5508497619629,
+            535.9922485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            632.9922485351562,
+            904.5508497619629,
+            644.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            632.9922485351562,
+            818.3953559875488,
+            644.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            632.9922485351562,
+            854.2934783935547,
+            644.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            524.8922485351562,
+            904.5508497619629,
+            535.9922485351562
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            632.9922485351562,
+            904.5508497619629,
+            644.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            632.9922485351562,
+            818.3953559875488,
+            643.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            632.9922485351562,
+            854.2934783935547,
+            643.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            525.5672485351563,
+            904.5508497619629,
+            535.9922485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            632.9922485351562,
+            904.5508497619629,
+            643.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            632.9922485351562,
+            818.3953559875488,
+            642.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            632.9922485351562,
+            854.2934783935547,
+            642.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            526.2422485351562,
+            904.5508497619629,
+            535.9922485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            632.9922485351562,
+            904.5508497619629,
+            642.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            509.5422485351562,
+            854.2934783935547,
+            525.9922485351562
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            510.2172485351563,
+            854.2934783935547,
+            525.9922485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            510.8922485351562,
+            854.2934783935547,
+            525.9922485351562
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            511.5672485351563,
+            854.2934783935547,
+            525.9922485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above",
+          "rect": [
+            710.7009887695312,
+            512.2422485351562,
+            854.2934783935547,
+            525.9922485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            646.9922485351562,
+            818.3953559875488,
+            659.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            646.9922485351562,
+            854.2934783935547,
+            659.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            509.5422485351562,
+            904.5508497619629,
+            521.9922485351562
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            646.9922485351562,
+            904.5508497619629,
+            659.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            646.9922485351562,
+            818.3953559875488,
+            658.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            646.9922485351562,
+            854.2934783935547,
+            658.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            510.2172485351563,
+            904.5508497619629,
+            521.9922485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            646.9922485351562,
+            904.5508497619629,
+            658.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            646.9922485351562,
+            818.3953559875488,
+            658.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            646.9922485351562,
+            854.2934783935547,
+            658.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            510.8922485351562,
+            904.5508497619629,
+            521.9922485351562
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            646.9922485351562,
+            904.5508497619629,
+            658.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            646.9922485351562,
+            818.3953559875488,
+            657.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            646.9922485351562,
+            854.2934783935547,
+            657.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            511.5672485351563,
+            904.5508497619629,
+            521.9922485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            646.9922485351562,
+            904.5508497619629,
+            657.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_narrow_wrap",
+          "rect": [
+            710.7009887695312,
+            646.9922485351562,
+            818.3953559875488,
+            656.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below",
+          "rect": [
+            710.7009887695312,
+            646.9922485351562,
+            854.2934783935547,
+            656.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_above_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            512.2422485351562,
+            904.5508497619629,
+            521.9922485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_below_wide_wrap",
+          "rect": [
+            710.7009887695312,
+            646.9922485351562,
+            904.5508497619629,
+            656.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            900.0416651916504,
+            581.9922485351562,
+            1007.736032409668,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            900.0416651916504,
+            581.9922485351562,
+            1043.6341548156738,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            900.0416651916504,
+            581.9922485351562,
+            1093.891526184082,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            900.0416651916504,
+            581.9922485351562,
+            1007.736032409668,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            900.0416651916504,
+            581.9922485351562,
+            1043.6341548156738,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            900.0416651916504,
+            581.9922485351562,
+            1093.891526184082,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            900.0416651916504,
+            581.9922485351562,
+            1007.736032409668,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            900.0416651916504,
+            581.9922485351562,
+            1043.6341548156738,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            900.0416651916504,
+            581.9922485351562,
+            1093.891526184082,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            900.0416651916504,
+            581.9922485351562,
+            1007.736032409668,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            900.0416651916504,
+            581.9922485351562,
+            1043.6341548156738,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            900.0416651916504,
+            581.9922485351562,
+            1093.891526184082,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            900.0416651916504,
+            581.9922485351562,
+            1007.736032409668,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            900.0416651916504,
+            581.9922485351562,
+            1043.6341548156738,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            900.0416651916504,
+            581.9922485351562,
+            1093.891526184082,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            979.0175344848633,
+            581.9922485351562,
+            1086.7119017028808,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            979.0175344848633,
+            581.9922485351562,
+            1122.6100241088866,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            979.0175344848633,
+            581.9922485351562,
+            1172.8673954772948,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            979.0175344848633,
+            581.9922485351562,
+            1086.7119017028808,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            979.0175344848633,
+            581.9922485351562,
+            1122.6100241088866,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            979.0175344848633,
+            581.9922485351562,
+            1172.8673954772948,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            979.0175344848633,
+            581.9922485351562,
+            1086.7119017028808,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            979.0175344848633,
+            581.9922485351562,
+            1122.6100241088866,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            979.0175344848633,
+            581.9922485351562,
+            1172.8673954772948,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            979.0175344848633,
+            581.9922485351562,
+            1086.7119017028808,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            979.0175344848633,
+            581.9922485351562,
+            1122.6100241088866,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            979.0175344848633,
+            581.9922485351562,
+            1172.8673954772948,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            979.0175344848633,
+            581.9922485351562,
+            1086.7119017028808,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            979.0175344848633,
+            581.9922485351562,
+            1122.6100241088866,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            979.0175344848633,
+            581.9922485351562,
+            1172.8673954772948,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            326.18089126586915,
+            581.9922485351562,
+            520.0307522583008,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            326.18089126586915,
+            581.9922485351562,
+            520.0307522583008,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            326.18089126586915,
+            581.9922485351562,
+            520.0307522583008,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            326.18089126586915,
+            581.9922485351562,
+            520.0307522583008,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            326.18089126586915,
+            581.9922485351562,
+            520.0307522583008,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            1057.9934037780763,
+            581.9922485351562,
+            1165.6877709960938,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            1057.9934037780763,
+            581.9922485351562,
+            1201.5858934020996,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            326.18089126586915,
+            581.9922485351562,
+            469.77338088989256,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            1057.9934037780763,
+            581.9922485351562,
+            1251.843264770508,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            1057.9934037780763,
+            581.9922485351562,
+            1165.6877709960938,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            1057.9934037780763,
+            581.9922485351562,
+            1201.5858934020996,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            326.18089126586915,
+            581.9922485351562,
+            469.77338088989256,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            1057.9934037780763,
+            581.9922485351562,
+            1251.843264770508,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            1057.9934037780763,
+            581.9922485351562,
+            1165.6877709960938,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            1057.9934037780763,
+            581.9922485351562,
+            1201.5858934020996,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            326.18089126586915,
+            581.9922485351562,
+            469.77338088989256,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            1057.9934037780763,
+            581.9922485351562,
+            1251.843264770508,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            1057.9934037780763,
+            581.9922485351562,
+            1165.6877709960938,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            1057.9934037780763,
+            581.9922485351562,
+            1201.5858934020996,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            326.18089126586915,
+            581.9922485351562,
+            469.77338088989256,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            1057.9934037780763,
+            581.9922485351562,
+            1251.843264770508,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            1057.9934037780763,
+            581.9922485351562,
+            1165.6877709960938,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            1057.9934037780763,
+            581.9922485351562,
+            1201.5858934020996,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            326.18089126586915,
+            581.9922485351562,
+            469.77338088989256,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            1057.9934037780763,
+            581.9922485351562,
+            1251.843264770508,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            247.20502197265625,
+            581.9922485351562,
+            441.0548829650879,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            247.20502197265625,
+            581.9922485351562,
+            441.0548829650879,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            247.20502197265625,
+            581.9922485351562,
+            441.0548829650879,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            247.20502197265625,
+            581.9922485351562,
+            441.0548829650879,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_wide_wrap",
+          "rect": [
+            247.20502197265625,
+            581.9922485351562,
+            441.0548829650879,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            326.18089126586915,
+            581.9922485351562,
+            433.87525848388674,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            326.18089126586915,
+            581.9922485351562,
+            433.87525848388674,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            326.18089126586915,
+            581.9922485351562,
+            433.87525848388674,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            326.18089126586915,
+            581.9922485351562,
+            433.87525848388674,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            326.18089126586915,
+            581.9922485351562,
+            433.87525848388674,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            1136.969273071289,
+            581.9922485351562,
+            1244.6636402893066,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            1136.969273071289,
+            581.9922485351562,
+            1280.5617626953126,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            247.20502197265625,
+            581.9922485351562,
+            390.79751159667967,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            1136.969273071289,
+            581.9922485351562,
+            1330.8191340637209,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            1136.969273071289,
+            581.9922485351562,
+            1244.6636402893066,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            1136.969273071289,
+            581.9922485351562,
+            1280.5617626953126,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            247.20502197265625,
+            581.9922485351562,
+            390.79751159667967,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            1136.969273071289,
+            581.9922485351562,
+            1330.8191340637209,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            1136.969273071289,
+            581.9922485351562,
+            1244.6636402893066,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            1136.969273071289,
+            581.9922485351562,
+            1280.5617626953126,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            247.20502197265625,
+            581.9922485351562,
+            390.79751159667967,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            1136.969273071289,
+            581.9922485351562,
+            1330.8191340637209,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            1136.969273071289,
+            581.9922485351562,
+            1244.6636402893066,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            1136.969273071289,
+            581.9922485351562,
+            1280.5617626953126,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            247.20502197265625,
+            581.9922485351562,
+            390.79751159667967,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            1136.969273071289,
+            581.9922485351562,
+            1330.8191340637209,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_narrow_wrap",
+          "rect": [
+            1136.969273071289,
+            581.9922485351562,
+            1244.6636402893066,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right",
+          "rect": [
+            1136.969273071289,
+            581.9922485351562,
+            1280.5617626953126,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left",
+          "rect": [
+            247.20502197265625,
+            581.9922485351562,
+            390.79751159667967,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_right_wide_wrap",
+          "rect": [
+            1136.969273071289,
+            581.9922485351562,
+            1330.8191340637209,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            247.20502197265625,
+            581.9922485351562,
+            354.89938919067384,
+            594.4422485351563
+          ],
+          "font_size": 7.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            247.20502197265625,
+            581.9922485351562,
+            354.89938919067384,
+            593.7672485351562
+          ],
+          "font_size": 6.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            247.20502197265625,
+            581.9922485351562,
+            354.89938919067384,
+            593.0922485351563
+          ],
+          "font_size": 6.0,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            247.20502197265625,
+            581.9922485351562,
+            354.89938919067384,
+            592.4172485351562
+          ],
+          "font_size": 5.5,
+          "leader": false
+        },
+        {
+          "strategy": "same_region_left_narrow_wrap",
+          "rect": [
+            247.20502197265625,
+            581.9922485351562,
+            354.89938919067384,
+            591.7422485351562
+          ],
+          "font_size": 5.0,
+          "leader": false
+        },
+        {
+          "strategy": "margin_track",
+          "rect": [
+            745.8900146484375,
+            577.2760009765625,
+            837.8900146484375,
+            591.2760009765625
+          ],
+          "font_size": 5.0,
+          "leader": true
+        },
+        {
+          "strategy": "margin_track",
+          "rect": [
+            745.8900146484375,
+            561.9922485351562,
+            837.8900146484375,
+            575.9922485351562
+          ],
+          "font_size": 5.0,
+          "leader": true
+        },
+        {
+          "strategy": "margin_track",
+          "rect": [
+            745.8900146484375,
+            4.0,
+            837.8900146484375,
+            18.0
+          ],
+          "font_size": 5.0,
+          "leader": true
+        }
+      ],
+      "final_render_reference": "D:\\PDF翻译skill实施\\output\\pdf\\.1805466-representative-5-page-test.pdf.unresolved.d4cfdcbca2af4a63a9ec30c9e1626112.page-1.png"
+    }
+  ]
+}
