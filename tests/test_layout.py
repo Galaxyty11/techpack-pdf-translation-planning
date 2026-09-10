@@ -26,7 +26,12 @@ from techpack_pdf.layout import (
 from techpack_pdf.models import ReviewItem
 
 
-def _item(*, text: str = "领宽（HPS 到 HPS）") -> ReviewItem:
+def _item(
+    *,
+    text: str = "领宽（HPS 到 HPS）",
+    reviewed_target_rect: list[float] | None = None,
+    font_size: float | None = None,
+) -> ReviewItem:
     return ReviewItem.model_validate(
         {
             "item_id": "p001-i001",
@@ -51,11 +56,44 @@ def _item(*, text: str = "领宽（HPS 到 HPS）") -> ReviewItem:
             "translation_prompt_version": "1.0",
             "placement_strategy": None,
             "target_rect": None,
-            "font_size": None,
+            "font_size": font_size,
             "leader_line": None,
+            "reviewed_target_rect": reviewed_target_rect,
             "warnings": [],
         }
     )
+
+
+@pytest.mark.parametrize("font", [4.9, 24.1, float("inf"), float("nan")])
+def test_reviewed_font_rejects_invalid_values(font):
+    payload = _item().model_dump()
+    payload["reviewed_font_size"] = font
+    with pytest.raises(ValueError):
+        ReviewItem.model_validate(payload)
+
+
+@pytest.mark.parametrize("rect", [[1, 1, 1, 10], [10, 1, 1, 10], [0, 0, float("inf"), 10]])
+def test_reviewed_source_rejects_empty_or_nonfinite_box(rect):
+    payload = _item().model_dump()
+    payload["reviewed_source_bbox"] = rect
+    with pytest.raises(ValueError):
+        ReviewItem.model_validate(payload)
+
+
+def test_corrected_source_is_used_for_layout_without_mutating_original(monkeypatch):
+    item = _item(text="中文")
+    item.reviewed_source_bbox = [140, 100, 200, 112]
+    seen = []
+    original_rank = layout_module.rank_placements
+    def capture(effective, *args, **kwargs):
+        seen.append(effective.source_bbox)
+        return original_rank(effective, *args, **kwargs)
+    monkeypatch.setattr(layout_module, "rank_placements", capture)
+    with pymupdf.open() as document:
+        document.new_page(width=300, height=250)
+        layout_module.plan_document_layout(document, [item])
+    assert seen == [[140, 100, 200, 112]]
+    assert item.source_bbox == [40, 50, 100, 62]
 
 
 def _placement(
@@ -117,6 +155,22 @@ def test_rank_placements_generates_the_required_deterministic_candidate_sequence
     ]
     assert generated[-1].strategy == "margin_track"
     assert generated[-1].leader_line is not None
+
+
+def test_reviewed_target_rect_generates_only_same_rectangle_at_smaller_fonts() -> None:
+    item = _item(
+        reviewed_target_rect=[100.0, 40.0, 180.0, 60.0],
+        font_size=6.5,
+    )
+
+    placements = rank_placements(item, pymupdf.Rect(0, 0, 300, 200))
+
+    assert {placement.rect for placement in placements} == {
+        (100.0, 40.0, 180.0, 60.0)
+    }
+    assert [placement.font_size for placement in placements] == [6.5, 6.0, 5.5, 5.0]
+    assert {placement.strategy for placement in placements} == {"manual_review_target"}
+    assert all(placement.leader_line is None for placement in placements)
 
 
 def test_rank_placements_adds_page_blank_fallback_for_low_confidence_coordinates() -> None:

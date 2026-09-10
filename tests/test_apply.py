@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -11,6 +12,7 @@ import pymupdf
 import pytest
 
 import techpack_pdf.apply as apply_module
+import techpack_pdf.layout as layout_module
 from techpack_pdf.apply import apply_review
 from techpack_pdf.models import (
     FileArtifact,
@@ -191,6 +193,40 @@ def _review_bundle(
     return review_path, job, expected_output
 
 
+def _pinned_collision_case(
+    tmp_path: Path,
+) -> tuple[Path, JobManifest, dict, Path]:
+    source = tmp_path / "pinned-collision.pdf"
+    _make_source(source)
+    review_path, job, expected_output = _review_bundle(
+        tmp_path,
+        source,
+        include_skipped=False,
+    )
+    payload = json.loads(review_path.read_text(encoding="utf-8"))
+    original_rect = [120.0, 20.0, 200.0, 40.0]
+    payload["items"][0]["target_rect"] = original_rect
+    payload["items"][0]["reviewed_target_rect"] = [20.0, 20.0, 100.0, 40.0]
+    expected_output["items"][0]["target_rect"] = original_rect
+    document = pymupdf.open(source)
+    try:
+        thumbnail = base64.b64encode(document[0].get_pixmap(dpi=20).tobytes("png")).decode(
+            "ascii"
+        )
+    finally:
+        document.close()
+    expected_output["pages"] = [
+        {
+            "page_index": 0,
+            "width": 300.0,
+            "height": 300.0,
+            "thumbnail": f"data:image/png;base64,{thumbnail}",
+        }
+    ]
+    review_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return source, job, expected_output, review_path
+
+
 def _review_item(
     item_id: str,
     source_text: str,
@@ -255,6 +291,30 @@ def _snapshot(path: Path) -> dict:
         }
     finally:
         document.close()
+
+
+def test_reviewed_font_and_source_box_are_validated_and_exported(tmp_path):
+    source = tmp_path / "font-source.pdf"
+    _make_source(source)
+    review_path, job, expected = _review_bundle(tmp_path, source, include_skipped=False)
+    payload = json.loads(review_path.read_text(encoding="utf-8"))
+    payload["items"][0]["reviewed_font_size"] = 10.0
+    payload["items"][0]["reviewed_source_bbox"] = [21, 21, 76, 39]
+    expected["pages"] = [{"page_index": 0, "width": 340, "height": 220}]
+    review_path.write_text(json.dumps(payload), encoding="utf-8")
+    result = apply_review(source, review_path, job, expected)
+    assert result.success, result
+    with pymupdf.open(result.output_path) as doc:
+        page = doc[0]
+        matched = [a for a in page.annots() if (a.info.get("subject") or "").startswith("{") and json.loads(a.info["subject"]).get("item_id") == payload["items"][0]["item_id"]]
+        assert len(matched) == 1
+        assert "10" in doc.xref_get_key(matched[0].xref, "DA")[1]
+    payload["items"][0]["reviewed_source_bbox"] = [-1, 21, 76, 39]
+    review_path.write_text(json.dumps(payload), encoding="utf-8")
+    from techpack_pdf.review import load_review
+    from techpack_pdf.errors import TechpackError
+    with pytest.raises(TechpackError, match="超出页面"):
+        load_review(review_path, job, expected)
 
 
 def test_apply_review_preserves_source_and_adds_only_three_editable_red_freetext_annotations(
@@ -350,6 +410,27 @@ def test_apply_review_unresolved_layout_returns_safe_problem_and_leaves_no_outpu
     assert result.failure_report_path is not None
     report = json.loads(result.failure_report_path.read_text(encoding="utf-8"))
     assert private_text not in json.dumps(report, ensure_ascii=False)
+
+
+def test_apply_does_not_move_colliding_reviewed_target(tmp_path: Path) -> None:
+    source, job, expected, review = _pinned_collision_case(tmp_path)
+
+    result = apply_review(source, review, job, expected)
+
+    assert result.success is False
+    assert result.output_path is None
+    assert not source.with_name(source.name + ".annotated.pdf").exists()
+    attempted = [
+        value
+        for value in result.unresolved_overlaps
+        if value["item_id"] == "p001-i001"
+    ]
+    assert attempted
+    assert {
+        tuple(placement["rect"])
+        for value in attempted
+        for placement in value["attempted_placements"]
+    } == {(20.0, 20.0, 100.0, 40.0)}
 
 
 def test_apply_review_does_not_overwrite_an_existing_final_file(tmp_path: Path) -> None:
@@ -605,7 +686,7 @@ def test_layout_reflows_a_render_only_collision_inside_the_bounded_search(
             ]
         return []
 
-    monkeypatch.setattr(apply_module, "detect_candidate_collisions", render_gate)
+    monkeypatch.setattr(layout_module, "detect_candidate_collisions", render_gate)
     document = pymupdf.open(source)
     try:
         layout, _attempted = apply_module._layout_document(document, approved)
@@ -651,7 +732,7 @@ def test_layout_reuses_render_results_for_unchanged_page_layouts(
             ]
         return []
 
-    monkeypatch.setattr(apply_module, "detect_candidate_collisions", render_gate)
+    monkeypatch.setattr(layout_module, "detect_candidate_collisions", render_gate)
     document = pymupdf.open(source)
     try:
         layout, _attempted = apply_module._layout_document(document, approved)
@@ -712,14 +793,14 @@ def test_layout_fails_closed_when_an_approved_item_has_no_remaining_candidate(
     source = tmp_path / "candidate-exhausted.pdf"
     _make_source(source)
     approved = tuple(_review(source, include_skipped=False).items)
-    real_rank = apply_module.rank_placements
+    real_rank = layout_module.rank_placements
 
     def omit_one(item, *args, **kwargs):
         if item.item_id == approved[0].item_id:
             return []
         return real_rank(item, *args, **kwargs)
 
-    monkeypatch.setattr(apply_module, "rank_placements", omit_one)
+    monkeypatch.setattr(layout_module, "rank_placements", omit_one)
     document = pymupdf.open(source)
     try:
         layout, _attempted = apply_module._layout_document(document, approved)
@@ -882,7 +963,7 @@ def test_unresolved_evidence_is_rendered_from_the_exact_failing_annotated_temp(
     review = _review(source, include_skipped=False)
     document = pymupdf.open(source)
     try:
-        placement = apply_module.rank_placements(
+        placement = layout_module.rank_placements(
             review.items[0],
             pymupdf.Rect(0, 0, document[0].cropbox.width, document[0].cropbox.height),
         )[0]
@@ -1011,7 +1092,7 @@ def test_attempted_history_merges_in_first_seen_order_without_duplicates(
     source = tmp_path / "attempts.pdf"
     _make_source(source)
     item = _review(source, include_skipped=False).items[0]
-    candidates = apply_module.rank_placements(item, pymupdf.Rect(0, 0, 300, 300))
+    candidates = layout_module.rank_placements(item, pymupdf.Rect(0, 0, 300, 300))
 
     merged = apply_module._merge_attempted(
         {item.item_id: candidates[:2]},

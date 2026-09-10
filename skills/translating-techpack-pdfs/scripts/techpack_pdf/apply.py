@@ -25,18 +25,12 @@ from .layout import (
     LayoutResult,
     Placement,
     ProtectedGeometry,
-    detect_collisions,
-    detect_candidate_collisions,
     detect_rendered_collisions,
-    extract_protected_geometry,
-    find_same_row_blank_cells,
-    infer_semantic_region,
-    optimize_layout,
-    rank_placements,
+    placement_signature as _placement_signature,
+    plan_document_layout as _layout_document,
 )
 from .errors import TechpackError
 from .models import (
-    CoordinateConfidence,
     JobManifest,
     ReviewDocument,
     ReviewItem,
@@ -441,107 +435,6 @@ def _validate_inputs(
     return None
 
 
-def _layout_document(
-    document: pymupdf.Document,
-    items: Sequence[ReviewItem],
-    *,
-    excluded: set[tuple[object, ...]] | None = None,
-    max_rounds: int = 10,
-) -> tuple[LayoutResult, dict[str, list[Placement]]]:
-    candidates_by_id: dict[str, list[Placement]] = {}
-    initial: list[Placement] = []
-    exhausted: list[Collision] = []
-    by_page: dict[int, list[ReviewItem]] = defaultdict(list)
-    for item in items:
-        by_page[item.page_index].append(item)
-
-    for page_index in sorted(by_page):
-        page = document[page_index]
-        protected = extract_protected_geometry(page)
-        for item in sorted(by_page[page_index], key=lambda value: value.item_id):
-            candidates = rank_placements(
-                item,
-                _canonical_page_rect(page),
-                protected=protected,
-                same_row_cells=find_same_row_blank_cells(page, item.source_bbox),
-                semantic_region=infer_semantic_region(page, item.source_bbox),
-                page_blank_fallback=(item.coordinate_confidence is CoordinateConfidence.LOW),
-            )
-            if excluded:
-                candidates = [
-                    candidate
-                    for candidate in candidates
-                    if _placement_signature(candidate) not in excluded
-                ]
-            candidates_by_id[item.item_id] = candidates
-            if candidates:
-                initial.append(candidates[0])
-            else:
-                exhausted.append(
-                    Collision(
-                        page_index,
-                        item.item_id,
-                        "candidate_exhausted",
-                        "candidate_set",
-                    )
-                )
-
-    collision_cache: dict[tuple[object, ...], tuple[Collision, ...]] = {}
-
-    def collision_detector(placements: Sequence[Placement]) -> Sequence[Collision]:
-        collisions: list[Collision] = []
-        grouped: dict[int, list[Placement]] = defaultdict(list)
-        for placement in placements:
-            grouped[placement.page_index].append(placement)
-        for page_index, page_placements in grouped.items():
-            page_placements = sorted(
-                page_placements, key=lambda placement: placement.item_id
-            )
-            cache_key = (
-                page_index,
-                tuple(_placement_signature(value) for value in page_placements),
-            )
-            cached = collision_cache.get(cache_key)
-            if cached is not None:
-                collisions.extend(cached)
-                continue
-            geometric = detect_collisions(
-                document[page_index], page_placements, render_check=False
-            )
-            if geometric:
-                page_collisions = tuple(geometric)
-            else:
-                page_collisions = tuple(
-                    detect_candidate_collisions(document[page_index], page_placements)
-                )
-            collision_cache[cache_key] = page_collisions
-            collisions.extend(page_collisions)
-        return collisions
-
-    result = optimize_layout(
-        initial,
-        collision_detector=collision_detector,
-        candidate_provider=lambda placement, _collisions: candidates_by_id[
-            placement.item_id
-        ],
-        max_rounds=max_rounds,
-    )
-    if exhausted:
-        result = LayoutResult(
-            result.placements,
-            tuple(sorted((*result.collisions, *exhausted), key=lambda value: (value.page_index, value.item_id, value.kind))),
-            result.rounds,
-            result.stable,
-            result.attempted_placements,
-        )
-    attempted_by_id: dict[str, list[Placement]] = defaultdict(list)
-    for placement in result.attempted_placements:
-        attempted_by_id[placement.item_id].append(placement)
-    for item in items:
-        attempted_by_id.setdefault(item.item_id, [])
-    return result, dict(attempted_by_id)
-
-
 def _write_annotations(
     document: pymupdf.Document, placements: Sequence[Placement]
 ) -> tuple[_WrittenAnnotation, ...]:
@@ -585,16 +478,6 @@ def _write_annotations(
             )
         )
     return tuple(written)
-
-
-def _placement_signature(placement: Placement) -> tuple[object, ...]:
-    return (
-        placement.item_id,
-        tuple(round(value, 4) for value in placement.rect),
-        placement.font_size,
-        placement.strategy,
-        placement.leader_line,
-    )
 
 
 def _approved_identity_problem(
@@ -656,11 +539,6 @@ def _render_collision_problem(
             for value in collisions
         ],
     )
-
-
-def _canonical_page_rect(page: pymupdf.Page) -> pymupdf.Rect:
-    """Crop-relative, unrotated coordinates used by extraction and annotation APIs."""
-    return pymupdf.Rect(0, 0, page.cropbox.width, page.cropbox.height)
 
 
 def _verify_temp(
@@ -1014,7 +892,7 @@ def _appearance_is_valid(
     annotation: pymupdf.Annot,
     expected_font_size: float,
 ) -> bool:
-    if annotation.type[1] != "FreeText" or not 5.0 <= expected_font_size <= 7.0:
+    if annotation.type[1] != "FreeText" or not 5.0 <= expected_font_size <= 24.0:
         return False
     default_appearance = document.xref_get_key(annotation.xref, "DA")[1]
     color_match = re.search(

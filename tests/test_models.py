@@ -51,6 +51,27 @@ def test_review_item_requires_structural_translation_agent_role_key():
         ReviewItem.model_validate(payload)
 
 
+def test_review_item_accepts_optional_reviewed_target_rect():
+    payload = _valid_review_item_payload()
+    payload["reviewed_target_rect"] = [110.0, 20.0, 190.0, 40.0]
+
+    item = ReviewItem.model_validate(payload)
+
+    assert item.reviewed_target_rect == [110.0, 20.0, 190.0, 40.0]
+
+
+@pytest.mark.parametrize(
+    "rectangle",
+    ([float("nan"), 10.0, 80.0, 30.0], [40.0, 10.0, 40.0, 30.0]),
+)
+def test_review_item_rejects_nonfinite_or_empty_reviewed_target_rect(rectangle):
+    payload = _valid_review_item_payload()
+    payload["reviewed_target_rect"] = rectangle
+
+    with pytest.raises(ValidationError):
+        ReviewItem.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     ("execution_mode", "agent_role"),
     [
@@ -270,6 +291,7 @@ def _valid_review_item_payload() -> dict:
         "translation_prompt_version": "1.0",
         "placement_strategy": "same_region",
         "target_rect": [100.0, 10.0, 180.0, 30.0],
+        "reviewed_target_rect": None,
         "font_size": 6.0,
         "leader_line": None,
         "warnings": [],

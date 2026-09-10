@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import TypeAlias
@@ -11,7 +12,7 @@ import cv2
 import numpy as np
 import pymupdf
 
-from .models import ReviewItem, ReviewStatus
+from .models import CoordinateConfidence, ReviewItem, ReviewStatus
 
 
 RectTuple: TypeAlias = tuple[float, float, float, float]
@@ -91,6 +92,17 @@ def rank_placements(
     else:
         generated = list(candidates)
     return sorted(generated, key=_placement_sort_key)
+
+
+def placement_signature(placement: Placement) -> tuple[object, ...]:
+    """Return the stable identity used for layout retries and deduplication."""
+    return (
+        placement.item_id,
+        tuple(round(value, 4) for value in placement.rect),
+        placement.font_size,
+        placement.strategy,
+        placement.leader_line,
+    )
 
 
 def wrap_text(
@@ -689,6 +701,116 @@ def optimize_layout(
     )
 
 
+def plan_document_layout(
+    document: pymupdf.Document,
+    items: Sequence[ReviewItem],
+    *,
+    excluded: set[tuple[object, ...]] | None = None,
+    max_rounds: int = 10,
+) -> tuple[LayoutResult, dict[str, list[Placement]]]:
+    """Plan a complete document layout with shared collision feedback."""
+    candidates_by_id: dict[str, list[Placement]] = {}
+    initial: list[Placement] = []
+    exhausted: list[Collision] = []
+    by_page: dict[int, list[ReviewItem]] = defaultdict(list)
+    for item in items:
+        effective = item.model_copy(update={"source_bbox": item.reviewed_source_bbox}) if item.reviewed_source_bbox is not None else item
+        by_page[item.page_index].append(effective)
+
+    for page_index in sorted(by_page):
+        page = document[page_index]
+        protected = extract_protected_geometry(page)
+        for item in sorted(by_page[page_index], key=lambda value: value.item_id):
+            candidates = rank_placements(
+                item,
+                _canonical_page_rect(page),
+                protected=protected,
+                same_row_cells=find_same_row_blank_cells(page, item.source_bbox),
+                semantic_region=infer_semantic_region(page, item.source_bbox),
+                page_blank_fallback=(
+                    item.coordinate_confidence is CoordinateConfidence.LOW
+                ),
+            )
+            if excluded:
+                candidates = [
+                    candidate
+                    for candidate in candidates
+                    if placement_signature(candidate) not in excluded
+                ]
+            candidates_by_id[item.item_id] = candidates
+            if candidates:
+                initial.append(candidates[0])
+            else:
+                exhausted.append(
+                    Collision(
+                        page_index,
+                        item.item_id,
+                        "candidate_exhausted",
+                        "candidate_set",
+                    )
+                )
+
+    collision_cache: dict[tuple[object, ...], tuple[Collision, ...]] = {}
+
+    def collision_detector(placements: Sequence[Placement]) -> Sequence[Collision]:
+        collisions: list[Collision] = []
+        grouped: dict[int, list[Placement]] = defaultdict(list)
+        for placement in placements:
+            grouped[placement.page_index].append(placement)
+        for page_index, page_placements in grouped.items():
+            page_placements = sorted(
+                page_placements, key=lambda placement: placement.item_id
+            )
+            cache_key = (
+                page_index,
+                tuple(placement_signature(value) for value in page_placements),
+            )
+            cached = collision_cache.get(cache_key)
+            if cached is not None:
+                collisions.extend(cached)
+                continue
+            geometric = detect_collisions(
+                document[page_index], page_placements, render_check=False
+            )
+            if geometric:
+                page_collisions = tuple(geometric)
+            else:
+                page_collisions = tuple(
+                    detect_candidate_collisions(document[page_index], page_placements)
+                )
+            collision_cache[cache_key] = page_collisions
+            collisions.extend(page_collisions)
+        return collisions
+
+    result = optimize_layout(
+        initial,
+        collision_detector=collision_detector,
+        candidate_provider=lambda placement, _collisions: candidates_by_id[
+            placement.item_id
+        ],
+        max_rounds=max_rounds,
+    )
+    if exhausted:
+        result = LayoutResult(
+            result.placements,
+            tuple(
+                sorted(
+                    (*result.collisions, *exhausted),
+                    key=lambda value: (value.page_index, value.item_id, value.kind),
+                )
+            ),
+            result.rounds,
+            result.stable,
+            result.attempted_placements,
+        )
+    attempted_by_id: dict[str, list[Placement]] = defaultdict(list)
+    for placement in result.attempted_placements:
+        attempted_by_id[placement.item_id].append(placement)
+    for item in items:
+        attempted_by_id.setdefault(item.item_id, [])
+    return result, dict(attempted_by_id)
+
+
 def _generate_candidates(
     item: ReviewItem,
     page_rect: pymupdf.Rect,
@@ -700,8 +822,25 @@ def _generate_candidates(
 ) -> list[Placement]:
     text = _final_text(item)
     source = pymupdf.Rect(item.source_bbox)
+    if item.reviewed_target_rect is not None or (item.reviewed_font_size is not None and item.target_rect is not None):
+        start = _bounded_font(item.font_size or 7.0)
+        return _placements_from_raw(
+            item,
+            page_rect,
+            protected,
+            [
+                (
+                    "manual_review_target",
+                    pymupdf.Rect(item.reviewed_target_rect or item.target_rect),
+                    size,
+                    True,
+                    None,
+                )
+                for size in ([item.reviewed_font_size] if item.reviewed_font_size is not None else [size for size in FONT_SIZES if size <= start])
+            ],
+            semantic_region=semantic_region,
+        )
     raw: list[tuple[str, pymupdf.Rect, float, bool, tuple[PointTuple, ...] | None]] = []
-    index = 0
 
     if item.target_rect is not None:
         font_size = _bounded_font(item.font_size or 7.0)
@@ -711,7 +850,7 @@ def _generate_candidates(
 
     base_width = min(max(source.width * 1.35, 72.0), max(72.0, semantic_region.width * 0.45))
     gap = 4.0
-    for font_size in FONT_SIZES:
+    for font_size in ([item.reviewed_font_size] if item.reviewed_font_size is not None else FONT_SIZES):
         for cell in same_row_cells:
             raw.append(("same_row_cell", _rect(cell), font_size, True, None))
 
@@ -852,7 +991,29 @@ def _generate_candidates(
                     )
                 )
 
+    return _placements_from_raw(
+        item,
+        page_rect,
+        protected,
+        raw,
+        semantic_region=semantic_region,
+    )
+
+
+def _placements_from_raw(
+    item: ReviewItem,
+    page_rect: pymupdf.Rect,
+    protected: Sequence[ProtectedGeometry],
+    raw: Sequence[
+        tuple[str, pymupdf.Rect, float, bool, tuple[PointTuple, ...] | None]
+    ],
+    *,
+    semantic_region: pymupdf.Rect,
+) -> list[Placement]:
+    text = _final_text(item)
+    source = pymupdf.Rect(item.source_bbox)
     placements: list[Placement] = []
+    index = 0
     for strategy, rect, font_size, intended_same_region, leader in raw:
         lines = wrap_text(text, max(rect.width - 4.0, 1.0), font_size)
         safe_page_rect = _inset(page_rect, MIN_CLEARANCE_PT)
@@ -1065,13 +1226,7 @@ def _layout_signature(placements: Sequence[Placement]) -> tuple[object, ...]:
 
 
 def _placement_identity(value: Placement) -> tuple[object, ...]:
-    return (
-        value.item_id,
-        tuple(round(number, 4) for number in value.rect),
-        value.font_size,
-        value.strategy,
-        value.leader_line,
-    )
+    return placement_signature(value)
 
 
 def _deduplicate_collisions(collisions: Iterable[Collision]) -> list[Collision]:
@@ -1313,6 +1468,8 @@ __all__ = [
     "find_same_row_blank_cells",
     "infer_semantic_region",
     "optimize_layout",
+    "placement_signature",
+    "plan_document_layout",
     "rank_placements",
     "wrap_text",
 ]

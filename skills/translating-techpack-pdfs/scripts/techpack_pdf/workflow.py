@@ -44,6 +44,7 @@ from .models import (
 )
 from .pdf_analysis import PdfManifest, inspect_pdf
 from .review import build_review_html, load_review
+from .review_preview import PreviewPlanningError, plan_review_items
 from .selection import (
     AgentClassification,
     PageClassification,
@@ -1548,6 +1549,7 @@ def _trusted_output(
                 "translation_prompt_version": translation.translator.prompt_version,
                 "placement_strategy": None,
                 "target_rect": None,
+                "reviewed_target_rect": None,
                 "font_size": None,
                 "leader_line": None,
                 "warnings": warnings,
@@ -1562,13 +1564,22 @@ def _trusted_output(
         }
         for page in analysis.pages
     ]
+    try:
+        planned_items = plan_review_items(
+            _snapshot_source_path(directory),
+            [ReviewItem.model_validate(item) for item in items],
+        )
+    except PreviewPlanningError:
+        raise _workflow_error(
+            "trusted_output_invalid", "Trusted candidate output is incomplete"
+        ) from None
     return _TrustedExpectedOutput.model_validate({
         "schema_version": _SCHEMA_VERSION,
         "job_id": job.job_id,
         "parser": analysis.parser,
         "translation_executor": "host_agent",
         "pages": pages,
-        "items": items,
+        "items": planned_items,
         "blocking_issues": [],
     })
 

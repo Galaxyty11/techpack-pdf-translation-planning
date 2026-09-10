@@ -23,9 +23,13 @@ from .selection import LockedText, LockedToken, validate_locked_tokens
 
 
 _TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "assets" / "review-template.html"
+_SCRIPT_PATH = Path(__file__).resolve().parents[2] / "assets" / "review-ui.js"
 _DATA_PLACEHOLDER = "__TECHPACK_REVIEW_DATA__"
+_SCRIPT_PLACEHOLDER = "__TECHPACK_REVIEW_SCRIPT__"
 _PNG_PREFIX = "data:image/png;base64,"
-_MUTABLE_REVIEW_FIELDS = frozenset({"review_status", "reviewed_translation"})
+_MUTABLE_REVIEW_FIELDS = frozenset(
+    {"review_status", "reviewed_translation", "reviewed_target_rect", "reviewed_source_bbox", "reviewed_font_size"}
+)
 _DECISION_EXPLANATIONS = {
     "page_rule": "这段文字属于本页需要翻译的内容。",
     "field_rule": "这段文字属于需要翻译的业务字段。",
@@ -52,6 +56,7 @@ _WARNING_EXPLANATIONS = {
     "native_only_degradation": "本页使用 PDF 原生文字解析，请检查原文是否完整。",
     "coordinate_confidence": "原文位置可能不够准确，请检查左侧红框。",
     "unknown_model": "翻译模型信息不完整，请人工核对译文。",
+    "manual_placement_required": "系统没有找到完全安全的位置，请把红色译文拖到页面空白处。",
 }
 _PAGE_TYPE_LABELS = {
     "general_info": "基本信息",
@@ -100,11 +105,25 @@ def build_review_html(job: JobManifest, output: Any) -> str:
             "pages": pages,
         }
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        encoded = encoded.replace("<", "\\u003c").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+        encoded = (
+            encoded.replace("<", "\\u003c")
+            .replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029")
+        )
         template = _TEMPLATE_PATH.read_text(encoding="utf-8")
+        controller = _SCRIPT_PATH.read_text(encoding="utf-8")
         if template.count(_DATA_PLACEHOLDER) != 1:
             raise ValueError("review template data placeholder is invalid")
-        return template.replace(_DATA_PLACEHOLDER, encoded)
+        if template.count(_SCRIPT_PLACEHOLDER) != 1:
+            raise ValueError("review template script placeholder is invalid")
+        replacements = [
+            (template.index(_DATA_PLACEHOLDER), _DATA_PLACEHOLDER, encoded),
+            (template.index(_SCRIPT_PLACEHOLDER), _SCRIPT_PLACEHOLDER, controller),
+        ]
+        rendered = template
+        for offset, placeholder, value in sorted(replacements, reverse=True):
+            rendered = rendered[:offset] + value + rendered[offset + len(placeholder) :]
+        return rendered
     except TechpackError:
         raise
     except (OSError, TypeError, ValueError, ValidationError) as exc:
@@ -249,7 +268,11 @@ def load_review(
         payload = json.loads(review_path.read_text(encoding="utf-8"))
         _validate_review_timestamp(payload)
         review = ReviewDocument.model_validate(payload)
-    except (OSError, TypeError, json.JSONDecodeError, ValidationError):
+    except ValidationError as error:
+        if _has_reviewed_target_rect_error(error):
+            _fail("review_target_invalid", "人工译文位置无效，请重新导出审核结果")
+        _fail("review_schema_invalid", "Review JSON does not match schema 1.1")
+    except (OSError, TypeError, json.JSONDecodeError):
         _fail("review_schema_invalid", "Review JSON does not match schema 1.1")
 
     source_hash = _current_hash(source_path, "source")
@@ -275,6 +298,22 @@ def load_review(
     if review.glossary.sha256 != manifest.glossary.sha256 or review.glossary.sha256 != glossary_hash:
         _fail("review_glossary_hash_mismatch", "Review glossary hash does not match")
     _validate_item_binding(review.items, trusted_items)
+    trusted_items_by_id = {item.item_id: item for item in trusted_items}
+    moved_items = [item for item in review.items if item.reviewed_target_rect is not None or item.reviewed_source_bbox is not None]
+    if moved_items:
+        try:
+            page_rects = {
+                page["page_index"]: pymupdf.Rect(0, 0, page["width"], page["height"])
+                for page in _pages(raw_expected_output, load_thumbnails=False)
+            }
+        except (TypeError, ValueError, RuntimeError):
+            _fail("review_job_invalid", "Review job binding is invalid")
+    for item in moved_items:
+        if item.reviewed_source_bbox is not None and not page_rects[item.page_index].contains(pymupdf.Rect(item.reviewed_source_bbox)):
+            _fail("review_source_rect_invalid", "重新框选的原文位置超出页面，请重新调整")
+        _validate_reviewed_target_rect(
+            item, trusted_items_by_id[item.item_id], page_rects[item.page_index]
+        )
     _validate_pipeline(review, trusted_pipeline)
     if review.blocking_issues != trusted_blocking_issues:
         _fail("review_blocking_mismatch", "Review blocking issues do not match the job")
@@ -403,6 +442,9 @@ def _items(output: dict[str, Any]) -> list[dict[str, Any]]:
         for item in items:
             item["review_status"] = None
             item["reviewed_translation"] = None
+            item["reviewed_target_rect"] = None
+            item["reviewed_source_bbox"] = None
+            item["reviewed_font_size"] = None
         return items
 
     candidates = output.get("candidates")
@@ -458,6 +500,7 @@ def _items(output: dict[str, Any]) -> list[dict[str, Any]]:
                 "translation_prompt_version": translator.get("prompt_version"),
                 "placement_strategy": candidate.get("placement_strategy"),
                 "target_rect": candidate.get("target_rect"),
+                "reviewed_target_rect": None,
                 "font_size": candidate.get("font_size"),
                 "leader_line": candidate.get("leader_line"),
                 "warnings": risks,
@@ -466,7 +509,9 @@ def _items(output: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
-def _pages(output: dict[str, Any]) -> list[dict[str, Any]]:
+def _pages(
+    output: dict[str, Any], *, load_thumbnails: bool = True
+) -> list[dict[str, Any]]:
     raw_pages = output.get("pages")
     if raw_pages is None and "thumbnails" in output:
         raw_pages = [
@@ -490,7 +535,9 @@ def _pages(output: dict[str, Any]) -> list[dict[str, Any]]:
                 "page_index": int(page.get("page_index", position)),
                 "width": float(width) if width is not None else None,
                 "height": float(height) if height is not None else None,
-                "thumbnail": _thumbnail_data_uri(thumbnail),
+                "thumbnail": (
+                    _thumbnail_data_uri(thumbnail) if load_thumbnails else thumbnail
+                ),
             }
         )
     return pages
@@ -569,6 +616,39 @@ def _validate_item_binding(
         )
         if actual != expected:
             _fail("review_item_mismatch", "Review item content does not match the job")
+
+
+def _validate_reviewed_target_rect(
+    item: ReviewItem, trusted: ReviewItem, page_rect: pymupdf.Rect
+) -> None:
+    moved = item.reviewed_target_rect
+    if moved is None:
+        return
+    original = trusted.target_rect
+    if original is None:
+        _fail("review_target_invalid", "人工译文位置无效，请重新导出审核结果")
+    moved_rect = pymupdf.Rect(moved)
+    original_rect = pymupdf.Rect(original)
+    if not page_rect.contains(moved_rect):
+        _fail("review_target_invalid", "人工译文位置超出页面，请重新调整")
+    if (
+        abs(moved_rect.width - original_rect.width) > 0.1
+        or abs(moved_rect.height - original_rect.height) > 0.1
+    ):
+        _fail("review_target_invalid", "人工译文框大小已改变，请重新导出审核结果")
+
+
+def _has_reviewed_target_rect_error(error: ValidationError) -> bool:
+    for detail in error.errors():
+        location = detail["loc"]
+        if (
+            len(location) >= 3
+            and location[0] == "items"
+            and isinstance(location[1], int)
+            and location[2] == "reviewed_target_rect"
+        ):
+            return True
+    return False
 
 
 def _validate_review_timestamp(payload: Any) -> None:
