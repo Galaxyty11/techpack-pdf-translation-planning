@@ -20,7 +20,7 @@ from .selection import Candidate, LockedText, LockedToken, validate_locked_token
 
 TranslationMode = Literal["direct", "faithful_digest"]
 _SCHEMA_VERSION = "1.1"
-_STABLE_ITEM_ID = re.compile(r"^p[0-9]{3}-i[0-9]{3}$")
+_STABLE_ITEM_ID = re.compile(r"^p[0-9]{3}-i[0-9]{3,}$")
 _SHA256 = r"^[0-9a-f]{64}$"
 
 

@@ -15,8 +15,10 @@ import pytest
 from pydantic import ValidationError
 
 from techpack_pdf.errors import TechpackError
+from techpack_pdf.review import load_review
+from techpack_pdf.review_preview import PreviewPlanningError
 import techpack_pdf.workflow as workflow
-from techpack_pdf.workflow import analyze, apply, prepare_review
+from techpack_pdf.workflow import analyze, apply, prepare_review, refresh_review
 from techpack_pdf.models import CoordinateConfidence
 
 
@@ -35,6 +37,49 @@ class _MinerUFixture:
                         }
                     ],
                 }
+            ]
+        }
+
+
+class _ManyNodesMinerUFixture:
+    def parse_or_degrade(self, _source, _manifest):
+        return {
+            "pages": [
+                {
+                    "page_index": 0,
+                    "title": "BOM",
+                    "nodes": [
+                        {
+                            "text": f"Component {index} mm",
+                            "bbox": [72, 72, 150, 86],
+                            "field_role": "body",
+                        }
+                        for index in range(1, 1001)
+                    ],
+                }
+            ]
+        }
+
+
+class _FivePageMinerUFixture:
+    def parse_or_degrade(self, _source, _manifest):
+        return {
+            "pages": [
+                {
+                    "page_index": page_index,
+                    "title": "BOM",
+                    "nodes": [
+                        {
+                            "text": f"Shell {measurement} mm",
+                            "bbox": [72, 72 + row * 30, 160, 86 + row * 30],
+                            "field_role": "body",
+                        }
+                        for row, measurement in enumerate(
+                            (10, 11) if page_index == 0 else (11 + page_index,)
+                        )
+                    ],
+                }
+                for page_index in range(5)
             ]
         }
 
@@ -169,6 +214,18 @@ def _two_page_techpack_pdf(path):
     document.close()
 
 
+def _five_page_techpack_pdf(path):
+    document = pymupdf.open()
+    for page_index in range(5):
+        page = document.new_page()
+        page.insert_text((72, 58), "BOM")
+        measurements = (10, 11) if page_index == 0 else (11 + page_index,)
+        for row, measurement in enumerate(measurements):
+            page.insert_text((72, 82 + row * 30), f"Shell {measurement} mm")
+    document.save(path)
+    document.close()
+
+
 def _dnt_techpack_pdf(path):
     document = pymupdf.open()
     page = document.new_page()
@@ -234,6 +291,39 @@ def _response_for_all(request, *, attempt=0):
     return payload
 
 
+def _response_for_five_pages(request):
+    payload = {
+        key: request[key]
+        for key in (
+            "schema_version",
+            "job_id",
+            "source_sha256",
+            "glossary_sha256",
+            "request_sha256",
+        )
+    }
+    payload["attempt"] = 0
+    payload["items"] = [
+        {
+            "item_id": item["item_id"],
+            "translated_text": f"大身 {' '.join(item['locked_tokens'])}",
+            "preserved_tokens": item["locked_tokens"],
+            "glossary_terms_used": ["Shell"],
+            "mode": "direct",
+            "warnings": [],
+            "translator": {
+                "host": "codex",
+                "execution_mode": "main_agent",
+                "model": "unknown",
+                "agent_role": "techpack-translator",
+                "prompt_version": "1.0",
+            },
+        }
+        for item in request["items"]
+    ]
+    return payload
+
+
 def _classification_response(request, *, page_type="bom", confidence=0.95, evidence=None):
     return {
         key: request[key]
@@ -262,6 +352,8 @@ def _write_approved_review(job_dir):
     assert match is not None
     review = json.loads(match.group(1))
     review.pop("pages")
+    review.pop("business_explanations")
+    review.pop("review_navigation")
     for item in review["items"]:
         item["review_status"] = "approved"
         item["reviewed_translation"] = None
@@ -307,6 +399,28 @@ def test_analyze_creates_an_isolated_translation_request_and_waits_for_host(tmp_
         }
     ]
     assert not (result.job_dir / "translation-response.json").exists()
+
+
+def test_analyze_preserves_stable_ids_beyond_999_candidates(tmp_path):
+    source = tmp_path / "techpack.pdf"
+    glossary = tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+
+    result = analyze(
+        source,
+        glossary,
+        tmp_path / "jobs",
+        mineru_client=_ManyNodesMinerUFixture(),
+    )
+
+    assert (result.exit_code, result.state) == (4, "translation_requested")
+    request = json.loads(
+        (result.job_dir / "translation-request.json").read_text(encoding="utf-8")
+    )
+    item_ids = [item["item_id"] for item in request["items"]]
+    assert len(item_ids) == len(set(item_ids)) == 1000
+    assert "p001-i1000" in item_ids
 
 
 def test_analysis_accepts_empty_target_only_for_do_not_translate_hit(tmp_path):
@@ -677,6 +791,176 @@ def test_prepare_review_waits_for_response_then_creates_offline_review(tmp_path)
     assert (prepared.exit_code, prepared.state) == (4, "review_ready")
     assert "__TECHPACK_REVIEW_DATA__" not in (analyzed.job_dir / "review.html").read_text(encoding="utf-8")
     assert json.loads((analyzed.job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "review_ready"
+
+
+def test_prepare_review_persists_identical_trusted_preview_layout_in_html(tmp_path):
+    source = tmp_path / "techpack.pdf"
+    glossary = tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(
+        source,
+        glossary,
+        tmp_path / "jobs",
+        now=datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc),
+        mineru_client=_MinerUFixture(),
+    )
+    request = json.loads(
+        (job.job_dir / "translation-request.json").read_text(encoding="utf-8")
+    )
+    (job.job_dir / "translation-response.json").write_text(
+        json.dumps(_response_for(request), ensure_ascii=False), encoding="utf-8"
+    )
+
+    assert prepare_review(job.job_dir).state == "review_ready"
+
+    expected = json.loads(
+        (job.job_dir / "expected-output.json").read_text(encoding="utf-8")
+    )["output"]["items"][0]
+    match = re.search(
+        r'<script id="review-data" type="application/json">(.*?)</script>',
+        (job.job_dir / "review.html").read_text(encoding="utf-8"),
+        re.S,
+    )
+    assert match is not None
+    embedded = json.loads(match.group(1))["items"][0]
+    assert expected["target_rect"] is not None
+    assert expected["font_size"] is not None
+    assert embedded["target_rect"] == expected["target_rect"]
+    assert embedded["font_size"] == expected["font_size"]
+    assert embedded["placement_strategy"] == expected["placement_strategy"]
+
+
+def test_prepared_moved_review_loads_with_job_relative_thumbnail(tmp_path):
+    source = tmp_path / "techpack.pdf"
+    glossary = tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job_result = analyze(
+        source,
+        glossary,
+        tmp_path / "jobs",
+        now=datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc),
+        mineru_client=_MinerUFixture(),
+    )
+    request = json.loads(
+        (job_result.job_dir / "translation-request.json").read_text(encoding="utf-8")
+    )
+    (job_result.job_dir / "translation-response.json").write_text(
+        json.dumps(_response_for(request), ensure_ascii=False), encoding="utf-8"
+    )
+    assert prepare_review(job_result.job_dir).state == "review_ready"
+    expected = json.loads(
+        (job_result.job_dir / "expected-output.json").read_text(encoding="utf-8")
+    )["output"]
+    assert expected["pages"][0]["thumbnail"] == "thumbnails\\page-0001.png"
+    match = re.search(
+        r'<script id="review-data" type="application/json">(.*?)</script>',
+        (job_result.job_dir / "review.html").read_text(encoding="utf-8"),
+        re.S,
+    )
+    assert match is not None
+    payload = json.loads(match.group(1))
+    payload.pop("pages")
+    payload.pop("business_explanations")
+    payload.pop("review_navigation")
+    item = payload["items"][0]
+    original = item["target_rect"]
+    moved = [original[0], original[1] + 24.0, original[2], original[3] + 24.0]
+    item["review_status"] = "approved"
+    item["reviewed_target_rect"] = moved
+    payload["review_completed_at"] = "2026-08-22T12:01:00+00:00"
+    review_path = job_result.job_dir / "review.json"
+    review_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    loaded = load_review(review_path, workflow._load_job(job_result.job_dir), expected)
+
+    assert loaded.items[0].reviewed_target_rect == moved
+
+
+def test_prepare_review_sanitizes_missing_trusted_preview_placement(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "techpack.pdf"
+    glossary = tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(
+        source,
+        glossary,
+        tmp_path / "jobs",
+        now=datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc),
+        mineru_client=_MinerUFixture(),
+    )
+    request = json.loads(
+        (job.job_dir / "translation-request.json").read_text(encoding="utf-8")
+    )
+    (job.job_dir / "translation-response.json").write_text(
+        json.dumps(_response_for(request), ensure_ascii=False), encoding="utf-8"
+    )
+
+    def fail_planning(_source_pdf, _items):
+        raise PreviewPlanningError("sensitive planner detail")
+
+    monkeypatch.setattr(workflow, "plan_review_items", fail_planning)
+
+    with pytest.raises(TechpackError) as caught:
+        prepare_review(job.job_dir)
+
+    assert caught.value.code == "trusted_output_invalid"
+    assert caught.value.details == {"error_code": "trusted_output_invalid"}
+    assert "sensitive planner detail" not in str(caught.value)
+    assert not (job.job_dir / "expected-output.json").exists()
+
+
+def test_refresh_review_rebuilds_bound_html_and_updates_its_state_digest(
+    tmp_path, monkeypatch
+):
+    source, glossary = tmp_path / "techpack.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(
+        source,
+        glossary,
+        tmp_path / "jobs",
+        now=datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc),
+        mineru_client=_MinerUFixture(),
+    )
+    request = json.loads(
+        (job.job_dir / "translation-request.json").read_text(encoding="utf-8")
+    )
+    (job.job_dir / "translation-response.json").write_text(
+        json.dumps(_response_for(request), ensure_ascii=False), encoding="utf-8"
+    )
+    assert prepare_review(job.job_dir).state == "review_ready"
+    before_state = json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))
+    before_expected = (job.job_dir / "expected-output.json").read_bytes()
+
+    import techpack_pdf.review as review_module
+
+    refreshed_template = tmp_path / "review-template.html"
+    refreshed_template.write_text(
+        review_module._TEMPLATE_PATH.read_text(encoding="utf-8").replace(
+            "<title>TechPack 翻译审核</title>",
+            "<title>TechPack 翻译审核 · 已刷新</title>",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(review_module, "_TEMPLATE_PATH", refreshed_template)
+
+    result = refresh_review(job.job_dir)
+
+    refreshed = (job.job_dir / "review.html").read_bytes()
+    after_state = json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))
+    assert (result.exit_code, result.state, result.wait_reason) == (
+        4,
+        "review_ready",
+        "human_review",
+    )
+    assert "已刷新" in refreshed.decode("utf-8")
+    assert (job.job_dir / "expected-output.json").read_bytes() == before_expected
+    assert after_state["revision"] == before_state["revision"] + 1
+    assert after_state["artifacts"]["review_html"] == hashlib.sha256(refreshed).hexdigest()
 
 
 def test_invalid_initial_response_creates_one_correction_then_attempt_one_can_recover(tmp_path):
@@ -1249,6 +1533,44 @@ def test_review_json_is_bounded_and_rejects_descriptor_identity_change(tmp_path,
     monkeypatch.setattr(workflow.os, "fstat", changed_identity)
     with pytest.raises(TechpackError) as caught:
         workflow._bounded_binary_read(review)
+    assert caught.value.code == "workflow_artifact_invalid"
+
+
+def test_review_html_digest_streams_beyond_the_json_artifact_limit(tmp_path, monkeypatch):
+    job = tmp_path / "job"
+    job.mkdir()
+    monkeypatch.setattr(workflow, "_MAX_JSON_BYTES", 64)
+    review_html = job / "review.html"
+    review_bytes = b"<html>" + (b"x" * 256) + b"</html>"
+    review_html.write_bytes(review_bytes)
+    (job / "analysis.json").write_bytes(b"{" + (b"x" * 256))
+
+    assert workflow._sha256_artifact(job, "review.html") == hashlib.sha256(review_bytes).hexdigest()
+    with pytest.raises(TechpackError) as caught:
+        workflow._sha256_artifact(job, "analysis.json")
+    assert caught.value.code == "workflow_artifact_invalid"
+
+
+def test_streamed_review_html_digest_rejects_descriptor_identity_change(tmp_path, monkeypatch):
+    job = tmp_path / "job"
+    job.mkdir()
+    (job / "review.html").write_text("<html>review</html>", encoding="utf-8")
+    original_fstat = workflow.os.fstat
+    calls = 0
+
+    def changed_identity(descriptor):
+        nonlocal calls
+        details = original_fstat(descriptor)
+        calls += 1
+        if calls == 2:
+            values = {name: getattr(details, name) for name in dir(details) if name.startswith("st_")}
+            values["st_mtime_ns"] += 1
+            return SimpleNamespace(**values)
+        return details
+
+    monkeypatch.setattr(workflow.os, "fstat", changed_identity)
+    with pytest.raises(TechpackError) as caught:
+        workflow._sha256_artifact(job, "review.html")
     assert caught.value.code == "workflow_artifact_invalid"
 
 
@@ -1939,6 +2261,96 @@ def test_real_approved_review_applies_editable_freetext_and_writes_bound_success
     report = json.loads((job.job_dir / "apply-result.json").read_text(encoding="utf-8"))
     assert report["status"] == "succeeded"
     assert report["output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()
+
+
+def test_five_page_review_export_preserves_edited_translation_and_moved_rectangle(
+    tmp_path,
+):
+    source = tmp_path / "five-page.pdf"
+    glossary = tmp_path / "terms.csv"
+    _five_page_techpack_pdf(source)
+    _glossary(glossary)
+    job_result = analyze(
+        source,
+        glossary,
+        tmp_path / "jobs",
+        now=datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc),
+        mineru_client=_FivePageMinerUFixture(),
+    )
+    request = json.loads(
+        (job_result.job_dir / "translation-request.json").read_text(encoding="utf-8")
+    )
+    (job_result.job_dir / "translation-response.json").write_text(
+        json.dumps(_response_for_five_pages(request), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    prepared = prepare_review(job_result.job_dir)
+
+    assert prepared.state == "review_ready"
+    expected = json.loads(
+        (job_result.job_dir / "expected-output.json").read_text(encoding="utf-8")
+    )["output"]
+    assert len(expected["pages"]) == 5
+    assert sum(item["page_index"] == 0 for item in expected["items"]) == 2
+    assert all(
+        item["target_rect"] is not None and item["font_size"] is not None
+        for item in expected["items"]
+    )
+
+    match = re.search(
+        r'<script id="review-data" type="application/json">(.*?)</script>',
+        (job_result.job_dir / "review.html").read_text(encoding="utf-8"),
+        re.S,
+    )
+    assert match is not None
+    review_payload = json.loads(match.group(1))
+    assert [item["target_rect"] for item in review_payload["items"]] == [
+        item["target_rect"] for item in expected["items"]
+    ]
+    review_payload.pop("pages")
+    review_payload.pop("business_explanations")
+    review_payload.pop("review_navigation")
+    for item in review_payload["items"]:
+        item["review_status"] = "approved"
+        item["reviewed_translation"] = None
+    edited = review_payload["items"][-1]
+    original = edited["target_rect"]
+    moved = [original[0], original[1] + 24.0, original[2], original[3] + 24.0]
+    edited["review_status"] = "approved_edited"
+    edited["reviewed_translation"] = "大身修订 15 mm"
+    edited["reviewed_target_rect"] = moved
+    review_payload["review_completed_at"] = "2026-08-22T12:01:00+00:00"
+    review_path = job_result.job_dir / "review.json"
+    review_path.write_text(
+        json.dumps(review_payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+    loaded = load_review(review_path, workflow._load_job(job_result.job_dir), expected)
+
+    assert loaded.items[-1].reviewed_translation == "大身修订 15 mm"
+    assert loaded.items[-1].reviewed_target_rect == moved
+    output = source.with_name(source.name + ".annotated.pdf")
+    result = apply(source, review_path, output)
+    assert (result.exit_code, result.state) == (0, "succeeded"), result
+
+    document = pymupdf.open(output)
+    try:
+        page = document[4]
+        page_annotations = list(page.annots())
+        output_annotation = next(
+            annotation
+            for annotation in page_annotations
+            if json.loads(annotation.info["subject"])["item_id"] == edited["item_id"]
+        )
+        assert output_annotation.type[1] == "FreeText"
+        assert output_annotation.info["content"] == "大身修订 15 mm"
+        assert output_annotation.rect.x0 == pytest.approx(moved[0], abs=0.1)
+        assert output_annotation.rect.y0 == pytest.approx(moved[1], abs=0.1)
+        assert output_annotation.rect.x1 == pytest.approx(moved[2], abs=0.1)
+        assert output_annotation.rect.y1 == pytest.approx(moved[3], abs=0.1)
+    finally:
+        document.close()
 
 
 def test_lightweight_integrity_creates_no_secret_or_external_trust_artifact(tmp_path):

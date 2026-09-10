@@ -1,5 +1,6 @@
 """Strict version 1.1 payload contracts shared by the TechPack workflow."""
 
+import math
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -127,7 +128,12 @@ class ReviewItem(StrictModel):
     translation_prompt_version: str = Field(min_length=1)
     placement_strategy: str | None = None
     target_rect: list[float] | None = Field(default=None, min_length=4, max_length=4)
+    reviewed_target_rect: list[float] | None = Field(
+        default=None, min_length=4, max_length=4
+    )
     font_size: float | None = Field(default=None, gt=0)
+    reviewed_source_bbox: list[float] | None = Field(default=None, min_length=4, max_length=4)
+    reviewed_font_size: float | None = Field(default=None, ge=5, le=24, allow_inf_nan=False)
     leader_line: list[float] | None = None
     warnings: list[str] = Field(default_factory=list)
 
@@ -145,6 +151,19 @@ class ReviewItem(StrictModel):
             raise ValueError(
                 "translation_agent_role must be nonblank and have no surrounding whitespace"
             )
+        return value
+
+    @field_validator("reviewed_target_rect", "reviewed_source_bbox")
+    @classmethod
+    def reviewed_target_rect_is_finite_and_nonempty(
+        cls, value: list[float] | None
+    ) -> list[float] | None:
+        if value is None:
+            return None
+        if not all(math.isfinite(number) for number in value):
+            raise ValueError("reviewed_target_rect coordinates must be finite")
+        if value[0] >= value[2] or value[1] >= value[3]:
+            raise ValueError("reviewed_target_rect must have positive width and height")
         return value
 
     @model_validator(mode="after")

@@ -23,8 +23,10 @@ class _HtmlProbe(HTMLParser):
         super().__init__()
         self.scripts: list[dict[str, str | None]] = []
         self.script_text: list[str] = []
+        self.executable_script_text: list[str] = []
         self.ids: set[str] = set()
         self._in_json_script = False
+        self._in_executable_script = False
 
     def handle_starttag(self, tag, attrs) -> None:
         attributes = dict(attrs)
@@ -33,14 +35,18 @@ class _HtmlProbe(HTMLParser):
         if tag == "script":
             self.scripts.append(attributes)
             self._in_json_script = attributes.get("type") == "application/json"
+            self._in_executable_script = not self._in_json_script
 
     def handle_endtag(self, tag) -> None:
         if tag == "script":
             self._in_json_script = False
+            self._in_executable_script = False
 
     def handle_data(self, data) -> None:
         if self._in_json_script:
             self.script_text.append(data)
+        elif self._in_executable_script:
+            self.executable_script_text.append(data)
 
 
 def test_build_review_html_is_offline_and_script_injection_safe(tmp_path) -> None:
@@ -66,6 +72,16 @@ def test_build_review_html_is_offline_and_script_injection_safe(tmp_path) -> Non
         assert forbidden not in lowered
 
 
+def test_build_review_html_keeps_script_placeholder_text_in_review_data(tmp_path) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    placeholder_text = "__TECHPACK_REVIEW_SCRIPT__"
+
+    embedded = _embedded_payload(build_review_html(job, _review_output(placeholder_text)))
+
+    assert embedded["items"][0]["source_text"] == placeholder_text
+    assert embedded["items"][0]["suggested_translation"] == placeholder_text
+
+
 def test_build_review_html_exposes_required_review_controls(tmp_path) -> None:
     job, _source, _glossary = _job(tmp_path)
     html = build_review_html(job, _review_output("Shell 12 mm"))
@@ -80,6 +96,7 @@ def test_build_review_html_exposes_required_review_controls(tmp_path) -> None:
         "issue-filter",
         "item-list",
         "page-thumbnail",
+        "translation-layer",
         "source-highlight",
         "target-highlight",
         "source-text",
@@ -91,6 +108,7 @@ def test_build_review_html_exposes_required_review_controls(tmp_path) -> None:
         "layout-risk",
         "translator-provenance",
         "model-risk",
+        "position-feedback",
         "stats",
         "approve",
         "approve-edited",
@@ -99,6 +117,154 @@ def test_build_review_html_exposes_required_review_controls(tmp_path) -> None:
     } <= probe.ids
     assert "approved_edited" in html
     assert "blocking_issues" in html
+
+
+def test_build_review_html_embeds_controller_for_all_page_items_and_exports_positions(
+    tmp_path,
+) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    output = _review_output("Shell 12 mm")
+    second = deepcopy(output["items"][0])
+    second.update(item_id="p001-i002", suggested_translation="Lining 12 mm")
+    output["items"].append(second)
+
+    html = build_review_html(job, output)
+    probe = _HtmlProbe()
+    probe.feed(html)
+    embedded = json.loads("".join(probe.script_text))
+    controller = "".join(probe.executable_script_text)
+
+    assert [item["item_id"] for item in embedded["items"]] == [
+        "p001-i001",
+        "p001-i002",
+    ]
+    assert "TechpackReviewUI.initReviewPage" in controller
+    assert '"reviewed_target_rect"' in controller
+    assert "完成审核并导出" in html
+
+
+def test_build_review_html_explains_business_fields_without_showing_raw_json(tmp_path) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    output = _review_output("Shell 12 mm")
+    output["items"][0].update(
+        decision_reason="page_rule",
+        coordinate_confidence="high",
+        target_rect=None,
+        risk_level="low",
+        warnings=[],
+    )
+
+    embedded = _embedded_payload(build_review_html(job, output))
+
+    explanation = embedded["business_explanations"]["p001-i001"]
+    assert explanation == {
+        "decision_reason": "这段文字属于本页需要翻译的内容。",
+        "coordinates": [
+            "原文位置：已在左侧预览中用红框标出（定位准确）。",
+            "译文位置：写入 PDF 时自动安排。",
+        ],
+        "layout_risk": {
+            "level": "low",
+            "label": "低风险",
+            "summary": "未发现明显排版问题，通常可以直接审核。",
+            "warnings": [],
+        },
+    }
+    assert embedded["items"][0]["decision_reason"] == "page_rule"
+    assert embedded["items"][0]["source_bbox"] == [10.0, 10.0, 90.0, 20.0]
+    assert embedded["items"][0]["target_rect"] is None
+
+
+def test_build_review_html_turns_layout_warnings_into_plain_chinese(tmp_path) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    output = _review_output("Shell 12 mm")
+    output["items"][0].update(
+        coordinate_confidence="low",
+        risk_level="high",
+        warnings=[
+            "coordinate_confidence",
+            "manual_placement_required",
+            "translator_warning",
+        ],
+    )
+
+    embedded = _embedded_payload(build_review_html(job, output))
+
+    explanation = embedded["business_explanations"]["p001-i001"]
+    assert explanation["coordinates"] == [
+        "原文位置：已在左侧预览中用红框标出（位置可能不准，请重点检查红框）。",
+        "译文位置：已在左侧预览中用蓝框标出。",
+    ]
+    assert explanation["layout_risk"] == {
+        "level": "high",
+        "label": "请重点检查",
+        "summary": "发现可能影响审核或排版的问题，请逐项确认。",
+        "warnings": [
+            "原文位置可能不够准确，请检查左侧红框。",
+            "系统没有找到完全安全的位置，请把红色译文拖到页面空白处。",
+            "翻译过程提示需要人工检查。",
+        ],
+    }
+
+
+def test_build_review_html_groups_items_by_page_and_prioritizes_risk(tmp_path) -> None:
+    job, _source, _glossary = _job(tmp_path, page_count=4)
+    output = _review_output("Low risk on page 1")
+    output["items"][0].update(risk_level="low", page_type="bom")
+    output["items"].extend(
+        [
+            {
+                **_item(1, "approved", text="Low risk on page 2"),
+                "item_id": "p002-i002",
+                "risk_level": "low",
+                "page_type": "construction_detail",
+            },
+            {
+                **_item(1, "approved", text="High risk on page 2"),
+                "item_id": "p002-i001",
+                "risk_level": "high",
+                "page_type": "construction_detail",
+            },
+            {
+                **_item(2, "approved", text="Medium risk on page 3"),
+                "item_id": "p003-i001",
+                "risk_level": "medium",
+                "page_type": "measurement",
+            },
+            {
+                **_item(3, "approved", text="High risk on page 4"),
+                "item_id": "p004-i001",
+                "risk_level": "high",
+                "page_type": "technical_drawing",
+            },
+        ]
+    )
+    output["pages"] = [
+        {
+            "page_index": page_index,
+            "width": 200,
+            "height": 300,
+            "thumbnail": _PNG_DATA_URI,
+        }
+        for page_index in range(4)
+    ]
+    output["pipeline"]["model"] = "unknown"
+
+    embedded = _embedded_payload(build_review_html(job, output))
+
+    navigation = embedded["review_navigation"]
+    assert navigation["default_open_page_index"] == 1
+    assert [group["page_index"] for group in navigation["groups"]] == [1, 3, 2, 0]
+    assert navigation["groups"][0] == {
+        "page_index": 1,
+        "page_number": 2,
+        "page_type": "construction_detail",
+        "page_type_label": "结构细节",
+        "item_ids": ["p002-i001", "p002-i002"],
+        "unreviewed_count": 2,
+        "risk_counts": {"high": 1, "medium": 0, "low": 1},
+        "highest_risk": "high",
+    }
 
 
 def test_build_review_html_rejects_non_png_or_remote_thumbnail(tmp_path) -> None:
@@ -221,6 +387,88 @@ def test_load_review_accepts_explicit_null_role_for_main_agent(tmp_path) -> None
     review = load_review(review_path, job, expected_output)
 
     assert review.items[0].translation_agent_role is None
+
+
+def test_load_review_accepts_position_only_move(tmp_path) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    payload = _review_document(job)
+    payload["items"][0]["target_rect"] = [100.0, 10.0, 180.0, 30.0]
+    payload["items"][0]["reviewed_target_rect"] = [110.0, 20.0, 190.0, 40.0]
+    expected_output = _expected_output(payload)
+    review_path = _write_review(tmp_path, payload)
+
+    review = load_review(review_path, job, expected_output)
+
+    assert review.items[0].reviewed_target_rect == [110.0, 20.0, 190.0, 40.0]
+
+
+def test_load_review_accepts_legacy_review_without_reviewed_target_rect(tmp_path) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    payload = _review_document(job)
+    payload["items"][0].pop("reviewed_target_rect")
+    expected_output = _expected_output(payload)
+    expected_output.pop("pages")
+    review_path = _write_review(tmp_path, payload)
+
+    review = load_review(review_path, job, expected_output)
+
+    assert review.items[0].reviewed_target_rect is None
+
+
+@pytest.mark.parametrize(
+    "rectangle",
+    ([110.0, 20.0, 191.0, 40.0], [-1.0, 20.0, 79.0, 40.0]),
+)
+def test_load_review_rejects_resized_or_out_of_page_move(tmp_path, rectangle) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    payload = _review_document(job)
+    payload["items"][0]["target_rect"] = [100.0, 10.0, 180.0, 30.0]
+    payload["items"][0]["reviewed_target_rect"] = rectangle
+    expected_output = _expected_output(payload)
+    review_path = _write_review(tmp_path, payload)
+
+    with pytest.raises(TechpackError) as caught:
+        load_review(review_path, job, expected_output)
+
+    assert caught.value.to_dict()["code"] == "review_target_invalid"
+
+
+@pytest.mark.parametrize(
+    "rectangle",
+    (
+        [110.0, 20.0, 190.0],
+        [float("nan"), 20.0, 190.0, 40.0],
+        [190.0, 20.0, 110.0, 40.0],
+    ),
+)
+def test_load_review_maps_malformed_reviewed_target_rect_to_target_invalid(
+    tmp_path, rectangle
+) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    payload = _review_document(job)
+    payload["items"][0]["reviewed_target_rect"] = rectangle
+    review_path = _write_review(tmp_path, payload)
+
+    with pytest.raises(TechpackError) as caught:
+        load_review(review_path, job, _expected_output(payload))
+
+    assert caught.value.code == "review_target_invalid"
+
+
+def test_load_review_rejects_move_without_trusted_target_rect(tmp_path) -> None:
+    job, _source, _glossary = _job(tmp_path)
+    payload = _review_document(job)
+    payload["items"][0].update(
+        target_rect=None,
+        reviewed_target_rect=[110.0, 20.0, 190.0, 40.0],
+    )
+    expected_output = _expected_output(payload)
+    review_path = _write_review(tmp_path, payload)
+
+    with pytest.raises(TechpackError) as caught:
+        load_review(review_path, job, expected_output)
+
+    assert caught.value.code == "review_target_invalid"
 
 
 @pytest.mark.parametrize("execution_mode", ["subagent", "mixed"])
@@ -753,6 +1001,7 @@ def _item(page_index: int, status: str, *, text: str) -> dict:
         "translation_prompt_version": "1.0",
         "placement_strategy": "same_region",
         "target_rect": [100.0, 10.0, 180.0, 30.0],
+        "reviewed_target_rect": None,
         "font_size": 6.0,
         "leader_line": None,
         "warnings": [],
@@ -768,11 +1017,29 @@ def _expected_output(payload: dict) -> dict:
         "pipeline": deepcopy(payload["pipeline"]),
         "items": deepcopy(payload["items"]),
         "blocking_issues": deepcopy(payload["blocking_issues"]),
+        "pages": [
+            {
+                "page_index": page_index,
+                "width": 200,
+                "height": 300,
+                "thumbnail": _PNG_DATA_URI,
+            }
+            for page_index in range(
+                max((item["page_index"] for item in payload["items"]), default=-1) + 1
+            )
+        ],
     }
     for item in expected["items"]:
         item["review_status"] = None
         item["reviewed_translation"] = None
+        item["reviewed_target_rect"] = None
     return expected
+
+
+def _write_review(tmp_path, payload: dict):
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(payload), encoding="utf-8")
+    return review_path
 
 
 def _embedded_payload(html: str) -> dict:

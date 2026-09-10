@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import gc
 import json
 import os
 import re
@@ -24,17 +25,17 @@ from .layout import (
     LayoutResult,
     Placement,
     ProtectedGeometry,
-    detect_collisions,
-    detect_candidate_collisions,
     detect_rendered_collisions,
-    extract_protected_geometry,
-    find_same_row_blank_cells,
-    infer_semantic_region,
-    optimize_layout,
-    rank_placements,
+    placement_signature as _placement_signature,
+    plan_document_layout as _layout_document,
 )
 from .errors import TechpackError
-from .models import JobManifest, ReviewDocument, ReviewItem, ReviewStatus
+from .models import (
+    JobManifest,
+    ReviewDocument,
+    ReviewItem,
+    ReviewStatus,
+)
 from .review import load_review
 
 
@@ -434,93 +435,6 @@ def _validate_inputs(
     return None
 
 
-def _layout_document(
-    document: pymupdf.Document,
-    items: Sequence[ReviewItem],
-    *,
-    excluded: set[tuple[object, ...]] | None = None,
-    max_rounds: int = 10,
-) -> tuple[LayoutResult, dict[str, list[Placement]]]:
-    candidates_by_id: dict[str, list[Placement]] = {}
-    initial: list[Placement] = []
-    exhausted: list[Collision] = []
-    by_page: dict[int, list[ReviewItem]] = defaultdict(list)
-    for item in items:
-        by_page[item.page_index].append(item)
-
-    for page_index in sorted(by_page):
-        page = document[page_index]
-        protected = extract_protected_geometry(page)
-        for item in sorted(by_page[page_index], key=lambda value: value.item_id):
-            candidates = rank_placements(
-                item,
-                _canonical_page_rect(page),
-                protected=protected,
-                same_row_cells=find_same_row_blank_cells(page, item.source_bbox),
-                semantic_region=infer_semantic_region(page, item.source_bbox),
-            )
-            if excluded:
-                candidates = [
-                    candidate
-                    for candidate in candidates
-                    if _placement_signature(candidate) not in excluded
-                ]
-            candidates_by_id[item.item_id] = candidates
-            if candidates:
-                initial.append(candidates[0])
-            else:
-                exhausted.append(
-                    Collision(
-                        page_index,
-                        item.item_id,
-                        "candidate_exhausted",
-                        "candidate_set",
-                    )
-                )
-
-    def collision_detector(placements: Sequence[Placement]) -> Sequence[Collision]:
-        collisions: list[Collision] = []
-        grouped: dict[int, list[Placement]] = defaultdict(list)
-        for placement in placements:
-            grouped[placement.page_index].append(placement)
-        for page_index, page_placements in grouped.items():
-            geometric = detect_collisions(
-                document[page_index], page_placements, render_check=False
-            )
-            if geometric:
-                collisions.extend(geometric)
-            else:
-                collisions.extend(
-                    detect_candidate_collisions(
-                        document[page_index], page_placements
-                    )
-                )
-        return collisions
-
-    result = optimize_layout(
-        initial,
-        collision_detector=collision_detector,
-        candidate_provider=lambda placement, _collisions: candidates_by_id[
-            placement.item_id
-        ],
-        max_rounds=max_rounds,
-    )
-    if exhausted:
-        result = LayoutResult(
-            result.placements,
-            tuple(sorted((*result.collisions, *exhausted), key=lambda value: (value.page_index, value.item_id, value.kind))),
-            result.rounds,
-            result.stable,
-            result.attempted_placements,
-        )
-    attempted_by_id: dict[str, list[Placement]] = defaultdict(list)
-    for placement in result.attempted_placements:
-        attempted_by_id[placement.item_id].append(placement)
-    for item in items:
-        attempted_by_id.setdefault(item.item_id, [])
-    return result, dict(attempted_by_id)
-
-
 def _write_annotations(
     document: pymupdf.Document, placements: Sequence[Placement]
 ) -> tuple[_WrittenAnnotation, ...]:
@@ -564,16 +478,6 @@ def _write_annotations(
             )
         )
     return tuple(written)
-
-
-def _placement_signature(placement: Placement) -> tuple[object, ...]:
-    return (
-        placement.item_id,
-        tuple(round(value, 4) for value in placement.rect),
-        placement.font_size,
-        placement.strategy,
-        placement.leader_line,
-    )
 
 
 def _approved_identity_problem(
@@ -635,11 +539,6 @@ def _render_collision_problem(
             for value in collisions
         ],
     )
-
-
-def _canonical_page_rect(page: pymupdf.Page) -> pymupdf.Rect:
-    """Crop-relative, unrotated coordinates used by extraction and annotation APIs."""
-    return pymupdf.Rect(0, 0, page.cropbox.width, page.cropbox.height)
 
 
 def _verify_temp(
@@ -993,7 +892,7 @@ def _appearance_is_valid(
     annotation: pymupdf.Annot,
     expected_font_size: float,
 ) -> bool:
-    if annotation.type[1] != "FreeText" or not 5.0 <= expected_font_size <= 7.0:
+    if annotation.type[1] != "FreeText" or not 5.0 <= expected_font_size <= 24.0:
         return False
     default_appearance = document.xref_get_key(annotation.xref, "DA")[1]
     color_match = re.search(
@@ -1019,16 +918,25 @@ def _appearance_is_valid(
         r"([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+rg",
         appearance_stream,
     )
-    ap_font_match = re.search(
+    ap_font_matches = re.findall(
         r"/([^\s]+)\s+([-+]?\d*\.?\d+)\s+Tf", appearance_stream
     )
-    if ap_color_match is None or ap_font_match is None:
+    if ap_color_match is None or not ap_font_matches:
         return False
     ap_color = tuple(float(ap_color_match.group(index)) for index in (1, 2, 3))
-    resource_name = ap_font_match.group(1)
-    font_xref = _appearance_font_xref(document, appearance_xref, resource_name)
-    if font_xref is None or not _trusted_cjk_font(document, font_xref):
+    trusted_font = next(
+        (
+            (resource, size)
+            for resource, size in ap_font_matches
+            if (xref := _appearance_font_xref(document, appearance_xref, resource))
+            is not None
+            and _trusted_cjk_font(document, xref)
+        ),
+        None,
+    )
+    if trusted_font is None:
         return False
+    resource_name, ap_font_size = trusted_font
     return (
         all(abs(actual - expected) <= 0.005 for actual, expected in zip(color, TEXT_COLOR, strict=True))
         and bool(font_match.group(1))
@@ -1039,7 +947,7 @@ def _appearance_is_valid(
             abs(actual - expected) <= 0.01
             for actual, expected in zip(ap_color, TEXT_COLOR, strict=True)
         )
-        and abs(float(ap_font_match.group(2)) - expected_font_size) <= 0.01
+        and abs(float(ap_font_size) - expected_font_size) <= 0.01
     )
 
 
@@ -1111,12 +1019,20 @@ def _bind_da_to_cjk_appearance(
         raise ValueError("annotation appearance is unavailable")
     appearance_xref = int(appearance_value.split()[0])
     appearance_stream = document.xref_stream(appearance_xref).decode("latin-1")
-    font_match = re.search(r"/([^\s]+)\s+[-+]?\d*\.?\d+\s+Tf", appearance_stream)
-    if font_match is None:
+    font_names = re.findall(r"/([^\s]+)\s+[-+]?\d*\.?\d+\s+Tf", appearance_stream)
+    if not font_names:
         raise ValueError("annotation CJK appearance font is unavailable")
-    name = font_match.group(1)
-    font_xref = _appearance_font_xref(document, appearance_xref, name)
-    if font_xref is None or not _trusted_cjk_font(document, font_xref):
+    name = next(
+        (
+            candidate
+            for candidate in dict.fromkeys(font_names)
+            if (xref := _appearance_font_xref(document, appearance_xref, candidate))
+            is not None
+            and _trusted_cjk_font(document, xref)
+        ),
+        None,
+    )
+    if name is None:
         raise ValueError("annotation CJK appearance font is not trusted")
     document.xref_set_key(
         annotation.xref,
@@ -1197,12 +1113,7 @@ def _write_unresolved_artifacts(
             _write_annotations(rendered, layout.placements)
         except Exception:
             rendered.close()
-            return _ArtifactOutcome(
-                problem=_problem(
-                    "artifact_write_failed",
-                    "Annotated failure evidence could not be constructed",
-                )
-            )
+            rendered = pymupdf.open(stream=document.tobytes(), filetype="pdf")
     else:
         return _ArtifactOutcome(
             problem=_problem("artifact_write_failed", "Failure evidence source is unavailable")
@@ -1212,9 +1123,7 @@ def _write_unresolved_artifacts(
             path = source.with_name(
                 f".{source.name}.unresolved.{artifact_id}.page-{page_index + 1}.png"
             )
-            data = rendered[page_index].get_pixmap(
-                dpi=300, alpha=False, colorspace=pymupdf.csRGB, annots=True
-            ).tobytes("png")
+            data = _render_failure_evidence(rendered[page_index])
             created.append(_atomic_artifact_write(path, data))
             render_paths[page_index] = path
         unresolved = _unresolved(layout, attempted, render_paths)
@@ -1263,6 +1172,35 @@ def _write_unresolved_artifacts(
         )
     finally:
         rendered.close()
+
+
+def _render_failure_evidence(page: pymupdf.Page) -> bytes:
+    last_error: Exception | None = None
+    for dpi in (300, 200, 144):
+        try:
+            return page.get_pixmap(
+                dpi=dpi,
+                alpha=False,
+                colorspace=pymupdf.csRGB,
+                annots=True,
+            ).tobytes("png")
+        except Exception as error:
+            if not _is_memory_pressure(error):
+                raise
+            last_error = error
+            gc.collect()
+    assert last_error is not None
+    raise last_error
+
+
+def _is_memory_pressure(error: Exception) -> bool:
+    if isinstance(error, MemoryError):
+        return True
+    message = str(error).casefold()
+    return any(
+        marker in message
+        for marker in ("out of memory", "cannot allocate", "allocation failed", "malloc")
+    )
 
 
 def _atomic_artifact_write(final_path: Path, data: bytes) -> _OwnedPath:
