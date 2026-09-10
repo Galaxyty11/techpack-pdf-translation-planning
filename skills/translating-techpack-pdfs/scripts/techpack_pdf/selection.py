@@ -39,14 +39,32 @@ _ADMIN_ROLES = frozenset(
         "header_footer",
         "page_number",
         "system_field",
+        "table_header",
         "template_title",
+        "retained_table_value",
     }
 )
 _BOM_ROLES = frozenset(
-    {"body", "material", "composition", "weight", "use", "component", "process_note"}
+    {
+        "body",
+        "material",
+        "composition",
+        "weight",
+        "use",
+        "component",
+        "process_note",
+        "placement",
+    }
 )
 _MEASUREMENT_ROLES = frozenset(
-    {"body", "pom_description", "measurement_instruction", "style_measurement_instruction"}
+    {
+        "body",
+        "pom_description",
+        "measurement_instruction",
+        "style_measurement_instruction",
+        "description",
+        "note",
+    }
 )
 _TECHNICAL_ROLES = frozenset(
     {"body", "production_instruction", "callout", "construction_instruction"}
@@ -62,10 +80,76 @@ _LABEL_PACK_ROLES = frozenset(
     }
 )
 _REVIEW_ROLES = frozenset(
-    {"body", "issue", "conclusion", "exception", "action", "fit_issue", "correction", "caption"}
+    {
+        "body",
+        "issue",
+        "conclusion",
+        "exception",
+        "action",
+        "fit_issue",
+        "correction",
+        "caption",
+        "description",
+        "note",
+    }
 )
 _ACTIONABLE_REVIEW_ROLES = frozenset(
     {"issue", "conclusion", "exception", "action", "fit_issue", "correction"}
+)
+_ADMIN_TEXT_LABELS = frozenset(
+    {
+        "approval status",
+        "base size",
+        "category",
+        "code",
+        "color",
+        "default",
+        "description",
+        "designer",
+        "dimension",
+        "division",
+        "expiration date",
+        "grade rule",
+        "label",
+        "label and pack",
+        "last location",
+        "last location date",
+        "measurement",
+        "measurement type",
+        "part",
+        "quantity",
+        "received on",
+        "request number",
+        "requested on",
+        "required by",
+        "sample id",
+        "sample type",
+        "season",
+        "shipped on",
+        "size",
+        "size class",
+        "sourcing",
+        "stage",
+        "step",
+        "style",
+        "tech designer",
+        "tracking number",
+        "vendor",
+    }
+)
+_ADMIN_EXACT_TEXT_LABELS = frozenset({"fit notes"})
+_ADMIN_PAGE_TITLES = frozenset(
+    {
+        "bill of material",
+        "construction detail",
+        "how to measure guide",
+        "measurement sheet",
+        "sample style review",
+        "style additional images",
+        "style category fields",
+        "style general information",
+        "style sample",
+    }
 )
 
 
@@ -344,7 +428,11 @@ def _is_exact_token_occurrence(text: str, start: int, end: int, value: str) -> b
     normalized_value = normalize_term(value)
     if _is_latin_identifier_char(normalized_value[0]):
         left_base = _preceding_grapheme_base(text, start)
-        if left_base is not None and _is_latin_identifier_char(left_base):
+        if (
+            left_base is not None
+            and _is_latin_identifier_char(left_base)
+            and not _is_mineru_escaped_underscore_boundary(text, start)
+        ):
             return False
     if end < len(text) and unicodedata.combining(text[end]):
         return False
@@ -359,6 +447,17 @@ def _preceding_grapheme_base(text: str, start: int) -> str | None:
     while index >= 0 and unicodedata.combining(text[index]):
         index -= 1
     return text[index] if index >= 0 else None
+
+
+def _is_mineru_escaped_underscore_boundary(text: str, start: int) -> bool:
+    if start < 2 or text[start - 1] != "_":
+        return False
+    backslash_count = 0
+    index = start - 2
+    while index >= 0 and text[index] == "\\":
+        backslash_count += 1
+        index -= 1
+    return backslash_count % 2 == 1
 
 
 def _is_latin_identifier_char(character: str) -> bool:
@@ -428,6 +527,8 @@ def _candidate_decision(
         return False, DecisionReason.LOW_CONFIDENCE
     if not normalized or role in _ADMIN_ROLES:
         return False, DecisionReason.SKIPPED_ADMIN
+    if _is_administrative_text(normalized, role):
+        return False, DecisionReason.SKIPPED_ADMIN
     if classification.page_type in {
         PageType.HOW_TO_MEASURE,
         PageType.CATEGORY_FIELDS,
@@ -439,7 +540,7 @@ def _candidate_decision(
         if role in {"special_note", "production_note", "delivery_note"}:
             return _translate_reason(DecisionReason.FIELD_RULE, text, locked, glossary_hits)
         return False, DecisionReason.SKIPPED_ADMIN
-    if _is_code_only(text, locked):
+    if _is_protected_mark(classification.page_type, role, text) or _is_code_only(text, locked):
         return False, DecisionReason.SKIPPED_CODE
     if duplicate:
         return False, DecisionReason.SKIPPED_DUPLICATE
@@ -461,14 +562,41 @@ def _candidate_decision(
             else DecisionReason.PAGE_RULE
         )
     elif page_type is PageType.CONSTRUCTION_DETAIL and role in {
+        "body",
         "production_instruction",
         "actionable_instruction",
+        "instruction",
     }:
-        base_reason = DecisionReason.FIELD_RULE
+        base_reason = DecisionReason.PAGE_RULE if role == "body" else DecisionReason.FIELD_RULE
 
     if base_reason is None:
         return False, DecisionReason.MANUAL_CANDIDATE
     return _translate_reason(base_reason, text, locked, glossary_hits)
+
+
+def _is_administrative_text(normalized: str, role: str) -> bool:
+    if normalized in _ADMIN_PAGE_TITLES:
+        return True
+    if normalized in _ADMIN_EXACT_TEXT_LABELS:
+        return True
+    if normalized.startswith(":"):
+        return True
+    stripped = normalized.rstrip(":").strip()
+    if stripped in _ADMIN_TEXT_LABELS:
+        return True
+    label, separator, value = normalized.partition(":")
+    label = label.strip()
+    if label == "notes" and not value.strip():
+        return True
+    if label in _ADMIN_TEXT_LABELS:
+        return not (
+            label == "description"
+            and role == "description"
+            and bool(separator and value.strip())
+        )
+    return normalized.endswith(":") and any(
+        normalized.startswith(f"{label} ") for label in {"season"}
+    )
 
 
 def _translate_reason(
@@ -484,7 +612,20 @@ def _translate_reason(
     return True, base_reason
 
 
+def _is_protected_mark(page_type: PageType, role: str, text: str) -> bool:
+    return (
+        page_type is PageType.TECHNICAL_DRAWING
+        and role == "body"
+        and bool(re.fullmatch(r"[A-Z]{2,6}\.", text.strip()))
+    )
+
+
 def _is_code_only(text: str, locked: LockedText) -> bool:
+    if re.fullmatch(
+        r"(?:img|image)[\\/_-]*[a-z0-9][a-z0-9\\/_-]*\.(?:jpe?g|png|tiff?)",
+        normalize_term(text),
+    ):
+        return True
     characters = list(text)
     for token in locked.tokens:
         characters[token.start : token.end] = " " * (token.end - token.start)
@@ -609,7 +750,11 @@ _TOKEN_PATTERNS: tuple[tuple[str, re.Pattern[str], str | None], ...] = (
     ),
     ("percentage", re.compile(r"(?<![A-Za-z0-9_])[+-]?\d+(?:\.\d+)?%(?![A-Za-z0-9_])"), None),
     ("unit", re.compile(r"(?<![A-Za-z0-9_])(?:mm|cm|inch|gsm|oz)(?![A-Za-z0-9_])", re.IGNORECASE), None),
-    ("number", re.compile(r"(?<![A-Za-z0-9_])[+-]?\d+(?:\.\d+)?(?![A-Za-z0-9_])"), None),
+    (
+        "number",
+        re.compile(r"(?:(?<![A-Za-z0-9_])|(?<=\\_))[+-]?\d+(?:\.\d+)?(?![A-Za-z0-9_])"),
+        None,
+    ),
 )
 
 

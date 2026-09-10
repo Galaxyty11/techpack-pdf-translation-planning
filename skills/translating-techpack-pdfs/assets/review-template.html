@@ -17,9 +17,28 @@
     select, textarea { border: 1px solid #b8c2cc; border-radius: 5px; padding: 7px; background: #fff; }
     main { display: grid; grid-template-columns: minmax(240px, 28%) minmax(380px, 44%) minmax(260px, 28%); min-height: calc(100vh - 122px); }
     #item-list { overflow: auto; border-right: 1px solid #d8dee4; background: #fff; padding: 10px; }
+    .page-group { margin: 0 0 10px; border: 1px solid #d8dee4; border-radius: 8px; background: #fff; overflow: hidden; }
+    .page-group[open] { border-color: #b8c2cc; box-shadow: 0 2px 8px #10182812; }
+    .page-group-summary { position: relative; padding: 11px 34px 11px 12px; background: #f8fafc; cursor: pointer; list-style: none; }
+    .page-group-summary::-webkit-details-marker { display: none; }
+    .page-group-summary::after { content: "展开"; position: absolute; top: 13px; right: 11px; color: #667085; font-size: 11px; }
+    .page-group[open] > .page-group-summary::after { content: "收起"; }
+    .page-summary-line { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .page-title { font-size: 15px; }
+    .page-meta { margin-top: 4px; color: #667085; font-size: 12px; }
+    .page-risk-badge, .item-badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 7px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+    .risk-high { background: #fee4e2; color: #b42318; }
+    .risk-medium { background: #fef0c7; color: #b54708; }
+    .risk-low { background: #dcfae6; color: #067647; }
+    .page-items { padding: 8px; border-top: 1px solid #eaecf0; }
     .review-item { display: block; width: 100%; margin: 0 0 7px; padding: 10px; text-align: left; border: 1px solid #d8dee4; border-radius: 6px; background: #fff; color: inherit; cursor: pointer; }
+    .review-item:last-child { margin-bottom: 0; }
     .review-item.active { border-color: #2463a6; box-shadow: 0 0 0 2px #c8ddf3; }
     .review-item[data-risk="high"] { border-left: 5px solid #b42318; }
+    .review-item-heading { display: flex; align-items: center; gap: 5px; }
+    .review-item-status { margin-left: auto; background: #f2f4f7; color: #475467; }
+    .review-item-source { display: block; margin-top: 6px; color: #344054; line-height: 1.35; overflow-wrap: anywhere; }
+    .empty-list { padding: 24px 10px; color: #667085; text-align: center; }
     .viewer { padding: 16px; overflow: auto; }
     .canvas { position: relative; display: inline-block; max-width: 100%; background: #fff; box-shadow: 0 2px 12px #0002; }
     #page-thumbnail { display: block; max-width: 100%; height: auto; }
@@ -39,6 +58,14 @@
     #skip { background: #fff4ed; border-color: #f79009; }
     #export-review { margin-top: 12px; width: 100%; background: #17202a; color: #fff; }
     #model-risk { color: #b42318; font-weight: 700; }
+    .plain-lines { display: grid; gap: 5px; }
+    .plain-lines p { margin: 0; }
+    .risk-box { padding: 9px 10px; border: 1px solid #d0d5dd; border-radius: 6px; background: #f9fafb; }
+    .risk-box[data-risk="low"] { border-color: #6ce9a6; background: #ecfdf3; }
+    .risk-box[data-risk="medium"] { border-color: #fec84b; background: #fffaeb; }
+    .risk-box[data-risk="high"] { border-color: #fda29b; background: #fef3f2; }
+    .risk-label { display: block; margin-bottom: 3px; font-weight: 700; }
+    .risk-warnings { margin: 7px 0 0; padding-left: 20px; }
     @media (max-width: 980px) {
       .filters { grid-template-columns: repeat(2, 1fr); }
       main { grid-template-columns: 1fr; }
@@ -75,9 +102,9 @@
         <dt>审核译文</dt><dd><textarea id="reviewed-translation" aria-label="审核译文"></textarea></dd>
         <dt>锁定 token</dt><dd id="locked-tokens"></dd>
         <dt>术语命中</dt><dd id="glossary-hits"></dd>
-        <dt>选择原因</dt><dd id="decision-reason"></dd>
-        <dt>坐标</dt><dd id="coordinates"></dd>
-        <dt>布局风险</dt><dd id="layout-risk"></dd>
+        <dt>为什么需要翻译</dt><dd id="decision-reason"></dd>
+        <dt>原文与译文位置</dt><dd id="coordinates" class="plain-lines"></dd>
+        <dt>排版提示</dt><dd id="layout-risk"></dd>
         <dt>翻译来源</dt><dd id="translator-provenance"></dd>
         <dt>模型风险</dt><dd id="model-risk"></dd>
       </dl>
@@ -112,20 +139,66 @@
       "export-review"
     ].map((id) => [id, document.getElementById(id)]));
     let selectedId = null;
+    const originalOrder = new Map(data.items.map((item, index) => [item.item_id, index]));
+    const riskOrder = {high: 0, medium: 1, low: 2};
+    const riskLabels = {high: "高风险", medium: "需留意", low: "低风险"};
+    const statusLabels = {
+      unreviewed: "待审核",
+      approved: "已批准",
+      approved_edited: "修改后批准",
+      skipped: "已跳过"
+    };
+    const pageTypeLabels = data.review_navigation.page_type_labels || {};
+    const openPages = new Set();
+    if (data.review_navigation.default_open_page_index !== null) {
+      openPages.add(data.review_navigation.default_open_page_index);
+    }
 
     function text(id, value) {
       elements[id].textContent = value === null || value === undefined ? "—" : String(value);
     }
 
-    function addOption(select, value) {
+    function renderLines(id, lines) {
+      elements[id].replaceChildren();
+      (Array.isArray(lines) ? lines : []).forEach((value) => {
+        const paragraph = document.createElement("p");
+        paragraph.textContent = value;
+        elements[id].appendChild(paragraph);
+      });
+    }
+
+    function renderLayoutRisk(risk) {
+      const box = document.createElement("div");
+      box.className = "risk-box";
+      box.dataset.risk = risk && risk.level ? risk.level : "unknown";
+      const label = document.createElement("span");
+      label.className = "risk-label";
+      label.textContent = risk && risk.label ? risk.label : "请人工检查";
+      const summary = document.createElement("span");
+      summary.textContent = risk && risk.summary ? risk.summary : "请人工确认排版是否合适。";
+      box.append(label, summary);
+      if (risk && Array.isArray(risk.warnings) && risk.warnings.length) {
+        const list = document.createElement("ul");
+        list.className = "risk-warnings";
+        risk.warnings.forEach((warning) => {
+          const item = document.createElement("li");
+          item.textContent = warning;
+          list.appendChild(item);
+        });
+        box.appendChild(list);
+      }
+      elements["layout-risk"].replaceChildren(box);
+    }
+
+    function addOption(select, value, label = value) {
       const option = document.createElement("option");
       option.value = value;
-      option.textContent = value;
+      option.textContent = label;
       select.appendChild(option);
     }
 
     [...new Set(data.items.map((item) => item.page_type))].sort().forEach((value) => {
-      addOption(elements["page-type-filter"], value);
+      addOption(elements["page-type-filter"], value, pageTypeLabels[value] || value);
     });
 
     function itemIssues(item) {
@@ -152,16 +225,116 @@
         && (!issueFilter || issue === issueFilter || issues.includes(issueFilter));
     }
 
+    function itemRiskRank(item) {
+      return Object.hasOwn(riskOrder, item.risk_level) ? riskOrder[item.risk_level] : 3;
+    }
+
+    function prioritizedGroups() {
+      const grouped = new Map();
+      data.items.filter(visible).forEach((item) => {
+        if (!grouped.has(item.page_index)) grouped.set(item.page_index, []);
+        grouped.get(item.page_index).push(item);
+      });
+      const groups = [...grouped.entries()].map(([pageIndex, items]) => {
+        items.sort((left, right) => {
+          const reviewDifference = Number(Boolean(left.review_status)) - Number(Boolean(right.review_status));
+          if (reviewDifference) return reviewDifference;
+          const riskDifference = itemRiskRank(left) - itemRiskRank(right);
+          if (riskDifference) return riskDifference;
+          return originalOrder.get(left.item_id) - originalOrder.get(right.item_id);
+        });
+        const riskCounts = {high: 0, medium: 0, low: 0};
+        items.forEach((item) => {
+          if (Object.hasOwn(riskCounts, item.risk_level)) riskCounts[item.risk_level] += 1;
+        });
+        const highestRisk = [...items].sort((left, right) => itemRiskRank(left) - itemRiskRank(right))[0].risk_level;
+        return {
+          pageIndex,
+          items,
+          riskCounts,
+          highestRisk,
+          unreviewedCount: items.filter((item) => !item.review_status).length,
+          hasUnreviewedHighestRisk: items.some((item) => !item.review_status && item.risk_level === highestRisk)
+        };
+      });
+      groups.sort((left, right) => {
+        const riskDifference = (riskOrder[left.highestRisk] ?? 3) - (riskOrder[right.highestRisk] ?? 3);
+        if (riskDifference) return riskDifference;
+        const reviewDifference = Number(!left.hasUnreviewedHighestRisk) - Number(!right.hasUnreviewedHighestRisk);
+        if (reviewDifference) return reviewDifference;
+        return left.pageIndex - right.pageIndex;
+      });
+      return groups;
+    }
+
+    function riskBadge(risk, count, className) {
+      const badge = document.createElement("span");
+      badge.className = `${className} risk-${risk}`;
+      badge.textContent = `${riskLabels[risk] || "请检查"}${count === null ? "" : ` ${count}`}`;
+      return badge;
+    }
+
     function renderList() {
       elements["item-list"].replaceChildren();
-      data.items.filter(visible).forEach((item) => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "review-item" + (item.item_id === selectedId ? " active" : "");
-        button.dataset.risk = item.risk_level;
-        button.textContent = `${item.item_id} · ${item.page_type} · ${item.review_status || "unreviewed"}`;
-        button.addEventListener("click", () => selectItem(item.item_id));
-        elements["item-list"].appendChild(button);
+      const groups = prioritizedGroups();
+      if (!groups.length) {
+        const empty = document.createElement("p");
+        empty.className = "empty-list";
+        empty.textContent = "当前筛选条件下没有审核项目";
+        elements["item-list"].appendChild(empty);
+        return;
+      }
+      if (!groups.some((group) => openPages.has(group.pageIndex))) {
+        openPages.add(groups[0].pageIndex);
+      }
+      groups.forEach((group) => {
+        const details = document.createElement("details");
+        details.className = "page-group";
+        if (openPages.has(group.pageIndex) || group.items.some((item) => item.item_id === selectedId)) {
+          details.open = true;
+        }
+        const summary = document.createElement("summary");
+        summary.className = "page-group-summary";
+        const summaryLine = document.createElement("div");
+        summaryLine.className = "page-summary-line";
+        const title = document.createElement("strong");
+        title.className = "page-title";
+        title.textContent = `第 ${group.pageIndex + 1} 页`;
+        summaryLine.append(title, riskBadge(group.highestRisk, group.riskCounts[group.highestRisk], "page-risk-badge"));
+        const meta = document.createElement("div");
+        meta.className = "page-meta";
+        const pageType = group.items[0].page_type;
+        const progress = group.unreviewedCount ? `待审核 ${group.unreviewedCount} 项` : "本页已审核";
+        meta.textContent = `${progress} · ${pageTypeLabels[pageType] || pageType}`;
+        summary.append(summaryLine, meta);
+        const itemList = document.createElement("div");
+        itemList.className = "page-items";
+        group.items.forEach((item) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "review-item" + (item.item_id === selectedId ? " active" : "");
+          button.dataset.risk = item.risk_level;
+          button.title = item.item_id;
+          const heading = document.createElement("span");
+          heading.className = "review-item-heading";
+          heading.appendChild(riskBadge(item.risk_level, null, "item-badge"));
+          const status = document.createElement("span");
+          status.className = "item-badge review-item-status";
+          status.textContent = statusLabels[item.review_status || "unreviewed"] || "待审核";
+          heading.appendChild(status);
+          const source = document.createElement("span");
+          source.className = "review-item-source";
+          source.textContent = item.source_text || "（无原文）";
+          button.append(heading, source);
+          button.addEventListener("click", () => selectItem(item.item_id));
+          itemList.appendChild(button);
+        });
+        details.append(summary, itemList);
+        details.addEventListener("toggle", () => {
+          if (details.open) openPages.add(group.pageIndex);
+          else openPages.delete(group.pageIndex);
+        });
+        elements["item-list"].appendChild(details);
       });
     }
 
@@ -182,6 +355,7 @@
       selectedId = itemId;
       const item = data.items.find((candidate) => candidate.item_id === itemId);
       if (!item) return;
+      openPages.add(item.page_index);
       const page = data.pages.find((candidate) => candidate.page_index === item.page_index);
       if (page) {
         elements["page-thumbnail"].src = page.thumbnail;
@@ -196,9 +370,10 @@
       elements["reviewed-translation"].value = item.reviewed_translation || item.suggested_translation || "";
       text("locked-tokens", JSON.stringify(item.locked_tokens || []));
       text("glossary-hits", JSON.stringify(item.glossary_hits || []));
-      text("decision-reason", item.decision_reason);
-      text("coordinates", JSON.stringify({source_bbox: item.source_bbox, target_rect: item.target_rect}));
-      text("layout-risk", JSON.stringify({risk_level: item.risk_level, warnings: item.warnings || []}));
+      const explanation = data.business_explanations[item.item_id] || {};
+      text("decision-reason", explanation.decision_reason || "系统已选中这段文字，请人工确认。");
+      renderLines("coordinates", explanation.coordinates || ["请人工检查原文和译文位置。"]);
+      renderLayoutRisk(explanation.layout_risk);
       text("translator-provenance", [
         item.translation_host, item.translation_execution_mode, item.translation_model,
         item.translation_agent_role, item.translation_prompt_version
@@ -283,7 +458,8 @@
     elements.skip.addEventListener("click", () => setStatus("skipped"));
     elements["export-review"].addEventListener("click", exportReview);
     renderAll();
-    if (data.items.length) selectItem(data.items[0].item_id);
+    const initialGroups = prioritizedGroups();
+    if (initialGroups.length) selectItem(initialGroups[0].items[0].item_id);
   </script>
 </body>
 </html>

@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.1",
+  "job_id": "92f9b7d7c014-20260827T072412Z",
+  "source_sha256": "92f9b7d7c014b240074e4c38ccd834e210036764502588da8861be3ee57e842c",
+  "glossary_sha256": "a7825211ce2f9243ad6e252a84af46a75ec09bc4ad3b2a411574b181ffc6ac7a",
+  "request_sha256": "bab77991de641bcc1e36b8acd70099c56465482988eac0d5ac6eb7bb5d49a05c",
+  "attempt": 0,
+  "items": [
+    {
+      "item_id": "p001-i001",
+      "source_text": "Use AcmeTex fabric",
+      "context": "body",
+      "locked_tokens": [
+        "AcmeTex"
+      ],
+      "glossary_terms": [
+        {
+          "source_term": "AcmeTex",
+          "target_term": ""
+        }
+      ],
+      "page_type": "bom",
+      "mode": "direct"
+    }
+  ]
+}

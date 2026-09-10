@@ -80,7 +80,7 @@ _TRANSITIONS = {
     "parsed": {"translation_requested", "failed"},
     "translation_requested": {"translation_requested", "translation_validated", "failed"},
     "translation_validated": {"review_ready", "failed"},
-    "review_ready": {"review_completed", "failed"},
+    "review_ready": {"review_ready", "review_completed", "failed"},
     "review_completed": {"applying", "failed"}, "applying": {"applying", "succeeded", "failed"},
     "succeeded": set(), "failed": set(),
 }
@@ -219,7 +219,7 @@ class _GlossaryHitSnapshot(_StrictModel):
 
 
 class _CandidateSnapshot(_StrictModel):
-    item_id: str = Field(pattern=r"^p[0-9]{3}-i[0-9]{3}$")
+    item_id: str = Field(pattern=r"^p[0-9]{3}-i[0-9]{3,}$")
     page_index: int = Field(ge=0)
     page_type: PageType
     classification_confidence: float = Field(ge=0, le=1)
@@ -569,6 +569,89 @@ def _prepare_review_locked(job_dir: str | Path) -> WorkflowResult:
     _atomic_text_write(directory / "review.html", build_review_html(job, html_output))
     _write_state(directory, job, WorkflowState.REVIEW_READY, state.revision + 1, state.expected_attempt, "human_review")
     return WorkflowResult(4, WorkflowState.REVIEW_READY, directory)
+
+
+def refresh_review(job_dir: str | Path) -> WorkflowResult:
+    """Rebuild only the offline review page from its bound trusted snapshot."""
+    directory = _job_directory(job_dir)
+    try:
+        with _job_lock(directory):
+            return _refresh_review_locked(directory)
+    except _WorkflowBusy:
+        return WorkflowResult(
+            4,
+            None,
+            directory,
+            status="workflow_busy",
+            wait_reason="concurrent_operation",
+        )
+
+
+def _refresh_review_locked(job_dir: str | Path) -> WorkflowResult:
+    directory = _job_directory(job_dir)
+    job = _load_job(directory)
+    state = _load_state(directory, job)
+    _verify_bound_inputs(directory, job)
+    if state.state is not WorkflowState.REVIEW_READY:
+        raise _workflow_error(
+            "workflow_state_conflict",
+            "Job review page cannot be refreshed from its current state",
+        )
+    if _artifact_exists(directory, _TRUSTED_REVIEW_NAME):
+        raise _workflow_error(
+            "workflow_state_conflict",
+            "Job review page cannot be refreshed after review publication has started",
+        )
+
+    expected = _load_model(directory, "expected-output.json", _ExpectedOutputSnapshot)
+    _assert_snapshot_binding(expected, job)
+    if expected.output.job_id != job.job_id:
+        raise _workflow_error(
+            "workflow_binding_mismatch", "Expected review output does not match the job"
+        )
+    html_output = _with_absolute_thumbnails(directory, expected.output)
+    refreshed_html = build_review_html(job, html_output)
+    refreshed_bytes = refreshed_html.encode("utf-8")
+    review_path = _inside(directory, "review.html")
+    previous_html = review_path.read_bytes()
+    refreshed_artifacts = state.artifacts.model_copy(
+        update={"review_html": hashlib.sha256(refreshed_bytes).hexdigest()}
+    )
+    refreshed_state = state.model_copy(
+        update={
+            "revision": state.revision + 1,
+            "wait_reason": "human_review",
+            "artifacts": refreshed_artifacts,
+        }
+    )
+    _verify_state_invariants(refreshed_state)
+    if refreshed_state.state.value not in _TRANSITIONS[state.state.value]:
+        raise _workflow_error(
+            "workflow_state_conflict", "Workflow transition is not legal"
+        )
+
+    _atomic_binary_write(review_path, refreshed_bytes)
+    try:
+        _atomic_json_write(
+            directory / "state.json", refreshed_state.model_dump(mode="json")
+        )
+        _load_state(directory, job)
+    except Exception:
+        try:
+            _atomic_binary_write(review_path, previous_html)
+            _atomic_json_write(directory / "state.json", state.model_dump(mode="json"))
+        except Exception:
+            raise _workflow_error(
+                "workflow_atomic_write_cleanup_failed",
+                "Review page refresh could not be rolled back",
+            ) from None
+        raise
+    return WorkflowResult(
+        4,
+        WorkflowState.REVIEW_READY,
+        directory,
+        wait_reason="human_review",
+    )
 
 
 def apply(
@@ -2147,6 +2230,36 @@ def _bounded_binary_read(path: Path) -> bytes:
         raise _workflow_error("workflow_artifact_invalid", "Workflow JSON artifact is invalid") from None
 
 
+def _stable_file_sha256(path: Path) -> str:
+    """Hash a regular file through one stable descriptor without a JSON size limit."""
+    try:
+        before = path.lstat()
+        if _is_reparse_or_link(before) or not stat.S_ISREG(before.st_mode):
+            raise OSError
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if _file_stat_identity(before) != _file_stat_identity(opened):
+                raise OSError
+            digest = hashlib.sha256()
+            size = 0
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                size += len(chunk)
+            after = os.fstat(descriptor)
+            if _file_stat_identity(opened) != _file_stat_identity(after) or size != after.st_size:
+                raise OSError
+            return digest.hexdigest()
+        finally:
+            os.close(descriptor)
+    except OSError:
+        raise _workflow_error("workflow_artifact_invalid", "Workflow artifact is invalid") from None
+
+
 def _file_stat_identity(details: Any) -> tuple[int, int, int, int]:
     return (details.st_dev, details.st_ino, details.st_size, details.st_mtime_ns)
 
@@ -2233,7 +2346,10 @@ def _sha256_bytes(value: bytes) -> str:
 
 
 def _sha256_artifact(directory: Path, name: str) -> str:
-    return _sha256_bytes(_bounded_binary_read(_inside(directory, name)))
+    path = _inside(directory, name)
+    if name == "review.html":
+        return _stable_file_sha256(path)
+    return _sha256_bytes(_bounded_binary_read(path))
 
 
 def _read_json(directory: Path, name: str) -> Any:
@@ -2372,4 +2488,11 @@ def _list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
-__all__ = ["WorkflowResult", "WorkflowState", "analyze", "apply", "prepare_review"]
+__all__ = [
+    "WorkflowResult",
+    "WorkflowState",
+    "analyze",
+    "apply",
+    "prepare_review",
+    "refresh_review",
+]

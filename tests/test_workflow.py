@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 from techpack_pdf.errors import TechpackError
 import techpack_pdf.workflow as workflow
-from techpack_pdf.workflow import analyze, apply, prepare_review
+from techpack_pdf.workflow import analyze, apply, prepare_review, refresh_review
 from techpack_pdf.models import CoordinateConfidence
 
 
@@ -33,6 +33,26 @@ class _MinerUFixture:
                             "bbox": [72, 72, 150, 86],
                             "field_role": "body",
                         }
+                    ],
+                }
+            ]
+        }
+
+
+class _ManyNodesMinerUFixture:
+    def parse_or_degrade(self, _source, _manifest):
+        return {
+            "pages": [
+                {
+                    "page_index": 0,
+                    "title": "BOM",
+                    "nodes": [
+                        {
+                            "text": f"Component {index} mm",
+                            "bbox": [72, 72, 150, 86],
+                            "field_role": "body",
+                        }
+                        for index in range(1, 1001)
                     ],
                 }
             ]
@@ -262,6 +282,8 @@ def _write_approved_review(job_dir):
     assert match is not None
     review = json.loads(match.group(1))
     review.pop("pages")
+    review.pop("business_explanations")
+    review.pop("review_navigation")
     for item in review["items"]:
         item["review_status"] = "approved"
         item["reviewed_translation"] = None
@@ -307,6 +329,28 @@ def test_analyze_creates_an_isolated_translation_request_and_waits_for_host(tmp_
         }
     ]
     assert not (result.job_dir / "translation-response.json").exists()
+
+
+def test_analyze_preserves_stable_ids_beyond_999_candidates(tmp_path):
+    source = tmp_path / "techpack.pdf"
+    glossary = tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+
+    result = analyze(
+        source,
+        glossary,
+        tmp_path / "jobs",
+        mineru_client=_ManyNodesMinerUFixture(),
+    )
+
+    assert (result.exit_code, result.state) == (4, "translation_requested")
+    request = json.loads(
+        (result.job_dir / "translation-request.json").read_text(encoding="utf-8")
+    )
+    item_ids = [item["item_id"] for item in request["items"]]
+    assert len(item_ids) == len(set(item_ids)) == 1000
+    assert "p001-i1000" in item_ids
 
 
 def test_analysis_accepts_empty_target_only_for_do_not_translate_hit(tmp_path):
@@ -677,6 +721,56 @@ def test_prepare_review_waits_for_response_then_creates_offline_review(tmp_path)
     assert (prepared.exit_code, prepared.state) == (4, "review_ready")
     assert "__TECHPACK_REVIEW_DATA__" not in (analyzed.job_dir / "review.html").read_text(encoding="utf-8")
     assert json.loads((analyzed.job_dir / "state.json").read_text(encoding="utf-8"))["state"] == "review_ready"
+
+
+def test_refresh_review_rebuilds_bound_html_and_updates_its_state_digest(
+    tmp_path, monkeypatch
+):
+    source, glossary = tmp_path / "techpack.pdf", tmp_path / "terms.csv"
+    _techpack_pdf(source)
+    _glossary(glossary)
+    job = analyze(
+        source,
+        glossary,
+        tmp_path / "jobs",
+        now=datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc),
+        mineru_client=_MinerUFixture(),
+    )
+    request = json.loads(
+        (job.job_dir / "translation-request.json").read_text(encoding="utf-8")
+    )
+    (job.job_dir / "translation-response.json").write_text(
+        json.dumps(_response_for(request), ensure_ascii=False), encoding="utf-8"
+    )
+    assert prepare_review(job.job_dir).state == "review_ready"
+    before_state = json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))
+    before_expected = (job.job_dir / "expected-output.json").read_bytes()
+
+    import techpack_pdf.review as review_module
+
+    refreshed_template = tmp_path / "review-template.html"
+    refreshed_template.write_text(
+        review_module._TEMPLATE_PATH.read_text(encoding="utf-8").replace(
+            "<title>TechPack 翻译审核</title>",
+            "<title>TechPack 翻译审核 · 已刷新</title>",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(review_module, "_TEMPLATE_PATH", refreshed_template)
+
+    result = refresh_review(job.job_dir)
+
+    refreshed = (job.job_dir / "review.html").read_bytes()
+    after_state = json.loads((job.job_dir / "state.json").read_text(encoding="utf-8"))
+    assert (result.exit_code, result.state, result.wait_reason) == (
+        4,
+        "review_ready",
+        "human_review",
+    )
+    assert "已刷新" in refreshed.decode("utf-8")
+    assert (job.job_dir / "expected-output.json").read_bytes() == before_expected
+    assert after_state["revision"] == before_state["revision"] + 1
+    assert after_state["artifacts"]["review_html"] == hashlib.sha256(refreshed).hexdigest()
 
 
 def test_invalid_initial_response_creates_one_correction_then_attempt_one_can_recover(tmp_path):
@@ -1249,6 +1343,44 @@ def test_review_json_is_bounded_and_rejects_descriptor_identity_change(tmp_path,
     monkeypatch.setattr(workflow.os, "fstat", changed_identity)
     with pytest.raises(TechpackError) as caught:
         workflow._bounded_binary_read(review)
+    assert caught.value.code == "workflow_artifact_invalid"
+
+
+def test_review_html_digest_streams_beyond_the_json_artifact_limit(tmp_path, monkeypatch):
+    job = tmp_path / "job"
+    job.mkdir()
+    monkeypatch.setattr(workflow, "_MAX_JSON_BYTES", 64)
+    review_html = job / "review.html"
+    review_bytes = b"<html>" + (b"x" * 256) + b"</html>"
+    review_html.write_bytes(review_bytes)
+    (job / "analysis.json").write_bytes(b"{" + (b"x" * 256))
+
+    assert workflow._sha256_artifact(job, "review.html") == hashlib.sha256(review_bytes).hexdigest()
+    with pytest.raises(TechpackError) as caught:
+        workflow._sha256_artifact(job, "analysis.json")
+    assert caught.value.code == "workflow_artifact_invalid"
+
+
+def test_streamed_review_html_digest_rejects_descriptor_identity_change(tmp_path, monkeypatch):
+    job = tmp_path / "job"
+    job.mkdir()
+    (job / "review.html").write_text("<html>review</html>", encoding="utf-8")
+    original_fstat = workflow.os.fstat
+    calls = 0
+
+    def changed_identity(descriptor):
+        nonlocal calls
+        details = original_fstat(descriptor)
+        calls += 1
+        if calls == 2:
+            values = {name: getattr(details, name) for name in dir(details) if name.startswith("st_")}
+            values["st_mtime_ns"] += 1
+            return SimpleNamespace(**values)
+        return details
+
+    monkeypatch.setattr(workflow.os, "fstat", changed_identity)
+    with pytest.raises(TechpackError) as caught:
+        workflow._sha256_artifact(job, "review.html")
     assert caught.value.code == "workflow_artifact_invalid"
 
 

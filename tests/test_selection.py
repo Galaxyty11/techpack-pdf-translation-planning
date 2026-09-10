@@ -144,11 +144,20 @@ def test_agent_classification_below_point_eight_remains_unknown_with_evidence() 
     ("page_type", "field_role", "text", "expected_reason"),
     [
         ("bom", "material", "Shell fabric", "field_rule"),
+        ("bom", "placement", "POCKET & BACK YOKE", "field_rule"),
         ("measurement", "pom_description", "Back neck width", "field_rule"),
+        ("measurement", "description", "Front neck width", "field_rule"),
+        ("measurement", "description", "Description : Front neck width", "field_rule"),
+        ("measurement", "note", "Add side and back yoke", "field_rule"),
         ("technical_drawing", "production_instruction", "Double stitch at hem", "field_rule"),
         ("sample_review", "action", "Reduce sleeve length", "actionable_review"),
         ("style_sample", "fit_issue", "Collar stands away from neck", "actionable_review"),
+        ("style_sample", "description", "Waist relaxed half", "page_rule"),
+        ("style_sample", "note", "Reduce back rise", "page_rule"),
+        ("construction_detail", "body", "Clean finish with 1/16 inch SN TS", "mixed_text"),
+        ("construction_detail", "instruction", "Double needle top stitch", "field_rule"),
         ("label_pack", "folding_instruction", "Fold sleeves to back", "field_rule"),
+        ("label_pack", "body", "Notes: Attach hangtag at back neck", "page_rule"),
     ],
 )
 def test_page_and_field_rules_select_translatable_candidates(
@@ -171,6 +180,17 @@ def test_page_and_field_rules_select_translatable_candidates(
         ("category_fields", "category_field", "Product category", "skipped_admin"),
         ("bom", "header_footer", "Confidential - page 2", "skipped_admin"),
         ("bom", "admin", "System status approved", "skipped_admin"),
+        ("bom", "table_header", "Component", "skipped_admin"),
+        ("bom", "retained_table_value", "SUMEC", "skipped_admin"),
+        ("technical_drawing", "body", "Style : 1805466", "skipped_admin"),
+        ("technical_drawing", "body", "Style Additional Images", "skipped_admin"),
+        ("construction_detail", "instruction", "Season", "skipped_admin"),
+        ("style_sample", "description", "Tech Designer", "skipped_admin"),
+        ("label_pack", "body", "Code: CSG044", "skipped_admin"),
+        ("label_pack", "body", "Label and Pack : 1", "skipped_admin"),
+        ("label_pack", "body", "Notes:", "skipped_admin"),
+        ("style_sample", "body", ": PREPRO", "skipped_admin"),
+        ("style_sample", "body", "IMG\\_9853.jpg", "skipped_code"),
         ("bom", "material", "MAT-1007", "skipped_code"),
     ],
 )
@@ -184,6 +204,55 @@ def test_skip_rules_are_deterministic(
 
     assert [(candidate.should_translate, candidate.decision_reason.value) for candidate in candidates] == [
         (False, expected_reason)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("page_type", "text", "field_role", "expected_reason"),
+    [
+        (PageType.BOM, "Fit Notes", "body", "skipped_admin"),
+        (PageType.TECHNICAL_DRAWING, "CSG.", "body", "skipped_code"),
+    ],
+)
+def test_exact_administrative_labels_and_period_terminated_marks_are_skipped(
+    page_type: PageType,
+    text: str,
+    field_role: str,
+    expected_reason: str,
+) -> None:
+    candidates = select_candidates(
+        _page(page_type, [_page_node(text, field_role)]),
+        _empty_glossary(),
+    )
+
+    assert [(candidate.should_translate, candidate.decision_reason.value) for candidate in candidates] == [
+        (False, expected_reason)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "field_role"),
+    [
+        ("TAG", "component"),
+        ("THREAD", "material"),
+        ("BODY", "placement"),
+        ("WAISTBAND", "component"),
+        ("TAG.", "component"),
+        ("THREAD.", "material"),
+        ("BODY.", "placement"),
+    ],
+)
+def test_bom_words_remain_translatable_when_in_eligible_roles(
+    text: str,
+    field_role: str,
+) -> None:
+    candidates = select_candidates(
+        _page(PageType.BOM, [_page_node(text, field_role)]),
+        _empty_glossary(),
+    )
+
+    assert [(candidate.should_translate, candidate.decision_reason.value) for candidate in candidates] == [
+        (True, "field_rule")
     ]
 
 
@@ -450,6 +519,20 @@ def test_locked_numeric_occurrences_allow_cjk_adjacency_without_identifier_subst
     assert validate_locked_tokens(source, "数量12件和13件") is False
     assert validate_locked_tokens(source, "数量A12B件和12件") is False
     assert validate_locked_tokens(source, "数量112件和12件") is False
+
+
+def test_mineru_escaped_markdown_underscore_is_a_numeric_token_boundary() -> None:
+    source = lock_tokens(r"\*STITCHES\_9-10 STITCHES PER INCH")
+
+    assert [(token.value, token.kind) for token in source.tokens] == [
+        ("9", "number"),
+        ("10", "number"),
+        ("INCH", "unit"),
+    ]
+    assert validate_locked_tokens(source, "线迹：9-10 针/INCH") is True
+    assert validate_locked_tokens(source, "线迹：10 针/INCH") is False
+    assert "9" not in [token.value for token in lock_tokens("STITCHES_9").tokens]
+    assert "9" not in [token.value for token in lock_tokens(r"STITCHES\\_9").tokens]
 
 
 def test_dnt_occurrences_allow_cjk_adjacency_but_remain_case_and_identifier_exact(tmp_path) -> None:

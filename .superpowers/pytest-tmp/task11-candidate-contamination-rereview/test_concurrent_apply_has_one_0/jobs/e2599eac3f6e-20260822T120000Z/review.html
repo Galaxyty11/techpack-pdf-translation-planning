@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TechPack 翻译审核</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; background: #f4f6f8; color: #17202a; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; }
+    header { display: flex; align-items: center; gap: 18px; padding: 14px 20px; background: #17202a; color: #fff; }
+    header h1 { margin: 0; font-size: 20px; }
+    #stats { margin-left: auto; font-variant-numeric: tabular-nums; }
+    .filters { display: grid; grid-template-columns: repeat(5, minmax(130px, 1fr)); gap: 10px; padding: 12px 20px; background: #fff; border-bottom: 1px solid #d8dee4; }
+    label { display: grid; gap: 4px; color: #566573; font-size: 12px; }
+    select, textarea, button { font: inherit; }
+    select, textarea { border: 1px solid #b8c2cc; border-radius: 5px; padding: 7px; background: #fff; }
+    main { display: grid; grid-template-columns: minmax(240px, 28%) minmax(380px, 44%) minmax(260px, 28%); min-height: calc(100vh - 122px); }
+    #item-list { overflow: auto; border-right: 1px solid #d8dee4; background: #fff; padding: 10px; }
+    .review-item { display: block; width: 100%; margin: 0 0 7px; padding: 10px; text-align: left; border: 1px solid #d8dee4; border-radius: 6px; background: #fff; color: inherit; cursor: pointer; }
+    .review-item.active { border-color: #2463a6; box-shadow: 0 0 0 2px #c8ddf3; }
+    .review-item[data-risk="high"] { border-left: 5px solid #b42318; }
+    .viewer { padding: 16px; overflow: auto; }
+    .canvas { position: relative; display: inline-block; max-width: 100%; background: #fff; box-shadow: 0 2px 12px #0002; }
+    #page-thumbnail { display: block; max-width: 100%; height: auto; }
+    .highlight { position: absolute; display: none; pointer-events: none; border: 3px solid #d92d20; background: #d92d2030; }
+    #target-highlight { border-color: #1570ef; background: #1570ef24; }
+    aside { padding: 14px; overflow: auto; background: #fff; border-left: 1px solid #d8dee4; }
+    aside h2 { margin: 0 0 12px; font-size: 17px; }
+    dl { margin: 0; }
+    dt { margin-top: 10px; color: #667085; font-size: 12px; font-weight: 700; }
+    dd { margin: 3px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    #reviewed-translation { width: 100%; min-height: 92px; resize: vertical; }
+    .actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-top: 14px; }
+    button { border: 1px solid #98a2b3; border-radius: 5px; padding: 8px; background: #fff; cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: .45; }
+    #approve { background: #ecfdf3; border-color: #12b76a; }
+    #approve-edited { background: #eff8ff; border-color: #2e90fa; }
+    #skip { background: #fff4ed; border-color: #f79009; }
+    #export-review { margin-top: 12px; width: 100%; background: #17202a; color: #fff; }
+    #model-risk { color: #b42318; font-weight: 700; }
+    @media (max-width: 980px) {
+      .filters { grid-template-columns: repeat(2, 1fr); }
+      main { grid-template-columns: 1fr; }
+      #item-list, aside { border: 0; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>TechPack 翻译审核</h1>
+    <div id="stats" aria-live="polite"></div>
+  </header>
+  <section class="filters" aria-label="审核筛选">
+    <label>页面类型<select id="page-type-filter"><option value="">全部</option></select></label>
+    <label>风险<select id="risk-filter"><option value="">全部</option><option value="high">高</option><option value="medium">中</option><option value="low">低</option></select></label>
+    <label>术语<select id="glossary-filter"><option value="">全部</option><option value="hit">有命中</option><option value="none">无命中</option></select></label>
+    <label>审核状态<select id="status-filter"><option value="">全部</option><option value="unreviewed">未审核</option><option value="approved">已批准</option><option value="approved_edited">修改后批准</option><option value="skipped">已跳过</option></select></label>
+    <label>问题<select id="issue-filter"><option value="">全部</option><option value="any">有问题</option><option value="none">无问题</option></select></label>
+  </section>
+  <main>
+    <nav id="item-list" aria-label="审核项目"></nav>
+    <section class="viewer" aria-label="页面预览">
+      <div class="canvas">
+        <img id="page-thumbnail" alt="当前页面缩略图">
+        <div id="source-highlight" class="highlight" aria-label="原文坐标"></div>
+        <div id="target-highlight" class="highlight" aria-label="建议批注坐标"></div>
+      </div>
+    </section>
+    <aside>
+      <h2 id="item-title">请选择审核项目</h2>
+      <dl>
+        <dt>原文</dt><dd id="source-text"></dd>
+        <dt>建议译文</dt><dd id="suggested-translation"></dd>
+        <dt>审核译文</dt><dd><textarea id="reviewed-translation" aria-label="审核译文"></textarea></dd>
+        <dt>锁定 token</dt><dd id="locked-tokens"></dd>
+        <dt>术语命中</dt><dd id="glossary-hits"></dd>
+        <dt>选择原因</dt><dd id="decision-reason"></dd>
+        <dt>坐标</dt><dd id="coordinates"></dd>
+        <dt>布局风险</dt><dd id="layout-risk"></dd>
+        <dt>翻译来源</dt><dd id="translator-provenance"></dd>
+        <dt>模型风险</dt><dd id="model-risk"></dd>
+      </dl>
+      <div class="actions" aria-label="审核操作">
+        <button id="approve" type="button">批准</button>
+        <button id="approve-edited" type="button">修改后批准</button>
+        <button id="skip" type="button">跳过</button>
+      </div>
+      <button id="export-review" type="button" disabled>导出 review.json</button>
+    </aside>
+  </main>
+
+  <script id="review-data" type="application/json">{"schema_version":"1.1","job_id":"e2599eac3f6e-20260822T120000Z","source":{"filename":"techpack.pdf","sha256":"e2599eac3f6e9f87f4bb5d159287960dd08b503b679cf5cd027acc008a5db23b","page_count":1},"glossary":{"filename":"terms.csv","sha256":"a3dde385844fb37d12f59bd940fbbce96d81c2ae7f1e00fc426bf92f527f2b36"},"pipeline":{"parser":"mineru","translation_executor":"host_agent","host":"codex","execution_mode":"main_agent","model":"unknown","prompt_version":"1.0"},"items":[{"item_id":"p001-i001","page_index":0,"page_type":"bom","source_text":"Shell 12 mm","normalized_text":"shell 12 mm","source_bbox":[72.0,74.17500305175781,133.12698364257812,89.28900146484375],"source_kind":"body","coordinate_confidence":"high","decision_reason":"glossary_hit","locked_tokens":["12","mm"],"glossary_hits":[{"source_term":"Shell","target_term":"大身","matched_text":"Shell","start":0,"end":5,"do_not_translate":false,"priority":0}],"suggested_translation":"大身 12 mm","reviewed_translation":null,"review_status":null,"risk_level":"high","translation_host":"codex","translation_execution_mode":"main_agent","translation_model":"unknown","translation_agent_role":"techpack-translator","translation_prompt_version":"1.0","placement_strategy":null,"target_rect":null,"font_size":null,"leader_line":null,"warnings":["unknown_model"]}],"blocking_issues":[],"review_completed_at":null,"pages":[{"page_index":0,"width":595.0,"height":842.0,"thumbnail":"data:image/png;base64,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7Lnpppuq0/rkKy6++OJyumHDhqeffrocTJs2rZpLPgAA6PokX+PpOPmmTp1aVq+77rrq9MEHHyynxx133KF+p6GkXfWuzhdffLGatEm+6g5f//rXr7rqqnKwcuXKai75AACg65N8jaeD5Pvxj3/cs2fPpqamZ555pjY877zzyv53vvOdzz77bJv93/3ud3v16lVWb7vtttqwTfK98sorAwYMaGlpGTp06JAhQ6p3dR6QfAAA0AgkX+Opkq9v376n/rs3velN1RdvXnvttfX7N23adPLJJ5d57969x40bN3v27IULF06fPv20006r9k+dOrV+f5vkKy699NJq51e+8pXaUPIBAEDXJ/kaz6F+l68k3/vf//4f/ehHB1/yz3/+c8aMGX369Glzybvf/e7HH3+8zeaDk+/hhx+u9v/617+uDSUfAAB0fZLv/5GdO3eWeJs7d+4tt9yydOnSDRs27N+//41+UgAAwGEk+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkq+xbdu2bfXq1cuXL1+3bt2uXbsO3rBnz5525/9b+/fvL/fZu3dvdVoOymkZvv47AwAAh4/ka1Q/+9nPxo4de0Sdfv36TZgw4eWXX67fdt5555WlP//5z6/z4X7+85+X+1x22WXV6de+9rVy+oMf/KCTl3/oQx+aNGlSu0sbN24sSyNHjnzrW9965plnTp8+vc1LAAAA/mOSryEtWrSoyrySUtdff/3NN998xRVXHH/88WVSwumll16q7ewKybdu3bqy+aKLLjp4ae3atYMGDSqrzc3NLS0tvXv3LsfHHHPMmjVrXucTBgAADki+RrR169YjjzyyqanpJz/5Sf18586dn/jEJ0oyXXzxxbXhG5t8ra2tjz322Nvf/vZ2k6884eOOO64sTZs2bfv27WWyY8eO8hBlMmLEiFdeeeV1PmcAAEDyNZ5HHnmkRNGHP/zhg5e2bNlSlnr06FHrpTcw+SZOnNi3b9/a+04PTr4FCxaU+Qc/+MH64f79+0eNGlXmTz755Ot8zgAAgORrPHfffXcpos9+9rPtrn7xi18cN27cP/7xj+q0lnxPPPHE5Zdf/p73vOd973vfzJkzt27d2ubCF1544eqrrz7nnHNKcY0fP37ZsmX1q/9B8l1//fXjXnX66ae3m3wzZswo87lz57aZf/WrX213Xn/n++67b8+ePXfdddenP/3p0aNHX3HFFWvXri1Lzz777OTJk0877bSxY8deddVV27Ztq121YsWK8oh//OMfV69ePXXq1DFjxnzsYx+bM2fOvn379u7d+61vfev8889/17ve9fGPf/zRRx/t4HUBAEADkXyN5+GHHy5F1KdPn1/84hevublKvhtuuKH8++Y3v/mkk06q/uY2cuTI3bt317Y9+OCDAwYMqL4Dpmyr9lx66aUlh6oNr+ezfOXm7Sbf/fffX2548Mf2JkyYUPaX1UPdsG/fvmeeeebZZ5/dq1evU0455Zhjjqme+T333FMmxx57bBn26NGjDMue2lW33nprmVx77bVlaciQIaXuqpc5ceLEc889t6mp6eSTTx48eHA17Mz/LQAAdH2Sr/GUDCvBVpXJWWedddddd61fv/5Qm6vk6969+7x586rJ7373u6FDh5bhQw89VE3++te/logqybR48eLW1tYy+c1vflPF4Z133lntORzJ165Nmzb179+/ubl548aNh9pTvV/01FNP3bx584FXPwFYCrD6D5kyZUqVqb/97W+rbS+88EJ1VZV8RSnD+idWDBw4sLzkA6++rfQLX/hCmXz+85/vzLMFAIAuTvI1pL///e8XXnhh6aLaJ+UGDx5cKuWBBx6o/XRepUq+iRMn1g9vuummMpwzZ051euWVV5bT73znO/V7SgJ169Zt0KBB1en/TfI999xzI0aMKJunT5/ewbaq5er/PPj973+/TIYPH17/8i+44IIyfPzxx6vTKvk++clP1t+q+mqZ+fPn1yalFcukNGRnXhoAAHRxkq+BbdmyZeHChZdccknt7YjF2972ttWrV9f2VMn32GOP1V947733luEdd9xRnZ544olNTU07duxoc/+WlpbaX8kOd/Jt3779mmuu6dmzZxWoHf/Ie0m+o446qn6yfPnycuHnPve5+uGkSZPKsCxVp1Xy3X777fV7qs8Z/uEPf6hNXnrppTIp8868NAAA6OIkX4j169ffeOON1U/zDRgwoPbTfFXyPf/88/Wb65Nv79693bt379Onz0UHGThwYNn21FNPHTjMyffII4+85S1vKXuGDBmydOnS17xhSb4TTjihflIlX5tfe283+cprr99TJV/9LxlKPgAAkki+xrNp06a//OUv7S5t3br1He94RymWb3zjG9Wk3R9pqE++v/3tb+W4Z8+eww9h5cqVBw5b8rW2tk6ePLmsloqbNWvWrl27OnNDyQcAAJ0k+RrPsGHDSpO8/PLL7a7ecsstZXXChAnV6WsmX4muXr16lbTr+EEPU/JNmzatLI0ePbrN3yE7JvkAAKCTJF/jOeecc0qTLFq0qN3VKVOm1H9i7TWTrxgxYkRzc3N99lRKPc6aNas6PhzJt2rVqjIvj/6vf/2rM/epkXwAANBJkq/xfO9736u+orP+a1oqzz33XPXzetVPDhzoXPKVrqt+lqD+S1MWL15c//2WhyP5qt/fKw/UqZddR/IBAEAnSb7Gs2/fvirkmpubL7nkkm9+85tLliwpJXPllVf269evzK+77rra5s4k386dO6tvT/noRz+6cOHCFStW3HDDDb1e9fTTT1d7DkfyjRo1qvqymWPa08HNJR8AAHSS5GtIu3fvvuaaa3r37n3Evzv++ONvvvnm+j/WdSb5io0bN55xxhn1tyoR+NOf/rS24XAkX+m6pkO7//77D3VDyQcAAJ0k+RrY9u3bly1bNnfu3NmzZy9YsGDFihWd/MbLdpVQXLNmzbx580oKPvTQQ6/nVgAAQBch+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACAWJIPAAAgluQDAACIJfkAAABiST4AAIBYkg8AACCW5AMAAIgl+QAAAGJJPgAAgFiSDwAAIJbkAwAAiCX5AAAAYkk+AACA/2m/DmQAAAAABvlb3+Mri7aUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGBL+QAAALaUDwAAYEv5AAAAtpQPAABgS/kAAAC2lA8AAGAroLPaV6xQNVAAAAAASUVORK5CYII="}]}</script>
+  <script>
+    "use strict";
+    const data = JSON.parse(document.getElementById("review-data").textContent);
+    const allowedStatuses = new Set(["approved", "approved_edited", "skipped"]);
+    const itemFields = [
+      "item_id", "page_index", "page_type", "source_text", "normalized_text",
+      "source_bbox", "source_kind", "coordinate_confidence", "decision_reason",
+      "locked_tokens", "glossary_hits", "suggested_translation", "reviewed_translation",
+      "review_status", "risk_level", "translation_host", "translation_execution_mode",
+      "translation_model", "translation_agent_role", "translation_prompt_version",
+      "placement_strategy", "target_rect", "font_size", "leader_line", "warnings"
+    ];
+    const elements = Object.fromEntries([
+      "page-type-filter", "risk-filter", "glossary-filter", "status-filter", "issue-filter",
+      "item-list", "page-thumbnail", "source-highlight", "target-highlight", "source-text",
+      "suggested-translation", "reviewed-translation", "locked-tokens", "glossary-hits",
+      "decision-reason", "coordinates", "layout-risk", "translator-provenance",
+      "model-risk", "stats", "item-title", "approve", "approve-edited", "skip",
+      "export-review"
+    ].map((id) => [id, document.getElementById(id)]));
+    let selectedId = null;
+
+    function text(id, value) {
+      elements[id].textContent = value === null || value === undefined ? "—" : String(value);
+    }
+
+    function addOption(select, value) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      select.appendChild(option);
+    }
+
+    [...new Set(data.items.map((item) => item.page_type))].sort().forEach((value) => {
+      addOption(elements["page-type-filter"], value);
+    });
+
+    function itemIssues(item) {
+      const issues = Array.isArray(item.warnings) ? [...item.warnings] : [];
+      if (item.coordinate_confidence !== "high") issues.push("coordinate_confidence");
+      if (item.translation_model === "unknown") issues.push("unknown_model");
+      return issues;
+    }
+
+    [...new Set(data.items.flatMap(itemIssues))].sort().forEach((value) => {
+      addOption(elements["issue-filter"], value);
+    });
+
+    function visible(item) {
+      const status = item.review_status || "unreviewed";
+      const glossary = Array.isArray(item.glossary_hits) && item.glossary_hits.length ? "hit" : "none";
+      const issues = itemIssues(item);
+      const issue = issues.length ? "any" : "none";
+      const issueFilter = elements["issue-filter"].value;
+      return (!elements["page-type-filter"].value || item.page_type === elements["page-type-filter"].value)
+        && (!elements["risk-filter"].value || item.risk_level === elements["risk-filter"].value)
+        && (!elements["glossary-filter"].value || glossary === elements["glossary-filter"].value)
+        && (!elements["status-filter"].value || status === elements["status-filter"].value)
+        && (!issueFilter || issue === issueFilter || issues.includes(issueFilter));
+    }
+
+    function renderList() {
+      elements["item-list"].replaceChildren();
+      data.items.filter(visible).forEach((item) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "review-item" + (item.item_id === selectedId ? " active" : "");
+        button.dataset.risk = item.risk_level;
+        button.textContent = `${item.item_id} · ${item.page_type} · ${item.review_status || "unreviewed"}`;
+        button.addEventListener("click", () => selectItem(item.item_id));
+        elements["item-list"].appendChild(button);
+      });
+    }
+
+    function placeHighlight(id, rectangle, page) {
+      const box = elements[id];
+      if (!Array.isArray(rectangle) || rectangle.length !== 4 || !page.width || !page.height) {
+        box.style.display = "none";
+        return;
+      }
+      box.style.left = `${rectangle[0] / page.width * 100}%`;
+      box.style.top = `${rectangle[1] / page.height * 100}%`;
+      box.style.width = `${(rectangle[2] - rectangle[0]) / page.width * 100}%`;
+      box.style.height = `${(rectangle[3] - rectangle[1]) / page.height * 100}%`;
+      box.style.display = "block";
+    }
+
+    function selectItem(itemId) {
+      selectedId = itemId;
+      const item = data.items.find((candidate) => candidate.item_id === itemId);
+      if (!item) return;
+      const page = data.pages.find((candidate) => candidate.page_index === item.page_index);
+      if (page) {
+        elements["page-thumbnail"].src = page.thumbnail;
+        elements["page-thumbnail"].onload = () => {
+          placeHighlight("source-highlight", item.source_bbox, page);
+          placeHighlight("target-highlight", item.target_rect, page);
+        };
+      }
+      text("item-title", `${item.item_id} · 第 ${item.page_index + 1} 页`);
+      text("source-text", item.source_text);
+      text("suggested-translation", item.suggested_translation);
+      elements["reviewed-translation"].value = item.reviewed_translation || item.suggested_translation || "";
+      text("locked-tokens", JSON.stringify(item.locked_tokens || []));
+      text("glossary-hits", JSON.stringify(item.glossary_hits || []));
+      text("decision-reason", item.decision_reason);
+      text("coordinates", JSON.stringify({source_bbox: item.source_bbox, target_rect: item.target_rect}));
+      text("layout-risk", JSON.stringify({risk_level: item.risk_level, warnings: item.warnings || []}));
+      text("translator-provenance", [
+        item.translation_host, item.translation_execution_mode, item.translation_model,
+        item.translation_agent_role, item.translation_prompt_version
+      ].join(" · "));
+      const risks = [];
+      if (item.translation_model === "unknown") risks.push("模型未知");
+      const switchFields = [
+        ["translation_host", "宿主切换"],
+        ["translation_model", "模型切换"],
+        ["translation_execution_mode", "执行方式切换"],
+        ["translation_prompt_version", "提示词版本切换"]
+      ];
+      switchFields.forEach(([field, label]) => {
+        if (new Set(data.items.map((candidate) => candidate[field])).size > 1) risks.push(label);
+      });
+      text("model-risk", risks.join("；") || "无");
+      renderList();
+    }
+
+    function setStatus(status) {
+      const item = data.items.find((candidate) => candidate.item_id === selectedId);
+      if (!item || !allowedStatuses.has(status)) return;
+      if (status === "approved_edited") {
+        const edited = elements["reviewed-translation"].value.trim();
+        if (!edited) return;
+        item.reviewed_translation = edited;
+      } else if (status === "approved") {
+        item.reviewed_translation = null;
+      } else {
+        item.reviewed_translation = null;
+      }
+      item.review_status = status;
+      renderAll();
+    }
+
+    function renderStats() {
+      const counts = {unreviewed: 0, approved: 0, approved_edited: 0, skipped: 0};
+      data.items.forEach((item) => { counts[item.review_status || "unreviewed"] += 1; });
+      text("stats", `未审核 ${counts.unreviewed} · 已批准 ${counts.approved} · 已修改 ${counts.approved_edited} · 已跳过 ${counts.skipped} · 阻断 ${data.blocking_issues.length}`);
+      elements["export-review"].disabled = counts.unreviewed !== 0 || data.blocking_issues.length !== 0;
+    }
+
+    function exportReview() {
+      if (data.blocking_issues.length || data.items.some((item) => !allowedStatuses.has(item.review_status))) return;
+      if (data.items.some((item) => item.review_status === "approved_edited" && !(item.reviewed_translation || "").trim())) return;
+      if (data.items.some((item) => item.review_status === "approved" && !(item.suggested_translation || "").trim())) return;
+      const payload = {
+        schema_version: "1.1",
+        job_id: data.job_id,
+        source: {filename: data.source.filename, sha256: data.source.sha256, page_count: data.source.page_count},
+        glossary: {filename: data.glossary.filename, sha256: data.glossary.sha256},
+        pipeline: {
+          parser: data.pipeline.parser,
+          translation_executor: data.pipeline.translation_executor,
+          host: data.pipeline.host,
+          execution_mode: data.pipeline.execution_mode,
+          model: data.pipeline.model,
+          prompt_version: data.pipeline.prompt_version
+        },
+        items: data.items.map((item) => Object.fromEntries(itemFields.map((field) => [field, item[field]]))),
+        blocking_issues: [],
+        review_completed_at: new Date().toISOString()
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2) + "\n"], {type: "application/json"});
+      const link = document.createElement("a");
+      link.href = window.URL.createObjectURL(blob);
+      link.download = "review.json";
+      link.click();
+      window.URL.revokeObjectURL(link.href);
+    }
+
+    function renderAll() {
+      renderList();
+      renderStats();
+    }
+
+    ["page-type-filter", "risk-filter", "glossary-filter", "status-filter", "issue-filter"].forEach((id) => {
+      elements[id].addEventListener("change", renderList);
+    });
+    elements.approve.addEventListener("click", () => setStatus("approved"));
+    elements["approve-edited"].addEventListener("click", () => setStatus("approved_edited"));
+    elements.skip.addEventListener("click", () => setStatus("skipped"));
+    elements["export-review"].addEventListener("click", exportReview);
+    renderAll();
+    if (data.items.length) selectItem(data.items[0].item_id);
+  </script>
+</body>
+</html>

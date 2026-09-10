@@ -119,6 +119,26 @@ def test_rank_placements_generates_the_required_deterministic_candidate_sequence
     assert generated[-1].leader_line is not None
 
 
+def test_rank_placements_adds_page_blank_fallback_for_low_confidence_coordinates() -> None:
+    item = _item().model_copy(
+        update={
+            "coordinate_confidence": "low",
+            "source_bbox": [40.0, 190.0, 100.0, 202.0],
+        }
+    )
+
+    candidates = rank_placements(
+        item,
+        (0.0, 0.0, 300.0, 220.0),
+        page_blank_fallback=True,
+    )
+
+    fallback = [candidate for candidate in candidates if candidate.strategy == "page_blank_fallback"]
+    assert fallback
+    assert all(candidate.leader_line is None for candidate in fallback)
+    assert any(candidate.rect[1] < 180.0 for candidate in fallback)
+
+
 def test_rank_placements_applies_the_exact_priority_chain_and_stable_tie_breaker() -> None:
     placements = [
         _placement("colliding", collision_count=1, candidate_index=0),
@@ -171,6 +191,61 @@ def test_find_same_row_blank_cells_identifies_an_empty_placement_column(
         document.close()
 
     assert cells == [(122.0, 52.0, 228.0, 88.0)]
+
+
+def test_find_same_row_blank_cells_uses_other_empty_cells_in_a_bom_row(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "bom-empty-cells.pdf"
+    document = pymupdf.open()
+    page = document.new_page(width=320, height=150)
+    for x in (20, 80, 170, 230, 300):
+        page.draw_line((x, 20), (x, 90), width=0.8)
+    for y in (20, 50, 90):
+        page.draw_line((20, y), (300, y), width=0.8)
+    for x, value in ((25, "PART"), (85, "COMPONENT"), (175, "SIZE"), (235, "USAGE")):
+        page.insert_text((x, 40), value, fontsize=7)
+    page.insert_text((25, 70), "VELUM", fontsize=7)
+    page.insert_text((85, 70), "CSG-007 HANGTAG", fontsize=7)
+    document.save(path)
+    document.close()
+
+    document = pymupdf.open(path)
+    try:
+        source_bbox = document[0].search_for("CSG-007 HANGTAG")[0]
+        cells = find_same_row_blank_cells(document[0], source_bbox)
+    finally:
+        document.close()
+
+    assert any(pymupdf.Rect(172, 52, 228, 88).contains(pymupdf.Rect(value)) for value in cells)
+
+
+def test_find_same_row_blank_cells_uses_unused_space_in_the_source_cell(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "bom-source-cell-remainder.pdf"
+    document = pymupdf.open()
+    page = document.new_page(width=320, height=150)
+    for x in (20, 250, 300):
+        page.draw_line((x, 20), (x, 90), width=0.8)
+    for y in (20, 50, 90):
+        page.draw_line((20, y), (300, y), width=0.8)
+    page.insert_text((25, 40), "COMPONENT", fontsize=7)
+    page.insert_text((255, 40), "COLOR", fontsize=7)
+    page.insert_text((25, 70), "Component Group: LABEL", fontsize=7)
+    page.insert_text((255, 70), "BLACK", fontsize=7)
+    document.save(path)
+    document.close()
+
+    document = pymupdf.open(path)
+    try:
+        page = document[0]
+        source_bbox = page.search_for("Component Group: LABEL")[0]
+        cells = find_same_row_blank_cells(page, source_bbox)
+    finally:
+        document.close()
+
+    assert any(value[0] > source_bbox.x1 and value[2] < 250 for value in cells)
 
 
 def test_compound_table_grid_protects_strokes_without_consuming_cell_interiors(
@@ -381,6 +456,68 @@ def test_detect_collisions_protects_glyphs_drawings_and_rechecks_at_300_dpi(
     assert all(value.intersecting_pixels > 4 for value in render)
 
 
+def test_detect_collisions_allows_blank_pixels_inside_a_page_image(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "blank-image-space.pdf"
+    document = pymupdf.open()
+    page = document.new_page(width=240, height=180)
+    pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 200, 120), False)
+    pixmap.clear_with(255)
+    page.insert_image(pymupdf.Rect(20, 20, 220, 140), pixmap=pixmap)
+    document.save(path)
+    document.close()
+    placement = _placement("image-blank", rect=(120.0, 80.0, 190.0, 100.0))
+
+    document = pymupdf.open(path)
+    try:
+        collisions = detect_collisions(document[0], [placement])
+    finally:
+        document.close()
+
+    assert collisions == []
+
+
+def test_detect_collisions_ignores_light_table_fill_but_protects_dark_fill(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "table-fills.pdf"
+    document = pymupdf.open()
+    page = document.new_page(width=260, height=180)
+    page.draw_rect(
+        pymupdf.Rect(20, 20, 220, 70),
+        color=None,
+        fill=(0.92, 0.92, 0.92),
+        width=0,
+    )
+    page.draw_rect(
+        pymupdf.Rect(20, 90, 220, 140),
+        color=None,
+        fill=(0.25, 0.25, 0.25),
+        width=0,
+    )
+    document.save(path)
+    document.close()
+    light = _placement("light", rect=(100.0, 35.0, 170.0, 55.0))
+    dark = replace(
+        _placement("dark", rect=(100.0, 105.0, 170.0, 125.0)),
+        item_id="p001-i002",
+    )
+
+    document = pymupdf.open(path)
+    try:
+        light_collisions = detect_collisions(document[0], [light])
+        dark_collisions = detect_collisions(document[0], [dark])
+    finally:
+        document.close()
+
+    assert light_collisions == []
+    assert any(
+        value.kind in {"protected_drawing", "render_overlap"}
+        for value in dark_collisions
+    )
+
+
 def test_detect_collisions_enforces_one_point_clearance_and_new_new_overlap(
     tmp_path: Path,
 ) -> None:
@@ -499,6 +636,64 @@ def test_detect_rendered_collisions_diffs_the_real_before_and_after_pages_at_300
     )
 
 
+def test_detect_rendered_collisions_renders_each_real_page_once_per_dpi(
+    tmp_path: Path, monkeypatch
+) -> None:
+    before_path = tmp_path / "before-once.pdf"
+    after_path = tmp_path / "after-once.pdf"
+    document = pymupdf.open()
+    page = document.new_page(width=240, height=180)
+    page.insert_text((40, 60), "SOURCE TEXT", fontsize=10)
+    document.save(before_path)
+    document.save(after_path)
+    document.close()
+    after = pymupdf.open(after_path)
+    after[0].add_freetext_annot(
+        pymupdf.Rect(35, 48, 115, 68),
+        "中文",
+        fontsize=7,
+        fontname="china-s",
+        text_color=(0.85, 0.05, 0.05),
+        fill_color=None,
+        border_color=None,
+        border_width=0,
+    ).update()
+    after.saveIncr()
+    after.close()
+    placement = _placement(
+        "actual-over-source",
+        rect=(35.0, 48.0, 115.0, 68.0),
+        source_distance=0.0,
+        movement_distance=0.0,
+    )
+    before = pymupdf.open(before_path)
+    after = pymupdf.open(after_path)
+    before_page = before[0]
+    after_page = after[0]
+    real_page_array = layout_module._page_array
+    calls: list[tuple[str, int]] = []
+
+    def count_page_renders(page, dpi):
+        if page is before_page:
+            calls.append(("before", dpi))
+        elif page is after_page:
+            calls.append(("after", dpi))
+        return real_page_array(page, dpi)
+
+    monkeypatch.setattr(layout_module, "_page_array", count_page_renders)
+    try:
+        collisions = detect_rendered_collisions(before_page, after_page, [placement])
+    finally:
+        after.close()
+        before.close()
+
+    assert any(value.render_dpi == 300 for value in collisions)
+    assert calls.count(("before", 200)) == 1
+    assert calls.count(("after", 200)) == 1
+    assert calls.count(("before", 300)) == 1
+    assert calls.count(("after", 300)) == 1
+
+
 def test_candidate_collision_gate_renders_current_freetext_on_an_in_memory_copy(
     tmp_path: Path,
 ) -> None:
@@ -571,6 +766,42 @@ def test_optimize_layout_stops_after_two_unchanged_rounds_and_caps_at_ten() -> N
             for value in capped.attempted_placements
         }
     ) == len(capped.attempted_placements)
+
+
+def test_optimize_layout_stops_scoring_an_item_after_its_own_collisions_clear() -> None:
+    first = _placement("first")
+    second = replace(
+        _placement("second", rect=(110.0, 90.0, 190.0, 110.0)),
+        item_id="p001-i002",
+    )
+    first_clear = replace(first, rect=(10.0, 10.0, 90.0, 30.0), candidate_index=1)
+    first_unused = replace(first, rect=(10.0, 35.0, 90.0, 55.0), candidate_index=2)
+    second_clear = replace(second, rect=(200.0, 90.0, 280.0, 110.0), candidate_index=1)
+    examined_first_rects: list[tuple[float, float, float, float]] = []
+
+    def detector(placements):
+        current_first, current_second = placements
+        examined_first_rects.append(current_first.rect)
+        collisions = []
+        if current_first.rect == first.rect:
+            collisions.append(Collision(0, first.item_id, "render_overlap", "source"))
+        if current_second.rect == second.rect:
+            collisions.append(Collision(0, second.item_id, "render_overlap", "source"))
+        return collisions
+
+    def candidates(placement, _collisions):
+        if placement.item_id == first.item_id:
+            return [first_clear, first_unused]
+        return [second_clear]
+
+    result = optimize_layout(
+        (first, second),
+        collision_detector=detector,
+        candidate_provider=candidates,
+    )
+
+    assert result.collisions == ()
+    assert first_unused.rect not in examined_first_rects
 
 
 @pytest.mark.parametrize("rotation", [0, 90, 180, 270])

@@ -33,8 +33,8 @@ analyze <pdf-or-directory> --glossary <xlsx-or-csv> --job-dir <output-directory>
 1. 枚举单个 PDF 或目录第一层中的 `*.pdf`；v1 不递归、不解压。
 2. 为每个 PDF 建立独立任务目录和 `job_id`。
 3. 校验 PDF、读取术语表、提取页面结构、筛选候选，生成 `translation-request.json`，由当前宿主 Agent 完成翻译编排并保存 `translation-response.json`。
-4. 生成一个无需本地服务器、无需 API 的独立 `review.html`；页面缩略图、候选数据和脚本全部内嵌。
-5. 用户逐项选择“批准 / 修改后批准 / 跳过”，处理全部阻断项后导出 `review.json`。
+4. 复用最终排版引擎执行一次只计算、不写入 PDF 的预排版，并生成一个无需本地服务器、无需 API 的独立 `review.html`；页面缩略图、候选数据、预排版结果和脚本全部内嵌。
+5. 审核页按页显示预排版后的全部中文译文；用户可编辑译文、拖动当前译文框，并逐项选择“批准 / 修改后批准 / 跳过”。每次完成一项后自动跳到下一条未审核内容，处理全部阻断项后导出 `review.json`。
 
 ### 阶段 B：写入与验收
 
@@ -47,8 +47,8 @@ apply <source.pdf> --review <review.json> --job <job-manifest> --expected-output
 行为：
 
 1. 重新计算输入 PDF 与术语表哈希，验证审核文件未过期、未串用。
-2. 只载入 `approved` 或 `approved_edited` 项目。
-3. 计算最终放置位置并写入红色 FreeText。
+2. 只载入 `approved` 或 `approved_edited` 项目，并读取用户在审核页确认的可选人工位置。
+3. 人工拖动过的项目固定在用户确认的目标框内，只允许换行或缩小字号；未拖动的项目继续自动计算最终放置位置。验证通过后写入红色 FreeText。
 4. 执行几何、渲染和重叠闭环校验。
 5. 所有质量门通过后才以同目录原子 no-clobber 发布为 `<原文件完整文件名>.annotated.pdf`；失败时保留问题报告，不留下貌似成功的最终 PDF，已存在或竞态出现的同名输出绝不覆盖。
 
@@ -261,14 +261,21 @@ skipped_duplicate | low_confidence
 `review.html` 必须：
 
 - 完全离线打开，不请求 CDN、字体、API 或本地服务器。
-- 显示页面缩略图，在点击候选项时突出原文 bbox 和建议批注位置。
+- 生成前复用最终布局规则做只读预排版；不得修改源 PDF。每个待审核项目必须得到一个可显示的建议 `target_rect` 和 `font_size`。没有零碰撞候选时保留最佳尝试位置并加入醒目的人工摆放提示，不能伪装成安全位置。
+- 显示页面缩略图和该页全部中文译文的可视化叠加效果；文字颜色、字号、换行和位置应尽量接近最终 FreeText。未审核项目仍显示建议效果，已跳过项目不作为最终效果显示。
+- 点击原文或译文叠加层即可选中项目；突出当前项目的原文 bbox 和译文框，其他同页译文仍保留，以便判断整页密度和相互遮挡。
+- 当前译文框支持鼠标或触控拖动。拖动只改变目标框位置，不改变框的宽高；必须阻止目标框移出页面，并即时提示与其他译文框的明显重叠。
+- 右侧审核译文可编辑，输入时当前译文叠加层实时更新。编辑或拖动已审核项目时，该项目立即恢复为未审核，必须重新明确批准。
 - 支持按页面类型、风险、术语命中、审核状态和问题类型筛选。
 - 同时显示原文、建议译文、锁定 token、术语命中、选择原因、坐标可信度和布局风险。
 - 显示翻译宿主、主 Agent/sub-agent 执行方式、模型标识和提示词版本；模型未知或任务中途切换时标记风险。
 - 任务级 pipeline 必须由全部项目的逐项翻译来源确定性汇总；host、model、prompt version 各自出现多个值时汇总为 `mixed`，execution mode 出现多个值时汇总为 `mixed`。显式 pipeline 与该汇总矛盾时立即失败。
-- 操作只有“批准”“修改后批准”“跳过”；生成审核页时无条件清空所有传入项目的 `review_status` 和 `reviewed_translation`，不得继承任何预填审核结果。
+- 操作只有“批准”“修改后批准”“跳过”；生成审核页时无条件清空所有传入项目的 `review_status`、`reviewed_translation` 和 `reviewed_target_rect`，不得继承任何预填审核结果或旧的人工位置。
+- 点击任一审核操作后，按当前筛选条件和“未审核优先、风险优先、页码、原始项目顺序”的确定性顺序自动选中下一条未审核内容；当前筛选结果没有下一条时转到全局下一条，全部完成时聚焦最终导出操作。
 - 统计未审核、已批准、已修改、已跳过和阻断项数量。
 - 仅当所有项目有明确状态且阻断项为 0 时允许导出 `review.json`。
+- 最终按钮使用“完成审核并导出”等业务表述。离线浏览器只导出审核数据，不直接修改 PDF；宿主 Agent 在收到 `review.json` 后执行 apply、渲染验证和最终 PDF 发布。
+- 面向业务员的页面提示使用“译文遮住了原资料”“译文框超出页面”“文字太长，最小字号仍放不下”等自然语言，不直接显示原始坐标 JSON 或内部错误码。
 - 对用户输入做 HTML 转义；JSON 下载使用固定 schema，不执行被审核文本中的 HTML/JavaScript。
 
 ## 6. review.json 数据契约
@@ -299,7 +306,7 @@ decision_reason, locked_tokens, glossary_hits,
 suggested_translation, reviewed_translation, review_status,
 risk_level, translation_host, translation_execution_mode,
 translation_model, translation_agent_role, translation_prompt_version,
-placement_strategy, target_rect, font_size,
+placement_strategy, target_rect, reviewed_target_rect, font_size,
 leader_line, warnings
 ```
 
@@ -311,7 +318,9 @@ approved | approved_edited | skipped
 
 加载接口固定为 `load_review(path, job, expected_output) -> ReviewDocument`。`job` 必须是带 source/glossary 路径的 `JobManifest`；`expected_output` 必须是生成 `review.html` 时使用的同一份可信输出快照，不能从用户提交的 `review.json` 反推。
 
-加载时必须重新计算当前 source/glossary SHA-256 和 PDF 页数，并要求 `job_id`、source/glossary 文件名与哈希、页数全部与 `JobManifest` 精确一致。实现必须用与生成审核页相同的确定性规则，从 `expected_output` 派生清空审核状态后的可信 items、由全部逐项 provenance 汇总且包含 parser/executor 的完整 pipeline，以及可信 `blocking_issues`。review items 必须与可信 items 数量和 ID 集合完全一致；除 `review_status` 和 `reviewed_translation` 外，每个 `ReviewItem` 字段都必须完全一致。`translation_agent_role` 在 ReviewItem 中仍是结构必填的可空键，并沿用翻译响应规则：main_agent 可显式 null 或提供无首尾空白的非空角色，subagent/mixed 必须提供非空角色；审核加载不得再对合法 main_agent null 施加更严格门。缺失、额外、替换或重复项目立即失败。
+加载时必须重新计算当前 source/glossary SHA-256 和 PDF 页数，并要求 `job_id`、source/glossary 文件名与哈希、页数全部与 `JobManifest` 精确一致。实现必须用与生成审核页相同的确定性规则，从 `expected_output` 派生清空审核状态后的可信 items、由全部逐项 provenance 汇总且包含 parser/executor 的完整 pipeline，以及可信 `blocking_issues`。review items 必须与可信 items 数量和 ID 集合完全一致；除 `review_status`、`reviewed_translation` 和 `reviewed_target_rect` 外，每个 `ReviewItem` 字段都必须完全一致。`translation_agent_role` 在 ReviewItem 中仍是结构必填的可空键，并沿用翻译响应规则：main_agent 可显式 null 或提供无首尾空白的非空角色，subagent/mixed 必须提供非空角色；审核加载不得再对合法 main_agent null 施加更严格门。缺失、额外、替换或重复项目立即失败。
+
+`reviewed_target_rect` 是可选的四数值页面坐标 `[x0, y0, x1, y1]`。缺失或为 `null` 表示用户未拖动，继续使用自动排版；存在时表示用户确认了固定位置。加载时必须拒绝 NaN、无穷值、零或负宽高、超出 CropBox 的矩形，并要求其宽高与可信 `target_rect` 在 0.1 pt 容差内一致，确保审核页只能移动而不能暗中缩放目标框。旧版不含该字段的 schema 1.1 审核文件按 `null` 处理。
 
 提交的完整 pipeline 和 `blocking_issues` 必须分别与上述可信派生值精确一致；可信阻断项非空时，即使提交 JSON 删除阻断项也仍必须阻止加载。任务级 pipeline 还必须与全部 item 的 `translation_host`、`translation_execution_mode`、`translation_model`、`translation_prompt_version` 确定性汇总完全一致。`schema_version` 是必填字段；`review_completed_at` 只接受带时区的 ISO-8601 字符串。
 
@@ -329,6 +338,8 @@ apply 写入接口固定为 `apply_review(source_pdf, review_path, job, expected
 - 译文按真实字体度量换行，不能仅用字符数估算矩形尺寸。
 - 批注 metadata 至少写入 `item_id`、来源页和工具版本，便于追踪；不把宿主凭据、模型凭据或整段上下文写入 metadata。
 - 原始页面已有注释时全部保留，新批注不得复用或覆盖其对象。
+- `review.html` 中的译文叠加层是最终效果预览，不是 PDF 对象；最终输出仍必须由 apply 阶段写入并重新渲染验证。
+- 存在 `reviewed_target_rect` 时，人工位置是固定约束。最终渲染只能在该矩形中按真实字体度量换行，并从审核页建议字号按 0.5 pt 下降到 5 pt；不得平移、扩大目标框或回退到其他自动候选。人工移动后不得沿用指向旧目标框的 `leader_line`。
 
 ## 8. 重叠检测与自动重排闭环
 
@@ -355,6 +366,8 @@ apply 写入接口固定为 `apply_review(source_pdf, review_path, job, expected
    - 同时检测字形裁切、越界、FreeText 间重叠和引线穿字。
 
 ### 8.3 候选位置顺序
+
+存在合法 `reviewed_target_rect` 时只生成同一矩形、不同允许字号的人工固定候选；该分支不进入下列自动位置搜索。文字无法容纳或与受保护内容碰撞时直接进入失败边界，不能以自动移动替代用户决定。
 
 对每个冲突批注按固定顺序生成候选：
 
@@ -388,6 +401,8 @@ apply 写入接口固定为 `apply_review(source_pdf, review_path, job, expected
 | 翻译响应漏项、无效 JSON 或 token 被改 | 校验失败；一次定向纠偏后转人工 |
 | sub-agent 尝试修改 PDF、审核状态或任务文件 | 丢弃越权变更，只接受符合契约的 JSON 响应 |
 | review.json 与输入不匹配 | apply 阶段阻断 |
+| 人工译文位置超出页面或宽高被改变 | 拒绝 review.json，并用自然语言提示重新导出审核结果 |
+| 人工固定位置遮挡原资料、其他译文或无法容纳文字 | 不移动该译文；返回对应页码、原文和易懂原因，阻止最终 PDF 发布 |
 | `review_ready` 下存在未绑定的 `trusted-review.json` | 仅在 Task 7 严格复验并确认 job/expected-output 全绑定后以 CAS 补全 `review_completed`；无效、不可读、非普通、reparse/link 或不匹配文件保持原样并返回 `recovery_required`，不得覆盖、删除或终止任务 |
 | `<原文件完整文件名>.annotated.pdf` 已存在 | 返回 `output_exists`，绝不覆盖 |
 | 同一任务已有工作流操作正在执行 | 不等待、不排队且不修改 state；返回 `status=workflow_busy`、退出码 4 |
@@ -411,7 +426,9 @@ apply 写入接口固定为 `apply_review(source_pdf, review_path, job, expected
 - 结构节点唯一匹配、多候选匹配、模糊阈值和低可信降级。
 - Agent 翻译请求/响应 schema、漏项、重复 ID、空译文、token 丢失和翻译来源缺失。
 - review.json schema、哈希和状态验证。
+- `reviewed_target_rect` 的缺失兼容、有限数值、页面边界、固定宽高和唯一可变字段验证。
 - 候选位置排序、字号下限、页边引线和 10 轮终止条件。
+- 人工固定位置只缩小字号不移动、碰撞时阻断且不回退自动候选。
 
 ### 10.2 集成与场景测试
 
@@ -427,10 +444,13 @@ apply 写入接口固定为 `apply_review(source_pdf, review_path, job, expected
 - 在 Codex、千问办公和腾讯 WorkBuddy 可用环境中使用同一候选集与术语表验证契约一致性；宿主不提供 sub-agent 时验证主 Agent 回退路径。
 - 对四组完整 TechPack 样本执行盲评，记录锁定 token 保留率、术语符合率、人工修改率、严重语义错误、动作/否定/条件/例外保留情况和译文长度风险；不以模型品牌代替实测结论。
 - 验证目录输入时每个 PDF 独立失败或成功，不让一个文件的状态污染其他文件。
+- 覆盖离线审核页整页译文预览、实时文本更新、拖动坐标换算、越界限制、明显译文重叠提示、编辑后恢复未审核和三种审核操作后的自动跳转。
+- 用 5 页代表性样本完成一次“审核页预览与拖动 → 文本修改 → 自动逐项审核 → review.json 导出 → 固定位置 PDF 写入 → 最终渲染检查”的端到端测试。
 
 ### 10.3 视觉金样与兼容性
 
 - 为代表性 BOM、Measurement、技术图和 Sample Review 页面保存“输入渲染、批准译文、目标区域和最终渲染”金样。
+- 审核页金样同时保留缩略图、全页译文叠加层和当前可拖动目标框，检查预览与最终 PDF 的位置、换行、字号和红色文字表现。
 - 自动检查页数、MediaBox/CropBox、原内容对象哈希、批注数量、文字颜色、字号范围、页面边界和未解决问题数。
 - 在 Adobe Reader、Chrome 和福昕中验证中文显示、FreeText 可编辑、引线位置和打印预览。
 
@@ -445,6 +465,7 @@ apply 写入接口固定为 `apply_review(source_pdf, review_path, job, expected
 - 每个批准项目都记录翻译宿主、执行方式、提示词版本和模型标识；宿主不公开模型时必须显式记录为 `unknown`。
 - 所有术语和锁定 token 验证通过。
 - 所有 FreeText 在 5–7 pt 范围、位于 CropBox 内、可编辑且跨三种阅读器可见。
+- 每个人工拖动项目的最终 FreeText 矩形与 `reviewed_target_rect` 的各坐标差不超过 0.1 pt；只能发生审核规则允许的换行和字号降低。
 - 几何与 300 DPI 复检后 `unresolved_overlap = 0`。
 - 最终 PDF 可重新打开、重新渲染且错误报告为空。
 

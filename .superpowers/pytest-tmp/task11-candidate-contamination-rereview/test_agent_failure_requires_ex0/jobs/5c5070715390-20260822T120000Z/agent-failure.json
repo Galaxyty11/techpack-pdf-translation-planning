@@ -1,0 +1,1 @@
+{"schema_version": "1.1", "job_id": "wrong-job", "source_sha256": "5c5070715390b871a425fb4dfadc762ebe73f42098d3189177bb140284639ecd", "glossary_sha256": "a3dde385844fb37d12f59bd940fbbce96d81c2ae7f1e00fc426bf92f527f2b36", "request_sha256": "646bc6a49a3f04e508184cc37b04b3060ea1999d7ebf508997081b0baa4122d6", "status": "subagent_failed", "error_code": "agent_subagent_failed"}
