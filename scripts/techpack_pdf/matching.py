@@ -14,6 +14,8 @@ from .models import CoordinateConfidence
 
 
 BBox = tuple[float, float, float, float]
+MAX_NATIVE_SEQUENCE_SPANS = 4
+NATIVE_SEQUENCE_X_TOLERANCE = 3.0
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,13 @@ class MatchedNode:
     auto_approvable: bool
 
 
+@dataclass(frozen=True)
+class _NativeSequence:
+    indices: tuple[int, ...]
+    text: str
+    bbox: BBox
+
+
 def match_nodes(
     native_spans: Sequence[Mapping[str, Any]],
     mineru_nodes: Sequence[Mapping[str, Any]],
@@ -38,6 +47,7 @@ def match_nodes(
     diagonal = _diagonal(_bbox(page_rect))
     native_text = [normalize_term(str(span.get("text", ""))) for span in native_spans]
     mineru_text = [normalize_term(str(node.get("text", ""))) for node in mineru_nodes]
+    native_sequences = _native_sequences(native_spans)
 
     return [
         _match_one(
@@ -46,6 +56,7 @@ def match_nodes(
             mineru_nodes,
             native_text,
             mineru_text,
+            native_sequences,
             diagonal,
         )
         for mineru_index in range(len(mineru_nodes))
@@ -58,10 +69,43 @@ def _match_one(
     mineru_nodes: Sequence[Mapping[str, Any]],
     native_text: list[str],
     mineru_text: list[str],
+    native_sequences: Sequence[_NativeSequence],
     diagonal: float,
 ) -> MatchedNode:
     text = mineru_text[mineru_index]
     exact = [index for index, candidate in enumerate(native_text) if candidate == text and text]
+    sequence_exact = [
+        candidate
+        for candidate in native_sequences
+        if candidate.text == text and text
+    ]
+    if sequence_exact:
+        exact_candidates = list(sequence_exact)
+        exact_candidates.extend(
+            _NativeSequence(
+                indices=(index,),
+                text=native_text[index],
+                bbox=_bbox(native_spans[index]["bbox"]),
+            )
+            for index in exact
+        )
+        selected = _select_sequence_exact(
+            exact_candidates,
+            mineru_index,
+            native_text,
+            mineru_text,
+            _optional_bbox(mineru_nodes[mineru_index].get("bbox")),
+            diagonal,
+        )
+        if selected is None:
+            return _unmatched(mineru_index, mineru_nodes, text)
+        return _sequence_result(
+            mineru_index,
+            selected,
+            mineru_nodes,
+            diagonal,
+        )
+
     if len(exact) == 1:
         return _result(
             mineru_index,
@@ -177,6 +221,146 @@ def _neighbor_score(
         ):
             score += 1
     return score
+
+
+def _native_sequences(
+    native_spans: Sequence[Mapping[str, Any]],
+) -> list[_NativeSequence]:
+    valid: list[tuple[int, str, BBox]] = []
+    for index, span in enumerate(native_spans):
+        text = normalize_term(str(span.get("text", "")))
+        bbox = _optional_bbox(span.get("bbox"))
+        if text and bbox is not None:
+            valid.append((index, text, bbox))
+
+    sequences: list[_NativeSequence] = []
+    for start_position, (start_index, start_text, start_bbox) in enumerate(valid):
+        pending = [(start_position, (start_index,), (start_text,), (start_bbox,))]
+        while pending:
+            current_position, indices, texts, boxes = pending.pop()
+            if len(indices) >= MAX_NATIVE_SEQUENCE_SPANS:
+                continue
+            for next_position in _native_continuations(valid, current_position):
+                next_index, next_text, next_bbox = valid[next_position]
+                next_indices = (*indices, next_index)
+                next_texts = (*texts, next_text)
+                next_boxes = (*boxes, next_bbox)
+                sequences.append(
+                    _NativeSequence(
+                        indices=next_indices,
+                        text=normalize_term(" ".join(next_texts)),
+                        bbox=_union_bbox(next_boxes),
+                    )
+                )
+                pending.append(
+                    (next_position, next_indices, next_texts, next_boxes)
+                )
+    return sequences
+
+
+def _native_continuations(
+    spans: Sequence[tuple[int, str, BBox]], current_position: int
+) -> list[int]:
+    _current_index, _current_text, current = spans[current_position]
+    choices: list[tuple[float, float, int]] = []
+    for position in range(current_position + 1, len(spans)):
+        _index, _text, candidate = spans[position]
+        vertical_gap = candidate[1] - current[3]
+        aligned_left = abs(candidate[0] - current[0]) <= NATIVE_SEQUENCE_X_TOLERANCE
+        max_vertical_gap = max(4.0, (current[3] - current[1]) * 0.75)
+        if aligned_left and -1.0 <= vertical_gap <= max_vertical_gap:
+            choices.append(
+                (max(vertical_gap, 0.0), abs(candidate[0] - current[0]), position)
+            )
+            continue
+
+        current_center_y = (current[1] + current[3]) / 2.0
+        candidate_center_y = (candidate[1] + candidate[3]) / 2.0
+        same_line = abs(candidate_center_y - current_center_y) <= 1.5
+        horizontal_gap = candidate[0] - current[2]
+        if same_line and -1.0 <= horizontal_gap <= 14.0:
+            choices.append((0.0, max(horizontal_gap, 0.0), position))
+    return [choice[2] for choice in sorted(choices)]
+
+
+def _select_sequence_exact(
+    candidates: Sequence[_NativeSequence],
+    mineru_index: int,
+    native_text: Sequence[str],
+    mineru_text: Sequence[str],
+    mineru_bbox: BBox | None,
+    diagonal: float,
+) -> _NativeSequence | None:
+    ranked = sorted(
+        [
+            (
+                _sequence_neighbor_score(
+                    candidate,
+                    mineru_index,
+                    native_text,
+                    mineru_text,
+                ),
+                -_distance_ratio(candidate.bbox, mineru_bbox, diagonal),
+                candidate.indices,
+                candidate,
+            )
+            for candidate in candidates
+        ],
+        reverse=True,
+    )
+    if len(ranked) > 1 and ranked[0][:2] == ranked[1][:2]:
+        return None
+    return ranked[0][3]
+
+
+def _sequence_neighbor_score(
+    candidate: _NativeSequence,
+    mineru_index: int,
+    native_text: Sequence[str],
+    mineru_text: Sequence[str],
+) -> int:
+    score = 0
+    boundaries = (
+        (candidate.indices[0] - 1, mineru_index - 1),
+        (candidate.indices[-1] + 1, mineru_index + 1),
+    )
+    for native_neighbor, mineru_neighbor in boundaries:
+        if (
+            0 <= native_neighbor < len(native_text)
+            and 0 <= mineru_neighbor < len(mineru_text)
+            and native_text[native_neighbor] == mineru_text[mineru_neighbor]
+        ):
+            score += 1
+    return score
+
+
+def _sequence_result(
+    mineru_index: int,
+    sequence: _NativeSequence,
+    mineru_nodes: Sequence[Mapping[str, Any]],
+    diagonal: float,
+) -> MatchedNode:
+    mineru_bbox = _optional_bbox(mineru_nodes[mineru_index].get("bbox"))
+    return MatchedNode(
+        mineru_index=mineru_index,
+        native_index=sequence.indices[0],
+        text=str(mineru_nodes[mineru_index].get("text", "")),
+        source_bbox=sequence.bbox,
+        mineru_bbox=mineru_bbox,
+        coordinate_confidence=CoordinateConfidence.HIGH,
+        similarity=1.0,
+        distance_ratio=_distance_ratio(sequence.bbox, mineru_bbox, diagonal),
+        auto_approvable=True,
+    )
+
+
+def _union_bbox(boxes: Sequence[BBox]) -> BBox:
+    return (
+        min(box[0] for box in boxes),
+        min(box[1] for box in boxes),
+        max(box[2] for box in boxes),
+        max(box[3] for box in boxes),
+    )
 
 
 def _result(
