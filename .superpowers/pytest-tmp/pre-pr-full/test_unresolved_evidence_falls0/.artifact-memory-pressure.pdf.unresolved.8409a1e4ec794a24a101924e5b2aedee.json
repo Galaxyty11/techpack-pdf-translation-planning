@@ -1,0 +1,20 @@
+{
+  "code": "unresolved_overlap",
+  "source_filename": "artifact-memory-pressure.pdf",
+  "layout_rounds": 10,
+  "issues": [
+    {
+      "code": "unresolved_overlap",
+      "page_index": 0,
+      "item_id": "item-a",
+      "collision_object": [
+        {
+          "kind": "render_overlap",
+          "object_id": "original"
+        }
+      ],
+      "attempted_placements": [],
+      "final_render_reference": "D:\\PDF翻译skill实施\\.superpowers\\pytest-tmp\\pre-pr-full\\test_unresolved_evidence_falls0\\.artifact-memory-pressure.pdf.unresolved.8409a1e4ec794a24a101924e5b2aedee.page-1.png"
+    }
+  ]
+}

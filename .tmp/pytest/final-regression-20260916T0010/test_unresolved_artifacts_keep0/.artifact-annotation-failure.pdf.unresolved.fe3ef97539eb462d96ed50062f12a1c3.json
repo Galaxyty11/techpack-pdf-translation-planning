@@ -1,0 +1,32 @@
+{
+  "code": "unresolved_overlap",
+  "source_filename": "artifact-annotation-failure.pdf",
+  "layout_rounds": 2,
+  "issues": [
+    {
+      "code": "unresolved_overlap",
+      "page_index": 0,
+      "item_id": "p001-i001",
+      "collision_object": [
+        {
+          "kind": "protected_text",
+          "object_id": "glyph-0"
+        }
+      ],
+      "attempted_placements": [
+        {
+          "strategy": "review_target",
+          "rect": [
+            175.0,
+            20.0,
+            285.0,
+            48.0
+          ],
+          "font_size": 7.0,
+          "leader": false
+        }
+      ],
+      "final_render_reference": "D:\\PDF翻译skill实施\\.tmp\\pytest\\final-regression-20260916T0010\\test_unresolved_artifacts_keep0\\.artifact-annotation-failure.pdf.unresolved.fe3ef97539eb462d96ed50062f12a1c3.page-1.png"
+    }
+  ]
+}

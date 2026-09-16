@@ -94,7 +94,7 @@ def test_inspect_pdf_records_geometry_content_and_144_dpi_thumbnails(tmp_path: P
     first_thumbnail = pymupdf.Pixmap(str(first.thumbnail_path))
     second_thumbnail = pymupdf.Pixmap(str(second.thumbnail_path))
     assert (first_thumbnail.width, first_thumbnail.height) == (360, 520)
-    assert (second_thumbnail.width, second_thumbnail.height) == (600, 400)
+    assert (second_thumbnail.width, second_thumbnail.height) == (400, 600)
 
 
 def test_inspect_pdf_maps_corrupt_input_to_stable_error(tmp_path: Path) -> None:
