@@ -15,34 +15,14 @@ from .models import CoordinateConfidence, DecisionReason, PageType
 _TITLE_RULES: tuple[tuple[PageType, str, tuple[str, ...]], ...] = (
     (PageType.GENERAL_INFO, "style general information", ("style general information", "general information")),
     (PageType.BOM, "bill of materials", ("bill of materials", "bom")),
-    (PageType.MEASUREMENT, "measurement sheet", ("measurement sheet", "size chart")),
+    (PageType.MEASUREMENT, "measurement sheet", ("measurement sheet",)),
     (
         PageType.TECHNICAL_DRAWING,
         "style additional images",
-        ("style additional images", "technical drawing", "cad drawing"),
+        ("style additional images", "technical drawing"),
     ),
-    (
-        PageType.PRINT_ARTWORK,
-        "print artwork",
-        ("print artwork", "print art", "print layout"),
-    ),
-    (
-        PageType.LABEL_PACK,
-        "label and pack",
-        ("label and pack", "label pack", "packaging information", "packing information"),
-    ),
-    (
-        PageType.SAMPLE_REVIEW,
-        "sample style review",
-        (
-            "sample style review",
-            "sample review",
-            "customer comments",
-            "customer comment",
-            "buyer comments",
-            "client comments",
-        ),
-    ),
+    (PageType.LABEL_PACK, "label and pack", ("label and pack", "label pack")),
+    (PageType.SAMPLE_REVIEW, "sample style review", ("sample style review", "sample review")),
     (PageType.STYLE_SAMPLE, "style sample", ("style sample", "fit page")),
     (PageType.HOW_TO_MEASURE, "how to measure", ("how to measure",)),
     (PageType.CONSTRUCTION_DETAIL, "construction detail", ("construction detail",)),
@@ -88,18 +68,6 @@ _MEASUREMENT_ROLES = frozenset(
 )
 _TECHNICAL_ROLES = frozenset(
     {"body", "production_instruction", "callout", "construction_instruction"}
-)
-_PRINT_ARTWORK_ROLES = frozenset(
-    {
-        "body",
-        "production_instruction",
-        "placement",
-        "color_note",
-        "artwork_text",
-        "callout",
-        "note",
-        "description",
-    }
 )
 _LABEL_PACK_ROLES = frozenset(
     {
@@ -559,12 +527,6 @@ def _candidate_decision(
         return False, DecisionReason.LOW_CONFIDENCE
     if not normalized or role in _ADMIN_ROLES:
         return False, DecisionReason.SKIPPED_ADMIN
-    if (
-        _is_protected_mark(classification.page_type, role, text)
-        or _is_pure_dimension(text)
-        or _is_code_only(text, locked)
-    ):
-        return False, DecisionReason.SKIPPED_CODE
     if _is_administrative_text(normalized, role):
         return False, DecisionReason.SKIPPED_ADMIN
     if classification.page_type in {
@@ -578,6 +540,8 @@ def _candidate_decision(
         if role in {"special_note", "production_note", "delivery_note"}:
             return _translate_reason(DecisionReason.FIELD_RULE, text, locked, glossary_hits)
         return False, DecisionReason.SKIPPED_ADMIN
+    if _is_protected_mark(classification.page_type, role, text) or _is_code_only(text, locked):
+        return False, DecisionReason.SKIPPED_CODE
     if duplicate:
         return False, DecisionReason.SKIPPED_DUPLICATE
 
@@ -588,8 +552,6 @@ def _candidate_decision(
     elif page_type is PageType.MEASUREMENT and role in _MEASUREMENT_ROLES:
         base_reason = DecisionReason.PAGE_RULE if role == "body" else DecisionReason.FIELD_RULE
     elif page_type is PageType.TECHNICAL_DRAWING and role in _TECHNICAL_ROLES:
-        base_reason = DecisionReason.PAGE_RULE if role == "body" else DecisionReason.FIELD_RULE
-    elif page_type is PageType.PRINT_ARTWORK and role in _PRINT_ARTWORK_ROLES:
         base_reason = DecisionReason.PAGE_RULE if role == "body" else DecisionReason.FIELD_RULE
     elif page_type is PageType.LABEL_PACK and role in _LABEL_PACK_ROLES:
         base_reason = DecisionReason.PAGE_RULE if role == "body" else DecisionReason.FIELD_RULE
@@ -651,37 +613,10 @@ def _translate_reason(
 
 
 def _is_protected_mark(page_type: PageType, role: str, text: str) -> bool:
-    technical_abbreviation = (
+    return (
         page_type is PageType.TECHNICAL_DRAWING
         and role == "body"
         and bool(re.fullmatch(r"[A-Z]{2,6}\.", text.strip()))
-    )
-    explicit_artwork_protection = (
-        page_type is PageType.PRINT_ARTWORK
-        and role
-        in {
-            "trademark",
-            "brand",
-            "brand_name",
-            "logo",
-            "nonlinguistic_graphic",
-            "artwork_code",
-            "dimension",
-        }
-    )
-    return technical_abbreviation or explicit_artwork_protection
-
-
-def _is_pure_dimension(text: str) -> bool:
-    number = r"[+-]?\d+(?:\.\d+)?"
-    unit = r"(?:mm|cm|in(?:ch(?:es)?)?|ft|yd|\")"
-    factor = rf"{number}\s*{unit}?"
-    return bool(
-        re.fullmatch(
-            rf"\s*{factor}(?:\s*[x×]\s*{factor})+\s*",
-            text,
-            flags=re.IGNORECASE,
-        )
     )
 
 

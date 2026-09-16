@@ -246,7 +246,6 @@ class _AnalysisSnapshot(_StrictModel):
     parser: str = Field(min_length=1)
     pages: list[_AnalysisPage] = Field(min_length=1)
     candidates: list[_CandidateSnapshot]
-    visual_check_required: bool = False
 
 
 class _ExpectedPage(_StrictModel):
@@ -398,7 +397,6 @@ class WorkflowResult:
     status: Literal["workflow_busy", "recovery_required"] | None = None
     wait_reason: Literal[
         "agent_classification",
-        "visual_annotations",
         "concurrent_operation",
         "apply_recovery",
         "review_recovery",
@@ -507,7 +505,7 @@ def _prepare_review_locked(job_dir: str | Path) -> WorkflowResult:
                 4,
                 WorkflowState.PARSED,
                 directory,
-                wait_reason="visual_annotations" if _artifact_exists(directory, "visual-annotations-request.json") else "agent_classification",
+                wait_reason="agent_classification",
             )
         _atomic_translation_request(directory, _candidates_from_analysis(effective), job)
         _write_state(
@@ -930,8 +928,7 @@ def _verify_apply_integrity_closure(
         if request_bytes != _canonical_request_bytes(directory, analysis, job):
             raise ValueError
         request = json.loads(request_bytes.decode("utf-8"))
-        # Translation exchange sorts by ID; preserve analysis order for reviewed layout.
-        canonical_ids = sorted(item.item_id for item in analysis.candidates if item.should_translate)
+        canonical_ids = [item.item_id for item in analysis.candidates if item.should_translate]
         request_ids = [item["item_id"] for item in request.get("items", [])]
         if request_ids != canonical_ids or len(request_ids) != len(set(request_ids)):
             raise ValueError
@@ -975,7 +972,7 @@ def _analyze_one(
                 4,
                 WorkflowState.PARSED,
                 directory,
-                wait_reason="visual_annotations" if _artifact_exists(directory, "visual-annotations-request.json") else "agent_classification",
+                wait_reason="agent_classification",
             )
         _atomic_translation_request(directory, _candidates_from_analysis(analysis), job)
         _write_state(directory, job, WorkflowState.TRANSLATION_REQUESTED, 2, 0, "host_translation")
@@ -1111,7 +1108,6 @@ def _analysis_snapshot(
         source_sha256=job.source.sha256,
         glossary_sha256=job.glossary.sha256,
         parser="native_only" if isinstance(parsed, NativeOnlyDegradation) else "mineru",
-        visual_check_required=True,
         pages=pages,
         candidates=candidates,
     )
@@ -1246,74 +1242,6 @@ def _effective_analysis(
     job: JobManifest,
     analysis: _AnalysisSnapshot | None = None,
 ) -> _AnalysisSnapshot | None:
-    classified = _classified_analysis(directory, job, analysis)
-    if classified is None or not classified.visual_check_required:
-        return classified
-    return _with_visual_annotations(directory, job, classified)
-
-
-def _with_visual_annotations(directory, job, analysis):
-    from .visual_annotations import coverage_request, validate_coverage, is_existing_annotation
-    request = coverage_request(analysis)
-    name = "visual-annotations-request.json"
-    if not _artifact_exists(directory, name):
-        _atomic_json_write(directory / name, request)
-    elif _read_json(directory, name) != request:
-        raise _workflow_error("workflow_binding_mismatch", "Visual request does not match current pages")
-    if not _artifact_exists(directory, "visual-annotations-response.json"):
-        return None
-    try:
-        response = validate_coverage(request, _read_json(directory, "visual-annotations-response.json"))
-    except (TypeError, ValueError):
-        raise _workflow_error("visual_annotations_invalid", "图中文字检查结果无效，请检查页码、文字和框选位置") from None
-    if any(not page.checked or page.unresolved for page in response.pages):
-        return None
-    glossary = load_glossary(_snapshot_glossary_path(directory, job))
-    candidates = list(analysis.candidates)
-    pages = []
-    reviewed = {p.page_index: p for p in response.pages}
-    requested = {p["page_index"]: p for p in request["pages"]}
-    for page in analysis.pages:
-        nodes = list(page.nodes)
-        protected_ids = set(reviewed[page.page_index].protected_item_ids)
-        if protected_ids:
-            candidates = [
-                candidate.model_copy(update={
-                    "should_translate": False,
-                    "decision_reason": DecisionReason.SKIPPED_CODE,
-                    "auto_approvable": False,
-                })
-                if candidate.item_id in protected_ids
-                else candidate
-                for candidate in candidates
-            ]
-        next_id = max((int(c.item_id.rsplit("i", 1)[1]) for c in candidates if c.page_index == page.page_index), default=0)
-        for annotation in reviewed[page.page_index].annotations:
-            if is_existing_annotation(
-                annotation,
-                requested[page.page_index]["existing_annotations"],
-            ):
-                continue
-            box = tuple(annotation.bbox)
-            matched = MatchedNode(mineru_index=0, native_index=None, text=annotation.text,
-                source_bbox=box, mineru_bbox=box, coordinate_confidence=CoordinateConfidence.LOW,
-                similarity=0.0, distance_ratio=None, auto_approvable=False)
-            classification = PageClassification(page.page_type, page.confidence, tuple(page.evidence))
-            role = {
-                PageType.GENERAL_INFO: "production_note",
-                PageType.HOW_TO_MEASURE: "special_measurement_instruction",
-            }.get(page.page_type, "body")
-            selected = select_candidates(SelectionPage(page.page_index, classification, (PageNode(matched, role),)), glossary)[0]
-            if not selected.should_translate:
-                raise _workflow_error("visual_annotation_not_selected", "补充图中文字未通过生产内容筛选，请核实内容与页面类型")
-            next_id += 1
-            candidates.append(_candidate_snapshot(selected).model_copy(update={"item_id": f"p{page.page_index+1:03d}-i{next_id:03d}"}))
-            nodes.append(_AnalysisNode(text=annotation.text, bbox=annotation.bbox, field_role=role))
-        pages.append(page.model_copy(update={"nodes": nodes}))
-    return analysis.model_copy(update={"pages": pages, "candidates": candidates})
-
-
-def _classified_analysis(directory, job, analysis=None):
     base = analysis or _load_model(directory, "analysis.json", _AnalysisSnapshot)
     _assert_snapshot_binding(base, job)
     pending = _classification_request_from_analysis(base, job)
