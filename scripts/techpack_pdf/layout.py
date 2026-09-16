@@ -719,11 +719,12 @@ def plan_document_layout(
 
     for page_index in sorted(by_page):
         page = document[page_index]
+        page_rect = _canonical_page_rect(page)
         protected = extract_protected_geometry(page)
         for item in sorted(by_page[page_index], key=lambda value: value.item_id):
             candidates = rank_placements(
                 item,
-                _canonical_page_rect(page),
+                page_rect,
                 protected=protected,
                 same_row_cells=find_same_row_blank_cells(page, item.source_bbox),
                 semantic_region=infer_semantic_region(page, item.source_bbox),
@@ -731,6 +732,19 @@ def plan_document_layout(
                     item.coordinate_confidence is CoordinateConfidence.LOW
                 ),
             )
+            max_blank_distance = max(
+                96.0,
+                math.hypot(page_rect.width, page_rect.height) * 0.15,
+            )
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate.in_bounds
+                and not (
+                    candidate.strategy == "page_blank_fallback"
+                    and candidate.movement_distance > max_blank_distance
+                )
+            ]
             if excluded:
                 candidates = [
                     candidate
