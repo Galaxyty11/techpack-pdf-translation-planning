@@ -53,53 +53,6 @@
     };
   }
 
-  function buildReviewPayload(data, completedAt) {
-    const frozenItems = data.items.map((item) => {
-      const exported = {...item};
-      if (item.review_status === "approved"
-          || item.review_status === "approved_edited") {
-        exported.reviewed_source_bbox = [
-          ...(item.reviewed_source_bbox || item.source_bbox)
-        ];
-        exported.reviewed_target_rect = [
-          ...(item.reviewed_target_rect || item.target_rect)
-        ];
-        exported.reviewed_font_size = item.reviewed_font_size ?? item.font_size;
-      }
-      if (item.review_status === "skipped"
-          && !(item.reviewed_translation || "").trim()) {
-        exported.reviewed_translation = null;
-      }
-      return Object.fromEntries(
-        itemFields.map((field) => [field, exported[field]])
-      );
-    });
-    return {
-      schema_version: "1.1",
-      job_id: data.job_id,
-      source: {
-        filename: data.source.filename,
-        sha256: data.source.sha256,
-        page_count: data.source.page_count
-      },
-      glossary: {
-        filename: data.glossary.filename,
-        sha256: data.glossary.sha256
-      },
-      pipeline: {
-        parser: data.pipeline.parser,
-        translation_executor: data.pipeline.translation_executor,
-        host: data.pipeline.host,
-        execution_mode: data.pipeline.execution_mode,
-        model: data.pipeline.model,
-        prompt_version: data.pipeline.prompt_version
-      },
-      items: frozenItems,
-      blocking_issues: [],
-      review_completed_at: completedAt || new Date().toISOString()
-    };
-  }
-
   function initReviewPage(documentRef) {
     const doc = documentRef || (typeof document === "object" ? document : null);
     if (!doc) return null;
@@ -629,7 +582,32 @@
       if (data.items.some((item) => (
         item.review_status === "approved" && !(item.suggested_translation || "").trim()
       ))) return;
-      const payload = buildReviewPayload(data);
+      const payload = {
+        schema_version: "1.1",
+        job_id: data.job_id,
+        source: {
+          filename: data.source.filename,
+          sha256: data.source.sha256,
+          page_count: data.source.page_count
+        },
+        glossary: {filename: data.glossary.filename, sha256: data.glossary.sha256},
+        pipeline: {
+          parser: data.pipeline.parser,
+          translation_executor: data.pipeline.translation_executor,
+          host: data.pipeline.host,
+          execution_mode: data.pipeline.execution_mode,
+          model: data.pipeline.model,
+          prompt_version: data.pipeline.prompt_version
+        },
+        items: data.items.map((item) => (
+          Object.fromEntries(itemFields.map((field) => [field,
+            field === "reviewed_translation" && item.review_status === "skipped"
+              && !(item.reviewed_translation || "").trim() ? null : item[field]
+          ]))
+        )),
+        blocking_issues: [],
+        review_completed_at: new Date().toISOString()
+      };
       const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], {
         type: "application/json"
       });
@@ -725,7 +703,6 @@
     rectanglesOverlap,
     orderedUnreviewedIds,
     pageRectStyle,
-    buildReviewPayload,
     initReviewPage,
   };
 });

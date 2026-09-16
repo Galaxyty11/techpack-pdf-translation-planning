@@ -132,11 +132,7 @@ def _inspect_page(page: pymupdf.Page, thumbnail_path: Path) -> PdfPageManifest:
     is_scanned = native_text_area_ratio < 0.01 and image_coverage_ratio >= 0.5
     needs_ocr_regions = _ocr_regions(image_bboxes, crop_box) if is_scanned else ()
 
-    # All extracted boxes and all later PDF annotation APIs use PyMuPDF's
-    # canonical, crop-relative, unrotated coordinate space.  Derotate the
-    # thumbnail as well so review overlays use that same space.
-    thumbnail_matrix = page.derotation_matrix * pymupdf.Matrix(2, 2)
-    page.get_pixmap(matrix=thumbnail_matrix, alpha=False).save(thumbnail_path)
+    page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False).save(thumbnail_path)
     return PdfPageManifest(
         page_index=page.number,
         media_box=_box_tuple(media_box),
