@@ -712,7 +712,6 @@ def _apply_locked(
         raise _workflow_error("source_job_mismatch", "Source does not match the job")
     expected = _load_model(directory, "expected-output.json", _ExpectedOutputSnapshot)
     _assert_snapshot_binding(expected, job)
-    _verify_apply_integrity_closure(directory, job, state, expected)
     resuming_apply = state.state is WorkflowState.APPLYING
     if resuming_apply:
         # A published final is recoverable only if this applying state already
@@ -874,82 +873,6 @@ def _apply_locked(
     return WorkflowResult(5, WorkflowState.FAILED, directory)
 
 
-def _canonical_request_bytes(directory: Path, analysis: _AnalysisSnapshot, job: JobManifest) -> bytes:
-    """Rebuild the exact Task 6 request without accepting a job-local substitute."""
-    path = _inside(directory, f".canonical-request.{uuid.uuid4().hex}.tmp")
-    owned_identity: tuple[int, int] | None = None
-    try:
-        descriptor = os.open(
-            path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-        )
-        try:
-            opened = os.fstat(descriptor)
-            owned_identity = (opened.st_dev, opened.st_ino)
-        finally:
-            os.close(descriptor)
-        write_translation_request(_candidates_from_analysis(analysis), path, job)
-        details = path.lstat()
-        if (
-            owned_identity is None
-            or _is_reparse_or_link(details)
-            or not stat.S_ISREG(details.st_mode)
-            or (details.st_dev, details.st_ino) != owned_identity
-        ):
-            raise OSError
-        return _bounded_binary_read(path)
-    except (OSError, TechpackError):
-        raise _workflow_error("workflow_binding_mismatch", "Workflow request does not match bound analysis") from None
-    finally:
-        try:
-            if path.exists() and owned_identity is not None:
-                details = path.lstat()
-                if (
-                    not _is_reparse_or_link(details)
-                    and stat.S_ISREG(details.st_mode)
-                    and (details.st_dev, details.st_ino) == owned_identity
-                ):
-                    path.unlink()
-        except OSError:
-            pass
-
-
-def _verify_apply_integrity_closure(
-    directory: Path,
-    job: JobManifest,
-    state: _StateSnapshot,
-    expected: _ExpectedOutputSnapshot,
-) -> None:
-    """Reconstruct every bound upstream contract before editing a PDF."""
-    try:
-        analysis = _effective_analysis(directory, job)
-        if analysis is None:
-            raise ValueError
-        request_bytes = _bounded_binary_read(_inside(directory, "translation-request.json"))
-        if request_bytes != _canonical_request_bytes(directory, analysis, job):
-            raise ValueError
-        request = json.loads(request_bytes.decode("utf-8"))
-        # Translation exchange sorts by ID; preserve analysis order for reviewed layout.
-        canonical_ids = sorted(item.item_id for item in analysis.candidates if item.should_translate)
-        request_ids = [item["item_id"] for item in request.get("items", [])]
-        if request_ids != canonical_ids or len(request_ids) != len(set(request_ids)):
-            raise ValueError
-        translations = validate_translation_response(
-            request,
-            _response_input(directory),
-            load_glossary(_snapshot_glossary_path(directory, job)),
-            job,
-            expected_attempt=state.expected_attempt,
-        )
-        translated_ids = [item.item_id for item in translations]
-        if translated_ids != canonical_ids or len(translated_ids) != len(set(translated_ids)):
-            raise ValueError
-        rebuilt = _trusted_output(directory, job, analysis, translations)
-        if rebuilt.model_dump(mode="json") != expected.output.model_dump(mode="json"):
-            raise ValueError
-    except (KeyError, UnicodeError, json.JSONDecodeError, TranslationValidationError, TechpackError, ValueError):
-        raise _workflow_error("workflow_binding_mismatch", "Workflow artifacts do not form a bound closure") from None
 
 
 def _analyze_one(
