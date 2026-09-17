@@ -221,6 +221,10 @@ Keep one model and prompt version where practical. Cache reuse requires matching
 
 `prepare-review` creates a self-contained `review.html`; it does not create approval. The page must remain offline and display the source location, suggested translation, locked tokens, glossary hits, selection reason, coordinate confidence, layout risk, and translation provenance. Generation clears all incoming review states.
 
+Preview placement is a fast suggestion for human review, not an automatic approval gate. Cache page-level text blocks, image blocks, annotations, coarse vector-line geometry and table cells, and use page-local spatial buckets for collision lookup. Try same-row table space, then a bounded set of right, below, left and above positions using 7, 6 or 5 pt. Keep suggestions within 96 PDF points of the source whenever any in-bounds, text-fitting nearby candidate exists. Prefer the least-conflicting nearby candidate over a farther clean candidate, mark both items in any selected annotation-to-annotation collision `manual_placement_required`, raise selected collision risks to high and show them early for manual dragging. Never hide a preview conflict with an opaque or white fill.
+
+Do not perform per-glyph all-candidate comparisons, 200/300 DPI candidate rendering, full-page pixel diffs or multi-round global layout optimization while generating the review page. A page may use at most one low-resolution background occupancy pass when image-heavy content genuinely needs it; absence of that optional pass must not block review generation. Every item must remain visible and editable even when no collision-free suggestion exists.
+
 Stop for the user to decide every item as `approved`, `approved_edited`, or `skipped`. Export `review.json` only when every item has a decision and no blocking issue remains. Never infer approval from a suggested translation or edit `review.json` on the user's behalf.
 
 ## Review trust boundary

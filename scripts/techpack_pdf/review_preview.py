@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pymupdf
 
-from .layout import plan_document_layout
+from .layout import plan_fast_review_layout
 from .models import ReviewItem
 
 
@@ -21,7 +21,7 @@ def plan_review_items(
     """Return review items populated from a read-only whole-document layout plan."""
     document = pymupdf.open(source_pdf)
     try:
-        layout, _attempted = plan_document_layout(document, items)
+        layout, _attempted = plan_fast_review_layout(document, items)
     finally:
         document.close()
 

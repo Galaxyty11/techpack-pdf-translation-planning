@@ -165,7 +165,7 @@ def test_review_ready_apply_uses_frozen_review_without_any_layout_rebuild(
     monkeypatch.setattr(workflow, "_verify_apply_integrity_closure", forbidden, raising=False)
     monkeypatch.setattr(workflow, "_trusted_output", forbidden)
     monkeypatch.setattr(workflow, "plan_review_items", forbidden)
-    monkeypatch.setattr(review_preview, "plan_document_layout", forbidden)
+    monkeypatch.setattr(review_preview, "plan_fast_review_layout", forbidden)
 
     result = workflow._apply_locked(source, review_path, output)
 
