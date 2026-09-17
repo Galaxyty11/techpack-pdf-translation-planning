@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import gc
 import json
+import math
 import os
 import re
 import shutil
@@ -25,9 +26,7 @@ from .layout import (
     LayoutResult,
     Placement,
     ProtectedGeometry,
-    detect_rendered_collisions,
     placement_signature as _placement_signature,
-    plan_document_layout as _layout_document,
 )
 from .errors import TechpackError
 from .models import (
@@ -181,191 +180,46 @@ def apply_review(
             snapshot_path = None if cleanup is None else snapshot_path
             return _failure(_combine_problems(identity_problem, cleanup))
 
-        source_document = pymupdf.open(snapshot_path)
-        try:
-            baseline = _snapshot_document(source_document)
-            layout, attempted = _layout_document(source_document, approved)
-            if layout.collisions:
-                artifact = _write_unresolved_artifacts(
-                    source, layout, attempted, document=source_document
-                )
-                source_document.close()
-                cleanup = _cleanup_problem(snapshot_path, source)
-                snapshot_path = None if cleanup is None else snapshot_path
-                if artifact.problem is not None or cleanup is not None:
-                    return _failure(
-                        _combine_problems(artifact.problem, cleanup),
-                        unresolved_overlaps=artifact.unresolved,
-                        failure_report_path=artifact.report_path,
-                    )
-                return ApplyResult(
-                    success=False,
-                    output_path=None,
-                    problems=(
-                        _problem(
-                            "candidate_exhausted" if any(value.kind == "candidate_exhausted" for value in layout.collisions) else "unresolved_overlap",
-                            "One or more annotations could not be placed safely",
-                        ),
-                    ),
-                    unresolved_overlaps=artifact.unresolved,
-                    layout_rounds=layout.rounds,
-                    modified_pages=tuple(
-                        sorted({placement.page_index for placement in layout.placements})
-                    ),
-                    failure_report_path=artifact.report_path,
-                )
-            placements = layout.placements
-            total_rounds = layout.rounds
-        finally:
-            if not source_document.is_closed:
-                source_document.close()
+        placements = _placements_from_review(approved)
+        total_rounds = 0
         identity_problem = _placement_identity_problem(approved, placements)
         if identity_problem is not None:
             cleanup = _cleanup_problem(snapshot_path, source)
             snapshot_path = None if cleanup is None else snapshot_path
             return _failure(_combine_problems(identity_problem, cleanup))
-        excluded: set[tuple[object, ...]] = set()
-        while True:
-            temp_path = _unique_temp_path(source)
-            shutil.copyfile(snapshot_path, temp_path)
-            output_document = pymupdf.open(temp_path)
-            try:
-                written = _write_annotations(output_document, placements)
-                output_document.saveIncr()
-            finally:
-                output_document.close()
+        temp_path = _unique_temp_path(source)
+        shutil.copyfile(snapshot_path, temp_path)
+        output_document = pymupdf.open(temp_path)
+        try:
+            written = _write_annotations(output_document, placements)
+            output_document.saveIncr()
+        finally:
+            output_document.close()
 
-            modified_pages = tuple(
-                sorted({placement.page_index for placement in placements})
-            )
-            verification = _verify_temp(
-                snapshot_path,
-                temp_path,
-                baseline,
-                placements,
-                modified_pages,
-                written=written,
-            )
-            if verification.collisions:
-                total_rounds += 1
-                if total_rounds >= 10:
-                    unresolved_layout = LayoutResult(
-                        tuple(placements), verification.collisions, 10, False
-                    )
-                    artifact = _write_unresolved_artifacts(
-                        source, unresolved_layout, attempted, annotated_temp=temp_path
-                    )
-                    cleanup = _cleanup_many((temp_path, snapshot_path), source)
-                    temp_path = None if cleanup is None else temp_path
-                    snapshot_path = None if cleanup is None else snapshot_path
-                    if artifact.problem is not None or cleanup is not None:
-                        return _failure(
-                            _combine_problems(artifact.problem, cleanup),
-                            layout_rounds=10,
-                            modified_pages=modified_pages,
-                            unresolved_overlaps=artifact.unresolved,
-                            failure_report_path=artifact.report_path,
-                        )
-                    return ApplyResult(
-                        success=False,
-                        output_path=None,
-                        problems=(_problem("unresolved_overlap", "One or more annotations could not be placed safely"),),
-                        unresolved_overlaps=artifact.unresolved,
-                        layout_rounds=10,
-                        modified_pages=modified_pages,
-                        failure_report_path=artifact.report_path,
-                    )
-                cleanup = _cleanup_problem(temp_path, source)
-                if cleanup is not None:
-                    cleanup = _cleanup_many((temp_path, snapshot_path), source)
-                    return _failure(
-                        _combine_problems(
-                            _render_collision_problem(verification.collisions),
-                            cleanup,
-                        ),
-                        layout_rounds=total_rounds,
-                        modified_pages=modified_pages,
-                    )
-                temp_path = None
-                collided_ids = {
-                    collision.item_id for collision in verification.collisions
-                }
-                excluded.update(
-                    _placement_signature(placement)
-                    for placement in placements
-                    if placement.item_id in collided_ids
-                )
-                source_document = pymupdf.open(snapshot_path)
-                try:
-                    layout, retry_attempted = _layout_document(
-                        source_document,
-                        approved,
-                        excluded=excluded,
-                        max_rounds=10 - total_rounds,
-                    )
-                    attempted = _merge_attempted(attempted, retry_attempted)
-                    total_rounds += layout.rounds
-                    if layout.collisions:
-                        unresolved_layout = LayoutResult(
-                            layout.placements,
-                            layout.collisions,
-                            min(total_rounds, 10),
-                            layout.stable,
-                        )
-                        artifact = _write_unresolved_artifacts(
-                            source, unresolved_layout, attempted, document=source_document
-                        )
-                        source_document.close()
-                        cleanup = _cleanup_problem(snapshot_path, source)
-                        snapshot_path = None if cleanup is None else snapshot_path
-                        if artifact.problem is not None or cleanup is not None:
-                            return _failure(
-                                _combine_problems(artifact.problem, cleanup),
-                                layout_rounds=min(total_rounds, 10),
-                                modified_pages=modified_pages,
-                                unresolved_overlaps=artifact.unresolved,
-                                failure_report_path=artifact.report_path,
-                            )
-                        return ApplyResult(
-                            success=False,
-                            output_path=None,
-                            problems=(
-                                _problem(
-                                    "candidate_exhausted" if any(value.kind == "candidate_exhausted" for value in layout.collisions) else "unresolved_overlap",
-                                    "One or more annotations could not be placed safely",
-                                ),
-                            ),
-                            unresolved_overlaps=artifact.unresolved,
-                            layout_rounds=min(total_rounds, 10),
-                            modified_pages=modified_pages,
-                            failure_report_path=artifact.report_path,
-                        )
-                    placements = layout.placements
-                finally:
-                    if not source_document.is_closed:
-                        source_document.close()
-                identity_problem = _placement_identity_problem(approved, placements)
-                if identity_problem is not None:
-                    cleanup = _cleanup_problem(snapshot_path, source)
-                    snapshot_path = None if cleanup is None else snapshot_path
-                    return _failure(_combine_problems(identity_problem, cleanup))
-                continue
-            if verification.problem is not None:
-                cleanup = _cleanup_many((temp_path, snapshot_path), source)
-                if cleanup is not None:
-                    return _failure(
-                        _combine_problems(verification.problem, cleanup),
-                        layout_rounds=total_rounds,
-                        modified_pages=modified_pages,
-                    )
-                temp_path = None
-                snapshot_path = None
+        modified_pages = tuple(
+            sorted({placement.page_index for placement in placements})
+        )
+        verification = _verify_temp(
+            snapshot_path,
+            temp_path,
+            placements,
+            written=written,
+        )
+        if verification.problem is not None:
+            cleanup = _cleanup_many((temp_path, snapshot_path), source)
+            if cleanup is not None:
                 return _failure(
-                    verification.problem,
+                    _combine_problems(verification.problem, cleanup),
                     layout_rounds=total_rounds,
                     modified_pages=modified_pages,
                 )
-            break
+            temp_path = None
+            snapshot_path = None
+            return _failure(
+                verification.problem,
+                layout_rounds=total_rounds,
+                modified_pages=modified_pages,
+            )
 
         if not _stable_source_matches(source, source_identity, review.source.sha256):
             cleanup = _cleanup_many((temp_path, snapshot_path), source)
@@ -428,11 +282,103 @@ def _validate_inputs(
                 return _problem("source_mismatch", "Source PDF no longer matches the review")
             if any(item.page_index >= document.page_count for item in review.items):
                 return _problem("review_page_invalid", "Review item page is invalid")
+            approved = tuple(
+                item
+                for item in review.items
+                if item.review_status
+                in {ReviewStatus.APPROVED, ReviewStatus.APPROVED_EDITED}
+            )
+            if any(
+                item.reviewed_source_bbox is None
+                or item.reviewed_target_rect is None
+                or item.reviewed_font_size is None
+                for item in approved
+            ):
+                return _problem(
+                    "review_layout_incomplete",
+                    "Approved items must include final source boxes, target boxes, and font sizes",
+                )
+            for item in approved:
+                page = document[item.page_index]
+                page_rect = pymupdf.Rect(
+                    0.0, 0.0, page.cropbox.width, page.cropbox.height
+                )
+                if (
+                    not page_rect.contains(pymupdf.Rect(item.reviewed_source_bbox))
+                    or not page_rect.contains(pymupdf.Rect(item.reviewed_target_rect))
+                    or not 5.0 <= float(item.reviewed_font_size) <= 24.0
+                ):
+                    return _problem(
+                        "review_geometry_invalid",
+                        "Approved item geometry or font size is outside the page limits",
+                    )
+                leader = item.leader_line
+                if leader is not None and (
+                    len(leader) not in {4, 6}
+                    or not all(math.isfinite(float(value)) for value in leader)
+                    or any(
+                        not page_rect.contains(
+                            pymupdf.Point(leader[index], leader[index + 1])
+                        )
+                        for index in range(0, len(leader), 2)
+                    )
+                ):
+                    return _problem(
+                        "review_geometry_invalid",
+                        "Approved item leader line is outside the page limits",
+                    )
         finally:
             document.close()
     except Exception:
         return _problem("source_unavailable", "Source PDF cannot be inspected")
     return None
+
+
+def _placements_from_review(
+    approved: Sequence[ReviewItem],
+) -> tuple[Placement, ...]:
+    placements: list[Placement] = []
+    for item in approved:
+        if (
+            item.reviewed_target_rect is None
+            or item.reviewed_font_size is None
+            or item.reviewed_source_bbox is None
+        ):
+            raise ValueError("approved review layout is incomplete")
+        text = (
+            item.reviewed_translation
+            if item.review_status is ReviewStatus.APPROVED_EDITED
+            else item.suggested_translation
+        )
+        if not text:
+            raise ValueError("approved review translation is missing")
+        leader = (
+            tuple(
+                (float(item.leader_line[index]), float(item.leader_line[index + 1]))
+                for index in range(0, len(item.leader_line), 2)
+            )
+            if item.leader_line is not None
+            else None
+        )
+        placements.append(
+            Placement(
+                item_id=item.item_id,
+                page_index=item.page_index,
+                text=text,
+                rect=tuple(float(value) for value in item.reviewed_target_rect),
+                font_size=float(item.reviewed_font_size),
+                strategy="manual_review_exact",
+                wrapped_lines=(text,),
+                same_semantic_region=True,
+                leader_line=leader,
+                collision_count=0,
+                in_bounds=True,
+                source_distance=0.0,
+                movement_distance=0.0,
+                candidate_index=0,
+            )
+        )
+    return tuple(placements)
 
 
 def _write_annotations(
@@ -464,7 +410,9 @@ def _write_annotations(
             subject=json.dumps(metadata, ensure_ascii=True, separators=(",", ":")),
         )
         annotation.update()
-        _bind_da_to_cjk_appearance(document, annotation, placement.font_size)
+        _bind_da_to_cjk_appearance(
+            document, annotation, placement.text, placement.font_size
+        )
         written.append(
             _WrittenAnnotation(
                 placement.page_index,
@@ -544,9 +492,7 @@ def _render_collision_problem(
 def _verify_temp(
     source: Path,
     temp: Path,
-    baseline: tuple[_PageSnapshot, ...],
     placements: Sequence[Placement],
-    modified_pages: Sequence[int],
     *,
     written: Sequence[_WrittenAnnotation] | None = None,
 ) -> _VerificationOutcome:
@@ -557,6 +503,21 @@ def _verify_temp(
             return _VerificationOutcome(
                 _problem("verification_failed", "Output page structure changed")
             )
+        for page_index in range(original.page_count):
+            before = original[page_index]
+            after = output[page_index]
+            if (
+                tuple(before.mediabox) != tuple(after.mediabox)
+                or tuple(before.cropbox) != tuple(after.cropbox)
+                or before.rotation != after.rotation
+            ):
+                return _VerificationOutcome(
+                    _problem(
+                        "verification_failed",
+                        "Output page size or rotation changed",
+                        page_index=page_index,
+                    )
+                )
         written = tuple(written or ())
         approved_ids = Counter(placement.item_id for placement in placements)
         written_ids = Counter(value.item_id for value in written)
@@ -575,32 +536,6 @@ def _verify_temp(
             return _VerificationOutcome(
                 _problem("verification_failed", "Approved item annotation mapping is invalid")
             )
-        excluded = {(value.page_index, value.xref) for value in written}
-        current = _snapshot_document(output, excluded_annotation_xrefs=excluded)
-        if len(current) != len(baseline):
-            return _VerificationOutcome(
-                _problem("verification_failed", "Output page structure changed")
-            )
-        for page_index, (before, after) in enumerate(zip(baseline, current)):
-            if (
-                before.media_box != after.media_box
-                or before.crop_box != after.crop_box
-                or before.rotation != after.rotation
-                or not all(
-                    line in after.text for line in before.text.splitlines() if line
-                )
-                or before.content_streams != after.content_streams
-                or before.images != after.images
-                or not all(drawing in after.drawings for drawing in before.drawings)
-                or before.annotations != after.annotations
-            ):
-                return _VerificationOutcome(
-                    _problem(
-                        "verification_failed",
-                        "Original PDF content or annotations changed",
-                        page_index=page_index,
-                    )
-                )
         actual_ids: Counter[str] = Counter()
         for record in written:
             if record.page_index < 0 or record.page_index >= output.page_count:
@@ -630,47 +565,41 @@ def _verify_temp(
                     record.rect,
                     tolerance=0.05,
                 )
-                or not _appearance_is_valid(output, annotation, record.font_size)
+                or not _appearance_is_valid(
+                    output, annotation, record.font_size, record.text
+                )
                 or float(annotation.border.get("width") or 0.0) > 0.01
                 or bool(annotation.colors.get("fill"))
                 or not _leader_is_valid(output, annotation, record.leader_line)
+                or annotation.flags & (64 | 128 | 512)
             ):
                 return _VerificationOutcome(
                     _problem("verification_failed", "New annotation appearance or geometry is invalid")
                 )
-            actual_ids[str(metadata["item_id"])] += 1
-        if actual_ids != approved_ids:
-            return _VerificationOutcome(_problem("verification_failed", "Approved item annotation set is incomplete"))
-        grouped: dict[int, list[Placement]] = defaultdict(list)
-        for placement in placements:
-            grouped[placement.page_index].append(placement)
-        for page_index in modified_pages:
-            pixmap = output[page_index].get_pixmap(
-                dpi=300, alpha=False, colorspace=pymupdf.csRGB, annots=True
-            )
-            if pixmap.width <= 0 or pixmap.height <= 0:
+            try:
+                appearance = annotation.get_pixmap(alpha=True)
+            except (RuntimeError, ValueError):
                 return _VerificationOutcome(
                     _problem(
                         "verification_failed",
-                        "Output page could not be rendered",
-                        page_index=page_index,
+                        "New annotation local appearance cannot be opened",
                     )
                 )
-            final_collisions = detect_rendered_collisions(
-                original[page_index], output[page_index], grouped[page_index]
-            )
-            if final_collisions:
-                if any(value.kind == "render_missing" for value in final_collisions):
-                    return _VerificationOutcome(
-                        _problem(
-                            "verification_failed",
-                            "New annotation glyph appearance is missing",
-                            page_index=page_index,
-                        )
-                    )
+            if (
+                appearance.width <= 0
+                or appearance.height <= 0
+                or not appearance.samples
+                or not any(appearance.samples)
+            ):
                 return _VerificationOutcome(
-                    None, tuple(final_collisions)
+                    _problem(
+                        "verification_failed",
+                        "New annotation local appearance is empty",
+                    )
                 )
+            actual_ids[str(metadata["item_id"])] += 1
+        if actual_ids != approved_ids:
+            return _VerificationOutcome(_problem("verification_failed", "Approved item annotation set is incomplete"))
         return _VerificationOutcome(None)
     finally:
         output.close()
@@ -891,6 +820,7 @@ def _appearance_is_valid(
     document: pymupdf.Document,
     annotation: pymupdf.Annot,
     expected_font_size: float,
+    expected_text: str,
 ) -> bool:
     if annotation.type[1] != "FreeText" or not 5.0 <= expected_font_size <= 24.0:
         return False
@@ -930,7 +860,7 @@ def _appearance_is_valid(
             for resource, size in ap_font_matches
             if (xref := _appearance_font_xref(document, appearance_xref, resource))
             is not None
-            and _trusted_cjk_font(document, xref)
+            and _trusted_appearance_font(document, xref, expected_text)
         ),
         None,
     )
@@ -941,7 +871,6 @@ def _appearance_is_valid(
         all(abs(actual - expected) <= 0.005 for actual, expected in zip(color, TEXT_COLOR, strict=True))
         and bool(font_match.group(1))
         and font_match.group(1) == resource_name
-        and resource_name != "Helv"
         and abs(float(font_match.group(2)) - expected_font_size) <= 0.01
         and all(
             abs(actual - expected) <= 0.01
@@ -1009,9 +938,34 @@ def _trusted_cjk_font(document: pymupdf.Document, font_xref: int) -> bool:
     )
 
 
+def _trusted_winansi_font(document: pymupdf.Document, font_xref: int) -> bool:
+    try:
+        font_object = document.xref_object(font_xref, compressed=False)
+    except (RuntimeError, ValueError):
+        return False
+    return (
+        re.search(r"/Subtype\s*/Type1\b", font_object) is not None
+        and re.search(r"/BaseFont\s*/Helvetica\b", font_object) is not None
+        and re.search(r"/Encoding\s*/WinAnsiEncoding\b", font_object) is not None
+    )
+
+
+def _trusted_appearance_font(
+    document: pymupdf.Document, font_xref: int, text: str
+) -> bool:
+    if _trusted_cjk_font(document, font_xref):
+        return True
+    try:
+        text.encode("cp1252", errors="strict")
+    except UnicodeEncodeError:
+        return False
+    return _trusted_winansi_font(document, font_xref)
+
+
 def _bind_da_to_cjk_appearance(
     document: pymupdf.Document,
     annotation: pymupdf.Annot,
+    text: str,
     font_size: float,
 ) -> None:
     appearance_type, appearance_value = document.xref_get_key(annotation.xref, "AP/N")
@@ -1028,12 +982,12 @@ def _bind_da_to_cjk_appearance(
             for candidate in dict.fromkeys(font_names)
             if (xref := _appearance_font_xref(document, appearance_xref, candidate))
             is not None
-            and _trusted_cjk_font(document, xref)
+            and _trusted_appearance_font(document, xref, text)
         ),
         None,
     )
     if name is None:
-        raise ValueError("annotation CJK appearance font is not trusted")
+        raise ValueError("annotation appearance font is not trusted")
     document.xref_set_key(
         annotation.xref,
         "DA",

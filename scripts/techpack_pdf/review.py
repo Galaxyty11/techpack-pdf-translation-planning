@@ -63,6 +63,7 @@ _PAGE_TYPE_LABELS = {
     "bom": "物料表",
     "measurement": "尺寸表",
     "technical_drawing": "技术图",
+    "print_artwork": "印花图稿",
     "label_pack": "标签与包装",
     "sample_review": "样衣评审",
     "style_sample": "款式样衣",

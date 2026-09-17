@@ -18,6 +18,7 @@ class PageType(StrEnum):
     BOM = "bom"
     MEASUREMENT = "measurement"
     TECHNICAL_DRAWING = "technical_drawing"
+    PRINT_ARTWORK = "print_artwork"
     LABEL_PACK = "label_pack"
     SAMPLE_REVIEW = "sample_review"
     STYLE_SAMPLE = "style_sample"
