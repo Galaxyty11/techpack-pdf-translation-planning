@@ -19,7 +19,7 @@ def response(req):
     return {
         **{k:v for k,v in req.items() if k not in {'pages', 'required_stage'}},
         'production_stage': req['required_stage'],
-        'stage_evidence': 'Stage was determined from the bound page types.',
+        'stage_evidence': req['stage_evidence'],
         'pages':[dict(
             page_index=0,
             business_area=page['required_business_area'],
@@ -119,21 +119,21 @@ def test_stage_requires_explicit_document_evidence():
     assert request_without_heading['stage_evidence'] == []
 
     pages[0].nodes.append(SimpleNamespace(
-        text='BULK PRODUCTION STAGE',
+        text='Stage: Bulk',
         bbox=[10,40,100,50],
         should_translate=False,
         decision_reason='skipped_admin',
     ))
     request_with_heading = coverage_request(analysis)
     assert request_with_heading['required_stage'] == 'bulk'
-    assert request_with_heading['stage_evidence'] == ['BULK PRODUCTION STAGE']
+    assert request_with_heading['stage_evidence'] == ['Stage: Bulk']
 
 def test_bulk_bom_requires_every_visible_color_group_checked():
     page = SimpleNamespace(page_index=0, page_type=PageType.BOM, thumbnail='thumbnails/page-0001.png', width=300, height=200, nodes=[])
     req = coverage_request(SimpleNamespace(schema_version='1.1', job_id='job', source_sha256='a'*64, glossary_sha256='b'*64, pages=[page]))
     data = response(req)
     data['production_stage'] = 'ambiguous'
-    data['stage_evidence'] = 'Only a BOM page is present, so the stage is ambiguous.'
+    data['stage_evidence'] = req['stage_evidence']
     data['pages'][0].update(
         business_area='bom_color_groups',
         visible_color_groups=['BLACK', 'NAVY'],

@@ -1,0 +1,3 @@
+source_term,target_term,aliases,do_not_translate,priority
+AcmeTex,艾克米,,False,99
+AcmeTex,,,True,0

@@ -1,0 +1,242 @@
+{
+  "schema_version": "1.1",
+  "job_id": "e898c5d57555-20260917T083119Z",
+  "source_sha256": "e898c5d5755598b1c02873bc730e4ceffe781de7b12ab6ae33908a03d249e023",
+  "glossary_sha256": "7c62e4c5bc0269d62de517fc17492bac2161b734f6b11b8ec70f263cfb7d7e9b",
+  "request_sha256": "1f97a861dd5fa1353ff7654471910338d6588c3b82d11810ad0155ed6c443659",
+  "attempt": 0,
+  "items": [
+    {
+      "item_id": "p001-i041",
+      "source_text": "WAIST RELAXED (HALF)",
+      "context": "description",
+      "locked_tokens": [],
+      "glossary_terms": [
+        {
+          "source_term": "WAIST RELAXED (HALF)",
+          "target_term": "腰围松量"
+        }
+      ],
+      "page_type": "measurement",
+      "mode": "direct"
+    },
+    {
+      "item_id": "p001-i052",
+      "source_text": "WAISTBAND HEIGHT",
+      "context": "description",
+      "locked_tokens": [],
+      "glossary_terms": [
+        {
+          "source_term": "WAISTBAND HEIGHT",
+          "target_term": "腰高"
+        }
+      ],
+      "page_type": "measurement",
+      "mode": "direct"
+    },
+    {
+      "item_id": "p001-i063",
+      "source_text": "HEM BUNGEE LENGTH EXPOSED (HALF)",
+      "context": "description",
+      "locked_tokens": [],
+      "glossary_terms": [],
+      "page_type": "measurement",
+      "mode": "direct"
+    },
+    {
+      "item_id": "p001-i074",
+      "source_text": "WAIST EXTENDED (ALONG RIB SEAM)",
+      "context": "description",
+      "locked_tokens": [],
+      "glossary_terms": [
+        {
+          "source_term": "WAIST EXTENDED (ALONG RIB SEAM)",
+          "target_term": "腰围拉量"
+        }
+      ],
+      "page_type": "measurement",
+      "mode": "direct"
+    },
+    {
+      "item_id": "p001-i085",
+      "source_text": "LOW HIP 3\" UP FROM CROTCH SEAM",
+      "context": "description",
+      "locked_tokens": [
+        "3"
+      ],
+      "glossary_terms": [
+        {
+          "source_term": "LOW HIP 3\" UP FROM CROTCH SEAM",
+          "target_term": "坐围 档上3\""
+        }
+      ],
+      "page_type": "measurement",
+      "mode": "direct"
+    },
+    {
+      "item_id": "p001-i096",
+      "source_text": "THIGH 1\" BELOW CROTCH",
+      "context": "description",
+      "locked_tokens": [
+        "1"
+      ],
+      "glossary_terms": [
+        {
+          "source_term": "THIGH 1\" BELOW CROTCH",
+          "target_term": "横档 裆下1\""
+        }
+      ],
+      "page_type": "measurement",
+      "mode": "direct"
+    },
+    {
+      "item_id": "p001-i107",
+      "source_text": "BOTTOM OPENING [SHORTS]",
+      "context": "description",
+      "locked_tokens": [],
+      "glossary_terms": [],
+      "page_type": "measurement",
+      "mode": "direct"
+    },
+    {
+      "item_id": "p001-i118",
+      "source_text": "BOTTOM HEM HEIGHT",
+      "context": "description",
+      "locked_tokens": [],
+      "glossary_terms": [
+        {
+          "source_term": "BOTTOM HEM HEIGHT",
+          "target_term": "下摆切线高（上装）/脚口切线高（下装）"
+        }
+      ],
+      "page_type": "measurement",
+      "mode": "direct"
+    },
+    {
+      "item_id": "p001-i129",
+      "source_text": "FRONT RISE INCLUDING WAISTBAND",
+      "context": "description",
+      "locked_tokens": [],
+      "glossary_terms": [
+        {
+          "source_term": "FRONT RISE INCLUDING WAISTBAND",
+          "target_term": "前浪含腰"
+        }
+      ],
+      "page_type": "measurement",
+      "mode": "direct"
+    },
+    {
+      "item_id": "p001-i140",
+      "source_text": "BACK RISE INCLUDING WAISTBAND",
+      "context": "description",
+      "locked_tokens": [],
+      "glossary_terms": [
+        {
+          "source_term": "BACK RISE INCLUDING WAISTBAND",
+          "target_term": "后浪含腰"
+        }
+      ],
+      "page_type": "measurement",
+      "mode": "direct"
+    },
+    {
+      "item_id": "p001-i151",
+      "source_text": "INSEAM [SHORTS]",
+      "context": "description",
+      "locked_tokens": [],
+      "glossary_terms": [],
+      "page_type": "measurement",
+      "mode": "direct"
+    },
+    {
+      "item_id": "p001-i162",
+      "source_text": "FRONT POCKET OPENING WIDTH",
+      "context": "description",
+      "locked_tokens": [],
+      "glossary_terms": [],
+      "page_type": "measurement",
+      "mode": "direct"
+    },
+    {
+      "item_id": "p001-i173",
+      "source_text": "FRONT POCKET BAG LENGTH",
+      "context": "description",
+      "locked_tokens": [],
+      "glossary_terms": [
+        {
+          "source_term": "FRONT POCKET BAG LENGTH",
+          "target_term": "前袋袋布长"
+        }
+      ],
+      "page_type": "measurement",
+      "mode": "direct"
+    },
+    {
+      "item_id": "p001-i184",
+      "source_text": "FRONT POCKET BAG WIDTH",
+      "context": "description",
+      "locked_tokens": [],
+      "glossary_terms": [
+        {
+          "source_term": "FRONT POCKET BAG WIDTH",
+          "target_term": "前袋袋布宽"
+        }
+      ],
+      "page_type": "measurement",
+      "mode": "direct"
+    },
+    {
+      "item_id": "p001-i195",
+      "source_text": "SIDESEAM SLIT LENGTH",
+      "context": "description",
+      "locked_tokens": [],
+      "glossary_terms": [],
+      "page_type": "measurement",
+      "mode": "direct"
+    },
+    {
+      "item_id": "p001-i206",
+      "source_text": "SIDESEAM SLIT WIDTH",
+      "context": "description",
+      "locked_tokens": [],
+      "glossary_terms": [],
+      "page_type": "measurement",
+      "mode": "direct"
+    },
+    {
+      "item_id": "p001-i217",
+      "source_text": "POINT TO POINT",
+      "context": "body",
+      "locked_tokens": [],
+      "glossary_terms": [],
+      "page_type": "measurement",
+      "mode": "direct"
+    },
+    {
+      "item_id": "p001-i218",
+      "source_text": "8/27/25 UPDATE BACK RISE GRADE 2XL AND 3XL & 4XL",
+      "context": "body",
+      "locked_tokens": [
+        "8/27/25",
+        "2XL",
+        "3XL",
+        "4XL"
+      ],
+      "glossary_terms": [],
+      "page_type": "measurement",
+      "mode": "direct"
+    },
+    {
+      "item_id": "p001-i219",
+      "source_text": "IT BLOCK 1802283",
+      "context": "body",
+      "locked_tokens": [
+        "1802283"
+      ],
+      "glossary_terms": [],
+      "page_type": "measurement",
+      "mode": "direct"
+    }
+  ]
+}

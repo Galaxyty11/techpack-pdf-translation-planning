@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.1",
+  "job_id": "job-a",
+  "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "glossary_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "request_sha256": "d4f6c1fd255a040f7b61a0ec23f4b4c7603b5a916b94367d13c33c06dc816145",
+  "attempt": 0,
+  "items": [
+    {
+      "item_id": "p001-i001",
+      "source_text": "Reduce sleeve by 0.6 cm unless approved",
+      "context": "action",
+      "locked_tokens": [
+        "0.6",
+        "cm"
+      ],
+      "glossary_terms": [],
+      "page_type": "sample_review",
+      "mode": "faithful_digest"
+    },
+    {
+      "item_id": "p001-i002",
+      "source_text": "TOPSTITCH 0.6 cm FROM EDGE",
+      "context": "construction note",
+      "locked_tokens": [
+        "0.6",
+        "cm"
+      ],
+      "glossary_terms": [
+        {
+          "source_term": "topstitch",
+          "target_term": "明线"
+        }
+      ],
+      "page_type": "bom",
+      "mode": "direct"
+    }
+  ]
+}

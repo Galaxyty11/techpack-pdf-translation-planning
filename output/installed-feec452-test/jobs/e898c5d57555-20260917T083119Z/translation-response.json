@@ -1,0 +1,326 @@
+{
+  "schema_version": "1.1",
+  "job_id": "e898c5d57555-20260917T083119Z",
+  "source_sha256": "e898c5d5755598b1c02873bc730e4ceffe781de7b12ab6ae33908a03d249e023",
+  "glossary_sha256": "7c62e4c5bc0269d62de517fc17492bac2161b734f6b11b8ec70f263cfb7d7e9b",
+  "request_sha256": "1f97a861dd5fa1353ff7654471910338d6588c3b82d11810ad0155ed6c443659",
+  "attempt": 0,
+  "items": [
+    {
+      "item_id": "p001-i041",
+      "translated_text": "腰围松量",
+      "preserved_tokens": [],
+      "glossary_terms_used": [
+        "WAIST RELAXED (HALF)"
+      ],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    },
+    {
+      "item_id": "p001-i052",
+      "translated_text": "腰高",
+      "preserved_tokens": [],
+      "glossary_terms_used": [
+        "WAISTBAND HEIGHT"
+      ],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    },
+    {
+      "item_id": "p001-i063",
+      "translated_text": "脚口弹力绳外露半长",
+      "preserved_tokens": [],
+      "glossary_terms_used": [],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    },
+    {
+      "item_id": "p001-i074",
+      "translated_text": "腰围拉量",
+      "preserved_tokens": [],
+      "glossary_terms_used": [
+        "WAIST EXTENDED (ALONG RIB SEAM)"
+      ],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    },
+    {
+      "item_id": "p001-i085",
+      "translated_text": "坐围 档上3\"",
+      "preserved_tokens": [
+        "3"
+      ],
+      "glossary_terms_used": [
+        "LOW HIP 3\" UP FROM CROTCH SEAM"
+      ],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    },
+    {
+      "item_id": "p001-i096",
+      "translated_text": "横档 裆下1\"",
+      "preserved_tokens": [
+        "1"
+      ],
+      "glossary_terms_used": [
+        "THIGH 1\" BELOW CROTCH"
+      ],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    },
+    {
+      "item_id": "p001-i107",
+      "translated_text": "脚口松量",
+      "preserved_tokens": [],
+      "glossary_terms_used": [],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    },
+    {
+      "item_id": "p001-i118",
+      "translated_text": "下摆切线高（上装）/脚口切线高（下装）",
+      "preserved_tokens": [],
+      "glossary_terms_used": [
+        "BOTTOM HEM HEIGHT"
+      ],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    },
+    {
+      "item_id": "p001-i129",
+      "translated_text": "前浪含腰",
+      "preserved_tokens": [],
+      "glossary_terms_used": [
+        "FRONT RISE INCLUDING WAISTBAND"
+      ],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    },
+    {
+      "item_id": "p001-i140",
+      "translated_text": "后浪含腰",
+      "preserved_tokens": [],
+      "glossary_terms_used": [
+        "BACK RISE INCLUDING WAISTBAND"
+      ],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    },
+    {
+      "item_id": "p001-i151",
+      "translated_text": "内长",
+      "preserved_tokens": [],
+      "glossary_terms_used": [],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    },
+    {
+      "item_id": "p001-i162",
+      "translated_text": "前袋开口宽",
+      "preserved_tokens": [],
+      "glossary_terms_used": [],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    },
+    {
+      "item_id": "p001-i173",
+      "translated_text": "前袋袋布长",
+      "preserved_tokens": [],
+      "glossary_terms_used": [
+        "FRONT POCKET BAG LENGTH"
+      ],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    },
+    {
+      "item_id": "p001-i184",
+      "translated_text": "前袋袋布宽",
+      "preserved_tokens": [],
+      "glossary_terms_used": [
+        "FRONT POCKET BAG WIDTH"
+      ],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    },
+    {
+      "item_id": "p001-i195",
+      "translated_text": "侧缝开衩长",
+      "preserved_tokens": [],
+      "glossary_terms_used": [],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    },
+    {
+      "item_id": "p001-i206",
+      "translated_text": "侧缝开衩宽",
+      "preserved_tokens": [],
+      "glossary_terms_used": [],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    },
+    {
+      "item_id": "p001-i217",
+      "translated_text": "点到点测量",
+      "preserved_tokens": [],
+      "glossary_terms_used": [],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    },
+    {
+      "item_id": "p001-i218",
+      "translated_text": "8/27/25 更新后浪放码：2XL、3XL 和 4XL",
+      "preserved_tokens": [
+        "8/27/25",
+        "2XL",
+        "3XL",
+        "4XL"
+      ],
+      "glossary_terms_used": [],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    },
+    {
+      "item_id": "p001-i219",
+      "translated_text": "IT 基础版型 1802283",
+      "preserved_tokens": [
+        "1802283"
+      ],
+      "glossary_terms_used": [],
+      "mode": "direct",
+      "warnings": [],
+      "translator": {
+        "host": "codex",
+        "execution_mode": "main_agent",
+        "model": "unknown",
+        "agent_role": null,
+        "prompt_version": "1.0"
+      }
+    }
+  ]
+}
