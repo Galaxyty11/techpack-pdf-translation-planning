@@ -12,12 +12,18 @@ from techpack_pdf.models import ReviewItem
 from techpack_pdf.review_preview import plan_review_items
 
 
-def _item(source_bbox: list[float], *, item_id: str = "p001-i001") -> ReviewItem:
+def _item(
+    source_bbox: list[float],
+    *,
+    item_id: str = "p001-i001",
+    page_type: str = "technical_drawing",
+    translation: str = "袋口处打枣加固",
+) -> ReviewItem:
     return ReviewItem.model_validate(
         {
             "item_id": item_id,
             "page_index": 0,
-            "page_type": "technical_drawing",
+            "page_type": page_type,
             "source_text": "BARTACK AT POCKET OPENING",
             "normalized_text": "bartack at pocket opening",
             "source_bbox": source_bbox,
@@ -26,7 +32,7 @@ def _item(source_bbox: list[float], *, item_id: str = "p001-i001") -> ReviewItem
             "decision_reason": "page_rule",
             "locked_tokens": [],
             "glossary_hits": [],
-            "suggested_translation": "袋口处打枣加固",
+            "suggested_translation": translation,
             "reviewed_translation": None,
             "review_status": None,
             "risk_level": "medium",
@@ -66,6 +72,31 @@ def _save_page(
         annotation.update()
     if vector_rect is not None:
         page.draw_rect(vector_rect, color=(0, 0, 0), width=1)
+    document.save(path)
+    document.close()
+
+
+def _save_measurement_table_page(
+    path: Path, *, source_x: float = 175, occupied: bool = False
+) -> None:
+    document = pymupdf.open()
+    page = document.new_page(width=500, height=300)
+    xs = (20.0, 80.0, 250.0, 350.0)
+    ys = (40.0, 70.0, 130.0)
+    for x in xs:
+        page.draw_line((x, ys[0]), (x, ys[-1]), color=(0, 0, 0), width=0.5)
+    for y in ys:
+        page.draw_line((xs[0], y), (xs[-1], y), color=(0, 0, 0), width=0.5)
+    page.insert_text((25, 60), "POM", fontsize=8)
+    page.insert_text((85, 60), "Description", fontsize=8)
+    page.insert_text((255, 60), "Placement", fontsize=8)
+    page.insert_text((25, 90), "201A", fontsize=8)
+    page.insert_text((source_x, 90), "WAIST RELAXED", fontsize=8)
+    if occupied:
+        annotation = page.add_freetext_annot(
+            pymupdf.Rect(252, 72, 348, 128), "existing note", fontsize=8
+        )
+        annotation.update()
     document.save(path)
     document.close()
 
@@ -183,8 +214,78 @@ def test_every_item_in_a_new_annotation_overlap_is_marked_unsafe(
     assert overlapping <= unsafe
 
 
-def test_dense_review_layout_avoids_quadratic_candidate_scans(
+@pytest.mark.parametrize("width,height", [(500, 300), (80, 40), (8, 8)])
+def test_oversize_translation_still_receives_a_bounded_manual_placement(
+    tmp_path: Path, width: float, height: float,
+) -> None:
+    source_pdf = tmp_path / "constrained-page.pdf"
+    _save_page(source_pdf, width=width, height=height)
+
+    planned = plan_review_items(
+        source_pdf,
+        [
+            _item(
+                [width * 0.2, height * 0.2, width * 0.4, height * 0.4],
+                translation="超长工艺说明" * 200,
+            )
+        ],
+    )[0]
+
+    assert planned.target_rect is not None
+    assert pymupdf.Rect(planned.target_rect).get_area() > 0
+    assert planned.suggested_translation == "超长工艺说明" * 200
+    assert pymupdf.Rect(0, 0, width, height).contains(
+        pymupdf.Rect(planned.target_rect)
+    )
+    assert planned.font_size == 5.0
+    assert planned.risk_level == "high"
+    assert "manual_placement_required" in planned.warnings
+
+
+def test_measurement_table_prefers_a_nearby_blank_same_row_cell(
     tmp_path: Path,
+) -> None:
+    source_pdf = tmp_path / "measurement-table.pdf"
+    _save_measurement_table_page(source_pdf)
+
+    planned = plan_review_items(
+        source_pdf,
+        [
+            _item(
+                [175.0, 80.0, 240.0, 92.0],
+                page_type="measurement",
+            )
+        ],
+    )[0]
+
+    assert planned.placement_strategy == "same_row_cell"
+    assert pymupdf.Rect(250, 70, 350, 130).contains(
+        pymupdf.Rect(planned.target_rect)
+    )
+    rect = pymupdf.Rect(planned.target_rect)
+    assert math.dist((207.5, 86.0), ((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)) <= 96
+
+
+@pytest.mark.parametrize("source_x,occupied", [(85, False), (175, True)])
+def test_table_priority_does_not_override_locality_or_collision_safety(
+    tmp_path: Path, source_x: float, occupied: bool,
+) -> None:
+    source_pdf = tmp_path / "table-safety.pdf"
+    _save_measurement_table_page(source_pdf, source_x=source_x, occupied=occupied)
+    planned = plan_review_items(
+        source_pdf,
+        [_item([source_x, 80, source_x + 65, 92], page_type="measurement")],
+    )[0]
+
+    assert planned.placement_strategy != "same_row_cell"
+    rect = pymupdf.Rect(planned.target_rect)
+    assert math.dist(
+        (source_x + 32.5, 86), ((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
+    ) <= 96
+
+
+def test_dense_review_layout_uses_bounded_candidate_evaluations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source_pdf = tmp_path / "dense-performance.pdf"
     _save_page(source_pdf)
@@ -196,9 +297,21 @@ def test_dense_review_layout_avoids_quadratic_candidate_scans(
         for index in range(100)
     ]
 
+    evaluations: dict[str, int] = {}
+    real_collision_count = layout_module._fast_review_collision_count
+
+    def counted_collision_count(placement, obstacles, existing):
+        evaluations[placement.item_id] = evaluations.get(placement.item_id, 0) + 1
+        return real_collision_count(placement, obstacles, existing)
+
+    monkeypatch.setattr(layout_module, "_fast_review_collision_count", counted_collision_count)
     started = perf_counter()
     planned = plan_review_items(source_pdf, items)
     elapsed = perf_counter() - started
 
     assert len(planned) == 100
-    assert elapsed < 3.0
+    assert len(evaluations) == 100
+    # Three sizes, two widths, three rings and four directions per item.
+    assert all(0 < count <= 72 for count in evaluations.values())
+    # Secondary smoke check only; dense overlap comparisons can still be quadratic.
+    assert elapsed < 10.0

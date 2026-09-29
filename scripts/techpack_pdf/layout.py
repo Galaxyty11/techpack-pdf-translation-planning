@@ -841,6 +841,10 @@ def plan_fast_review_layout(
                     continue
                 pool = [fallback]
                 attempted_by_id[item.item_id].append(fallback)
+                # Keep every valid item editable even when its preview cannot fit.
+                collisions.append(
+                    Collision(page_index, item.item_id, "manual_review_fallback", "candidate_set")
+                )
 
             evaluated = [
                 (
@@ -857,6 +861,10 @@ def plan_fast_review_layout(
                 evaluated,
                 key=lambda value: (
                     value[0],
+                    not (
+                        value[1].strategy == "same_row_cell"
+                        and value[1].movement_distance <= local_limit
+                    ),
                     round(value[1].source_distance, 6),
                     -value[1].font_size,
                     round(value[1].movement_distance, 6),
@@ -1252,7 +1260,10 @@ def _fast_review_fallback(
     item: ReviewItem,
     page_rect: pymupdf.Rect,
 ) -> Placement | None:
-    safe = _inset(page_rect, FAST_REVIEW_PAGE_MARGIN_PT)
+    margin = min(
+        FAST_REVIEW_PAGE_MARGIN_PT, page_rect.width / 4, page_rect.height / 4
+    )
+    safe = _inset(page_rect, margin)
     if not _nonempty(safe):
         return None
     width = min(max(safe.width * 0.24, 72.0), safe.width)
@@ -1284,9 +1295,19 @@ def _fast_review_fallback(
         [("page_edge_fallback", rect, font_size, False, None)],
         semantic_region=page_rect,
     )
-    if not candidates or not _placement_text_fits(candidates[0]):
+    if not candidates:
         return None
-    return candidates[0]
+    if _placement_text_fits(candidates[0]):
+        return candidates[0]
+    # Preserve the full text in the editor; clipping is a human-review risk,
+    # not a reason to discard an item or abort the entire review document.
+    return _placements_from_raw(
+        item,
+        page_rect,
+        (),
+        [("page_edge_fallback", safe, font_size, False, None)],
+        semantic_region=page_rect,
+    )[0]
 
 
 def plan_document_layout(
