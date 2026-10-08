@@ -6,7 +6,7 @@ import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Generic, TypeAlias, TypeVar
 
 import cv2
 import numpy as np
@@ -18,9 +18,14 @@ from .models import CoordinateConfidence, ReviewItem, ReviewStatus
 RectTuple: TypeAlias = tuple[float, float, float, float]
 PointTuple: TypeAlias = tuple[float, float]
 FONT_SIZES = (7.0, 6.5, 6.0, 5.5, 5.0)
+FAST_REVIEW_FONT_SIZES = (7.0, 6.0, 5.0)
 TEXT_COLOR = (0.85, 0.05, 0.05)
 MIN_CLEARANCE_PT = 1.0
+FAST_REVIEW_PAGE_MARGIN_PT = 5.0
+FAST_REVIEW_LOCAL_DISTANCE_PT = 96.0
 TOOL_CJK_FONT = "china-s"
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -66,6 +71,46 @@ class LayoutResult:
     rounds: int
     stable: bool
     attempted_placements: tuple[Placement, ...] = ()
+
+
+class _SpatialIndex(Generic[T]):
+    """Small uniform-grid index for page-local rectangle queries."""
+
+    def __init__(self, cell_size: float = 64.0) -> None:
+        self._cell_size = cell_size
+        self._buckets: dict[tuple[int, int], list[tuple[RectTuple, T]]] = (
+            defaultdict(list)
+        )
+
+    def insert(self, rect: pymupdf.Rect | Sequence[float], value: T) -> None:
+        normalized = pymupdf.Rect(rect)
+        for cell in self._cells(normalized):
+            self._buckets[cell].append((_tuple(normalized), value))
+
+    def query(
+        self, rect: pymupdf.Rect | Sequence[float]
+    ) -> tuple[T, ...]:
+        normalized = pymupdf.Rect(rect)
+        found: list[T] = []
+        seen: set[int] = set()
+        for cell in self._cells(normalized):
+            for stored_rect, value in self._buckets.get(cell, ()):
+                identity = id(value)
+                if identity in seen:
+                    continue
+                if _tuple_overlaps(_tuple(normalized), stored_rect):
+                    seen.add(identity)
+                    found.append(value)
+        return tuple(found)
+
+    def _cells(self, rect: pymupdf.Rect) -> Iterable[tuple[int, int]]:
+        x0 = math.floor(rect.x0 / self._cell_size)
+        y0 = math.floor(rect.y0 / self._cell_size)
+        x1 = math.floor(rect.x1 / self._cell_size)
+        y1 = math.floor(rect.y1 / self._cell_size)
+        for x in range(x0, x1 + 1):
+            for y in range(y0, y1 + 1):
+                yield (x, y)
 
 
 def rank_placements(
@@ -699,6 +744,570 @@ def optimize_layout(
         False,
         tuple(attempted),
     )
+
+
+def plan_fast_review_layout(
+    document: pymupdf.Document,
+    items: Sequence[ReviewItem],
+) -> tuple[LayoutResult, dict[str, list[Placement]]]:
+    """Plan a nearby review preview without per-glyph or raster retries.
+
+    Human review is the quality gate. This planner therefore prefers a
+    nearby, visibly risky candidate over a distant clean candidate, records
+    the risk for the review UI, and never paints over the source page.
+    """
+    by_page: dict[int, list[ReviewItem]] = defaultdict(list)
+    for item in items:
+        effective = (
+            item.model_copy(update={"source_bbox": item.reviewed_source_bbox})
+            if item.reviewed_source_bbox is not None
+            else item
+        )
+        by_page[item.page_index].append(effective)
+
+    placements: list[Placement] = []
+    collisions: list[Collision] = []
+    attempted_by_id: dict[str, list[Placement]] = defaultdict(list)
+
+    for page_index in sorted(by_page):
+        page = document[page_index]
+        page_rect = _canonical_page_rect(page)
+        safe_page = _inset(page_rect, FAST_REVIEW_PAGE_MARGIN_PT)
+        obstacles = _fast_review_obstacles(page)
+        obstacle_index = _SpatialIndex[ProtectedGeometry]()
+        for obstacle in obstacles:
+            obstacle_index.insert(obstacle.rect, obstacle)
+        table_cache = (
+            _fast_table_cache(page)
+            if any(
+                item.page_type.value in {"bom", "measurement"}
+                for item in by_page[page_index]
+            )
+            else ()
+        )
+        words = tuple(page.get_text("words")) if table_cache else ()
+        placement_index = _SpatialIndex[Placement]()
+
+        for item in sorted(by_page[page_index], key=lambda value: value.item_id):
+            source = pymupdf.Rect(item.source_bbox)
+            if not _nonempty(source) or not page_rect.contains(source):
+                collisions.append(
+                    Collision(
+                        page_index,
+                        item.item_id,
+                        "candidate_exhausted",
+                        "source_bbox",
+                    )
+                )
+                continue
+
+            same_row_cells = _fast_same_row_blank_cells(
+                source,
+                table_cache,
+                words,
+            )
+            candidates = _fast_review_candidates(
+                item,
+                page_rect,
+                same_row_cells,
+            )
+            valid = [
+                candidate
+                for candidate in candidates
+                if candidate.in_bounds
+                and safe_page.contains(pymupdf.Rect(candidate.rect))
+                and _placement_text_fits(candidate)
+            ]
+            attempted_by_id[item.item_id].extend(valid)
+
+            local_limit = FAST_REVIEW_LOCAL_DISTANCE_PT
+            local = [
+                candidate
+                for candidate in valid
+                if candidate.movement_distance <= local_limit
+            ]
+            pool = local or valid
+            if not pool:
+                fallback = _fast_review_fallback(item, page_rect)
+                if fallback is None:
+                    collisions.append(
+                        Collision(
+                            page_index,
+                            item.item_id,
+                            "candidate_exhausted",
+                            "candidate_set",
+                        )
+                    )
+                    continue
+                pool = [fallback]
+                attempted_by_id[item.item_id].append(fallback)
+                # Keep every valid item editable even when its preview cannot fit.
+                collisions.append(
+                    Collision(page_index, item.item_id, "manual_review_fallback", "candidate_set")
+                )
+
+            evaluated = [
+                (
+                    _fast_review_collision_count(
+                        candidate,
+                        obstacle_index,
+                        placement_index,
+                    ),
+                    candidate,
+                )
+                for candidate in pool
+            ]
+            _selected_score, selected = min(
+                evaluated,
+                key=lambda value: (
+                    value[0],
+                    not (
+                        value[1].strategy == "same_row_cell"
+                        and value[1].movement_distance <= local_limit
+                    ),
+                    round(value[1].source_distance, 6),
+                    -value[1].font_size,
+                    round(value[1].movement_distance, 6),
+                    value[1].candidate_index,
+                ),
+            )
+            selected_collisions = _fast_review_collisions(
+                page_index,
+                selected,
+                obstacle_index,
+                placement_index,
+            )
+            placement_index.insert(selected.rect, selected)
+            placements.append(selected)
+            collisions.extend(selected_collisions)
+
+    attempted = tuple(
+        placement
+        for item_id in sorted(attempted_by_id)
+        for placement in attempted_by_id[item_id]
+    )
+    return (
+        LayoutResult(
+            tuple(placements),
+            tuple(_deduplicate_collisions(collisions)),
+            1,
+            False,
+            attempted,
+        ),
+        dict(attempted_by_id),
+    )
+
+
+def _fast_review_obstacles(page: pymupdf.Page) -> tuple[ProtectedGeometry, ...]:
+    obstacles: list[ProtectedGeometry] = []
+    for index, block in enumerate(page.get_text("blocks")):
+        rect = pymupdf.Rect(block[:4])
+        if not _nonempty(rect):
+            continue
+        block_type = int(block[6]) if len(block) > 6 else 0
+        kind = "image" if block_type == 1 else "text_block"
+        obstacles.append(
+            ProtectedGeometry(kind, _tuple(rect), f"{kind}-{index}")
+        )
+    for annotation in page.annots() or ():
+        rect = pymupdf.Rect(annotation.rect)
+        if _nonempty(rect):
+            obstacles.append(
+                ProtectedGeometry(
+                    "annotation",
+                    _tuple(rect),
+                    f"annotation-{annotation.xref}",
+                )
+            )
+    for drawing_index, drawing in enumerate(page.get_drawings()):
+        found_item = False
+        for item_index, item in enumerate(drawing.get("items", ())):
+            rect = _fast_drawing_item_rect(item)
+            if rect is None:
+                continue
+            found_item = True
+            obstacles.append(
+                ProtectedGeometry(
+                    "vector_drawing",
+                    _tuple(rect),
+                    f"vector-{drawing_index}-{item_index}",
+                    True,
+                )
+            )
+        if found_item:
+            continue
+        rect = pymupdf.Rect(drawing.get("rect", (0, 0, 0, 0)))
+        if _nonempty(rect):
+            obstacles.append(
+                ProtectedGeometry(
+                    "vector_drawing",
+                    _tuple(rect),
+                    f"vector-{drawing_index}",
+                    True,
+                )
+            )
+    return tuple(obstacles)
+
+
+def _fast_drawing_item_rect(item: Sequence[object]) -> pymupdf.Rect | None:
+    rects: list[pymupdf.Rect] = []
+    points: list[pymupdf.Point] = []
+    for geometry in item[1:]:
+        if isinstance(geometry, pymupdf.Rect):
+            rects.append(pymupdf.Rect(geometry))
+        elif isinstance(geometry, pymupdf.Quad):
+            rects.append(pymupdf.Rect(geometry.rect))
+        elif isinstance(geometry, pymupdf.Point):
+            points.append(pymupdf.Point(geometry))
+    if points:
+        rects.append(
+            pymupdf.Rect(
+                min(point.x for point in points),
+                min(point.y for point in points),
+                max(point.x for point in points),
+                max(point.y for point in points),
+            )
+        )
+    if not rects:
+        return None
+    combined = pymupdf.Rect(
+        min(rect.x0 for rect in rects),
+        min(rect.y0 for rect in rects),
+        max(rect.x1 for rect in rects),
+        max(rect.y1 for rect in rects),
+    )
+    if combined.width <= 0:
+        combined.x0 -= 0.5
+        combined.x1 += 0.5
+    if combined.height <= 0:
+        combined.y0 -= 0.5
+        combined.y1 += 0.5
+    return combined if _nonempty(combined) else None
+
+
+def _fast_table_cache(
+    page: pymupdf.Page,
+) -> tuple[
+    tuple[list[list[object]], tuple[tuple[Sequence[float] | None, ...], ...]],
+    ...,
+]:
+    cached = []
+    try:
+        tables = page.find_tables().tables
+    except (AttributeError, RuntimeError, ValueError):
+        return ()
+    for table in tables:
+        values = table.extract()
+        if not values or not table.rows:
+            continue
+        rows = tuple(tuple(row.cells) for row in table.rows)
+        cached.append((values, rows))
+    return tuple(cached)
+
+
+def _fast_same_row_blank_cells(
+    source: pymupdf.Rect,
+    tables: Sequence[
+        tuple[list[list[object]], tuple[tuple[Sequence[float] | None, ...], ...]]
+    ],
+    words: Sequence[Sequence[object]],
+) -> list[RectTuple]:
+    matches: list[RectTuple] = []
+    for values, rows in tables:
+        headers = [str(value or "").strip().casefold() for value in values[0]]
+        preferred_columns = {
+            index
+            for index, header in enumerate(headers)
+            if any(label in header for label in ("placement", "note", "remark"))
+        }
+        for row_index, row_cells in enumerate(rows):
+            if not any(
+                cell is not None and _overlaps(source, pymupdf.Rect(cell))
+                for cell in row_cells
+            ):
+                continue
+            row_values = values[row_index] if row_index < len(values) else []
+            preferred = _blank_cells(
+                row_cells,
+                row_values,
+                sorted(preferred_columns),
+            )
+            if preferred:
+                matches.extend(preferred)
+                continue
+            remainders = [
+                remainder
+                for cell in row_cells
+                if cell is not None and _overlaps(source, pymupdf.Rect(cell))
+                for remainder in [_fast_unused_cell_remainder(words, pymupdf.Rect(cell))]
+                if remainder is not None
+            ]
+            if remainders:
+                matches.extend(remainders)
+            else:
+                matches.extend(
+                    _blank_cells(row_cells, row_values, range(len(row_cells)))
+                )
+    return sorted(dict.fromkeys(matches))
+
+
+def _fast_unused_cell_remainder(
+    words: Sequence[Sequence[object]],
+    cell: pymupdf.Rect,
+) -> RectTuple | None:
+    occupied = [
+        pymupdf.Rect(word[:4])
+        for word in words
+        if _overlaps(pymupdf.Rect(word[:4]), cell)
+    ]
+    if not occupied:
+        return None
+    inset = MIN_CLEARANCE_PT + 0.5
+    remainder = pymupdf.Rect(
+        max(rect.x1 for rect in occupied) + inset,
+        cell.y0 + inset,
+        cell.x1 - inset,
+        cell.y1 - inset,
+    )
+    if _nonempty(remainder) and remainder.width >= 24.0 and remainder.height >= 9.5:
+        return _tuple(remainder)
+    return None
+
+
+def _fast_review_candidates(
+    item: ReviewItem,
+    page_rect: pymupdf.Rect,
+    same_row_cells: Sequence[RectTuple],
+) -> list[Placement]:
+    source = pymupdf.Rect(item.source_bbox)
+    text = _final_text(item)
+    max_width = max(
+        page_rect.width - 2 * FAST_REVIEW_PAGE_MARGIN_PT,
+        24.0,
+    )
+    base_width = min(
+        max(source.width * 1.35, 72.0),
+        page_rect.width * 0.28,
+        max_width,
+    )
+    widths = tuple(
+        dict.fromkeys(
+            (
+                base_width,
+                max(min(base_width * 0.75, max_width), 48.0),
+            )
+        )
+    )
+    raw: list[
+        tuple[str, pymupdf.Rect, float, bool, tuple[PointTuple, ...] | None]
+    ] = []
+    gap = 4.0
+
+    for font_size in FAST_REVIEW_FONT_SIZES:
+        for cell in same_row_cells:
+            raw.append(
+                ("same_row_cell", pymupdf.Rect(cell), font_size, True, None)
+            )
+        for width in widths:
+            lines = wrap_text(text, max(width - 4.0, 1.0), font_size)
+            height = max(
+                font_size * 1.35 * max(len(lines), 1) + 3.0,
+                font_size + 4.0,
+            )
+            for ring in range(3):
+                horizontal = ring * max(width * 0.35, 18.0)
+                vertical = ring * max(height * 0.8, 10.0)
+                positions = (
+                    (
+                        "near_right" if ring == 0 else f"near_right_{ring}",
+                        pymupdf.Rect(
+                            source.x1 + gap + horizontal,
+                            source.y0,
+                            source.x1 + gap + horizontal + width,
+                            source.y0 + height,
+                        ),
+                    ),
+                    (
+                        "near_below" if ring == 0 else f"near_below_{ring}",
+                        pymupdf.Rect(
+                            source.x0,
+                            source.y1 + gap + vertical,
+                            source.x0 + width,
+                            source.y1 + gap + vertical + height,
+                        ),
+                    ),
+                    (
+                        "near_left" if ring == 0 else f"near_left_{ring}",
+                        pymupdf.Rect(
+                            source.x0 - gap - horizontal - width,
+                            source.y0,
+                            source.x0 - gap - horizontal,
+                            source.y0 + height,
+                        ),
+                    ),
+                    (
+                        "near_above" if ring == 0 else f"near_above_{ring}",
+                        pymupdf.Rect(
+                            source.x0,
+                            source.y0 - gap - vertical - height,
+                            source.x0 + width,
+                            source.y0 - gap - vertical,
+                        ),
+                    ),
+                )
+                raw.extend(
+                    (strategy, rect, font_size, True, None)
+                    for strategy, rect in positions
+                )
+
+    return _placements_from_raw(
+        item,
+        page_rect,
+        (),
+        raw,
+        semantic_region=page_rect,
+    )
+
+
+def _placement_text_fits(placement: Placement) -> bool:
+    body = pymupdf.Rect(placement.rect)
+    font = pymupdf.Font(fontname=TOOL_CJK_FONT)
+    required_height = placement.font_size * 1.35 * max(
+        len(placement.wrapped_lines),
+        1,
+    ) + 3.0
+    usable_width = max(body.width - 4.0, 0.0)
+    return required_height <= body.height + 1e-6 and all(
+        font.text_length(line, fontsize=placement.font_size)
+        <= usable_width + 1e-6
+        for line in placement.wrapped_lines
+    )
+
+
+def _fast_review_collision_count(
+    placement: Placement,
+    obstacles: _SpatialIndex[ProtectedGeometry],
+    existing: _SpatialIndex[Placement],
+) -> int:
+    body = placement.rect
+    query_rect = _expand(pymupdf.Rect(body), MIN_CLEARANCE_PT)
+    obstacle_count = sum(
+        _tuple_overlaps(body, obstacle.rect, MIN_CLEARANCE_PT)
+        for obstacle in obstacles.query(query_rect)
+    )
+    placement_count = sum(
+        _tuple_overlaps(body, other.rect, MIN_CLEARANCE_PT)
+        for other in existing.query(query_rect)
+    )
+    return obstacle_count + placement_count
+
+
+def _tuple_overlaps(
+    left: Sequence[float],
+    right: Sequence[float],
+    clearance: float = 0.0,
+) -> bool:
+    return (
+        left[0] < right[2] + clearance
+        and right[0] - clearance < left[2]
+        and left[1] < right[3] + clearance
+        and right[1] - clearance < left[3]
+    )
+
+
+def _fast_review_collisions(
+    page_index: int,
+    placement: Placement,
+    obstacles: _SpatialIndex[ProtectedGeometry],
+    existing: _SpatialIndex[Placement],
+) -> list[Collision]:
+    body = pymupdf.Rect(placement.rect)
+    body_tuple = placement.rect
+    query_rect = _expand(body, MIN_CLEARANCE_PT)
+    collisions = [
+        Collision(
+            page_index,
+            placement.item_id,
+            f"protected_{obstacle.kind}",
+            obstacle.object_id,
+        )
+        for obstacle in obstacles.query(query_rect)
+        if _tuple_overlaps(body_tuple, obstacle.rect, MIN_CLEARANCE_PT)
+    ]
+    for other in existing.query(query_rect):
+        if not _tuple_overlaps(body_tuple, other.rect, MIN_CLEARANCE_PT):
+            continue
+        collisions.extend(
+            (
+                Collision(
+                    page_index,
+                    placement.item_id,
+                    "new_annotation_overlap",
+                    other.item_id,
+                ),
+                Collision(
+                    page_index,
+                    other.item_id,
+                    "new_annotation_overlap",
+                    placement.item_id,
+                ),
+            )
+        )
+    return _deduplicate_collisions(collisions)
+
+
+def _fast_review_fallback(
+    item: ReviewItem,
+    page_rect: pymupdf.Rect,
+) -> Placement | None:
+    margin = min(
+        FAST_REVIEW_PAGE_MARGIN_PT, page_rect.width / 4, page_rect.height / 4
+    )
+    safe = _inset(page_rect, margin)
+    if not _nonempty(safe):
+        return None
+    width = min(max(safe.width * 0.24, 72.0), safe.width)
+    font_size = 5.0
+    lines = wrap_text(
+        _final_text(item),
+        max(width - 4.0, 1.0),
+        font_size,
+    )
+    height = min(
+        max(
+            font_size * 1.35 * max(len(lines), 1) + 3.0,
+            font_size + 4.0,
+        ),
+        safe.height,
+    )
+    source = pymupdf.Rect(item.source_bbox)
+    y0 = min(max(source.y0, safe.y0), safe.y1 - height)
+    rect = pymupdf.Rect(
+        safe.x1 - width,
+        y0,
+        safe.x1,
+        y0 + height,
+    )
+    candidates = _placements_from_raw(
+        item,
+        page_rect,
+        (),
+        [("page_edge_fallback", rect, font_size, False, None)],
+        semantic_region=page_rect,
+    )
+    if not candidates:
+        return None
+    if _placement_text_fits(candidates[0]):
+        return candidates[0]
+    # Preserve the full text in the editor; clipping is a human-review risk,
+    # not a reason to discard an item or abort the entire review document.
+    return _placements_from_raw(
+        item,
+        page_rect,
+        (),
+        [("page_edge_fallback", safe, font_size, False, None)],
+        semantic_region=page_rect,
+    )[0]
 
 
 def plan_document_layout(
@@ -1484,6 +2093,7 @@ __all__ = [
     "optimize_layout",
     "placement_signature",
     "plan_document_layout",
+    "plan_fast_review_layout",
     "rank_placements",
     "wrap_text",
 ]
