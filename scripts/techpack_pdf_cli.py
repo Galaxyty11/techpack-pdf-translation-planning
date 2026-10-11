@@ -29,12 +29,22 @@ def _parser() -> argparse.ArgumentParser:
     apply_parser.add_argument("source")
     apply_parser.add_argument("--review", required=True)
     apply_parser.add_argument("--output", required=True)
+    for name in ("recall-memory", "learn-memory"):
+        memory_parser = commands.add_parser(name, add_help=False)
+        memory_parser.add_argument("--job", required=True)
+        memory_parser.add_argument("--memory")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         arguments = _parser().parse_args(argv)
+        if arguments.command in {"recall-memory", "learn-memory"}:
+            from techpack_pdf.memory import DEFAULT_MEMORY_PATH, job_memory
+            result = job_memory(arguments.job, learn=arguments.command == "learn-memory",
+                                memory_path=arguments.memory or DEFAULT_MEMORY_PATH)
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return 0
         if arguments.command == "analyze":
             result = analyze(arguments.source, arguments.glossary, arguments.job_dir)
         elif arguments.command == "prepare-review":
