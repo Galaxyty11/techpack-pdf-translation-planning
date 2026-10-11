@@ -228,7 +228,7 @@ def validate_translation_response(request: Any, response: Any, glossary: Glossar
     ]
 
 
-def translation_cache_key(request: Any, glossary_sha256: str, prompt_version: str, host: str, model: str, execution_mode: str, job_id: str | None = None) -> str:
+def translation_cache_key(request: Any, glossary_sha256: str, prompt_version: str, host: str, model: str, execution_mode: str, job_id: str | None = None, *, memory_sha256: str | None = None) -> str:
     """Hash request items and provenance without needless known-model job scoping."""
     try:
         payload, _ = _decode_input(request)
@@ -256,6 +256,10 @@ def translation_cache_key(request: Any, glossary_sha256: str, prompt_version: st
     ]
     if normalized_model == "unknown":
         material.append(["job_id", job_id])
+    if memory_sha256 is not None:
+        if not isinstance(memory_sha256, str) or not re.fullmatch(_SHA256, memory_sha256):
+            raise ValueError("memory_sha256 must be a lowercase SHA-256 digest")
+        material.append(["memory_sha256", memory_sha256])
     return hashlib.sha256(_canonical_json(material).encode("utf-8")).hexdigest()
 
 

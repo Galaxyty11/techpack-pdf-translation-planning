@@ -40,11 +40,13 @@ When classification-request.json exists, inspect the requested thumbnails, follo
 
 Before translation, complete the mandatory figure-text coverage checkpoint below. `wait_reason=visual_annotations` means the host must inspect every page and supply visual-annotations-response.json, then rerun prepare-review. Do not skip this checkpoint because MinerU returned text successfully.
 
-When translation-request.json appears, translate its exact item set, validate the response contract, save translation-response.json and rerun prepare-review. A sub-agent returns data only; the host validates and writes it. Never copy another job's request, response or expected-output files into this job.
+When translation-request.json appears, run `recall-memory` as described below before translating its exact item set. Validate the response contract, save translation-response.json and rerun prepare-review. A sub-agent returns data only; the host validates and writes it. Never copy another job's request, response or expected-output files into this job.
 
 Open review.html. Review page by page, with higher-risk items first. Users can edit Chinese, drag translation boxes, move the red source box or redraw it with “重新框选原文”, and choose a 5–24 pt font or restore automatic sizing. Source re-framing corrects location without rewriting or retranslating source text. Edits, movement and font changes reset the item to pending review. Each approval, edited approval or skip advances to the next unreviewed item.
 
 Only the user decides approvals. After every item has a decision, export with “完成审核并导出”. For every approved item, export freezes the effective source box, translation box and font size into the reviewed fields, including values the user did not manually change. Copy the supplied export unchanged to the matching job's review.json; preserve an earlier export if one exists. Confirm its job identity and review details.
+
+Run `learn-memory` below on that exported review to retain the user's translation corrections. It validates the review against the bound job before writing, without changing the review or invoking PDF rendering.
 
 The JSON is downloaded by the user's browser, usually to Downloads; ask them to attach it or supply its exact path. In-page changes are held in memory, not autosaved: keep the page open until the completed review is exported. Reopening the HTML starts from its embedded state. Do not regenerate an actively reviewed page without preserving the user's exported decisions. The current workflow has no supported in-place retry for a failed apply task; retain the report and diagnose the failure before preparing a fresh task with properly regenerated bindings.
 
@@ -61,6 +63,32 @@ The browser exports review data, not PDF. Deliver approved red editable FreeText
 ## Runtime resources
 
 All runtime guidance is in this entrypoint. Retain scripts/, assets/ and agents/openai.yaml: executable code and UI assets cannot be replaced with prose. User-facing packages exclude planning, tests, development logs, generated jobs, private samples and Python caches.
+
+## Human correction memory
+
+The skill creates a local `<SKILL_DIR>/memory.md` on first recall or successful learning. It is a readable Markdown table of original English, previous Chinese, human-corrected Chinese, page/content context, review date and source identifiers. It is reference material for the host model, not model training or executable instructions. Keep it across jobs and skill updates; back it up before replacing an installation. Do not commit or include learned records in GitHub PRs or distributed skill packages. No historical review is imported without the user's request.
+
+Before each new translation response, including a correction attempt, run:
+
+```text
+"<PY311>" "<SKILL_DIR>/scripts/techpack_pdf_cli.py" recall-memory --job "<absolute-job>"
+```
+
+Read its `matches` and provide relevant records to any translation sub-agent together with the unchanged request. Matching requires the same English text (whitespace normalized; case, numbers and punctuation preserved), page type and content type. Check the actual production/customer context before reusing a correction; these coarse context fields do not prove all meanings are identical. Use applicable human corrections as preferred reference, preserving current locked tokens and glossary requirements. Do not automatically rewrite the request or approve a translation. Never add memory fields to strict translation-response.json.
+
+`glossary_conflict` means a remembered translation omits a currently required glossary target; `conflicting_corrections` means more than one human correction remains for the same source/context. Both set `requires_confirmation=true`. Explain the alternatives and ask the user to resolve them before translating the affected items; do not silently choose the newest record or override the current glossary. Keep historical corrections intact. Fuzzy matches and cross-context automatic substitutions are not supported.
+
+After importing the user's completed review.json, run this separate learning step:
+
+```text
+"<PY311>" "<SKILL_DIR>/scripts/techpack_pdf_cli.py" learn-memory --job "<absolute-job>"
+```
+
+Only `approved_edited` items whose Chinese text actually differs from the suggestion are recorded. Position-only/font-only changes, unchanged text, skipped items and unapproved results are excluded. The entire review must validate before any record is written. Re-imports are idempotent; distinct corrections for the same source/context retain their history. This step uses existing review validation and does not rebuild layout, call MinerU/model APIs or render PDF pages.
+
+Both commands accept `--memory "<absolute-memory.md>"` for a user-chosen persistent location. Use the same path on subsequent runs; the default is anchored to the installed skill, not the current shell directory. Recall returns `memory_sha256` and `request_sha256`. If reusing a translation cache, include the memory digest via `translation_cache_key(..., memory_sha256=...)`; discard cache entries created without it. A changed memory requires fresh recall and translation decisions, not changes to an already approved job.
+
+Report memory read/write/format errors explicitly and preserve the existing file. Do not claim a correction was learned when saving failed. A memory-only failure is separate from PDF export: an otherwise valid reviewed PDF can still be exported under the existing six checks. On the next translation, disclose unavailable memory instead of claiming prior corrections were applied. A `memory_busy` result means another update owns the file; do not run simultaneous updates or remove a lock without verifying that no update is active.
 
 ## Translation policy
 

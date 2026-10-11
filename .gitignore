@@ -16,3 +16,8 @@ planning/
 *.zip
 .env
 .env.*
+
+# Local human-reviewed translations must not be published with the skill.
+memory.md
+memory.md.lock
+.memory-*.tmp
